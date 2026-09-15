@@ -14,9 +14,13 @@ How does uncertainty about volatility enter the value of a European call?
 Assume a pricing model with risk-neutral drift $r$, constant annual variance $v$,
 and $S_T=S_0e^{(r-v/2)T+\sqrt{vT}Z}$. The variance posterior is informed by
 conditionally mean-zero historical innovations with variance $v\Delta t$.
-Under $v\sim IG(a_0,d_0)$, derive $a_1=a_0+n/2$ and
+Under an $IG(a_0,d_0)$ prior restricted to $0<v<1$, derive $a_1=a_0+n/2$ and
 $d_1=d_0+\sum_i e_i^2/(2\Delta t)$. We explicitly assume the same variance
 parameter in estimation and pricing; no volatility-risk premium is estimated.
+The variance bound means annual volatility is below 100%. This assumption
+ensures a finite second moment for the simulated lognormal call payoff and
+justifies the usual MCSE calculation. The posterior retains the same bound;
+its kernel has the updated Inverse-Gamma parameters.
 
 ## Core assignment
 
@@ -42,12 +46,16 @@ import matplotlib.pyplot as plt
 
 SEED, N, S = 2026, 252, 30000
 DT, HORIZON = 1/252, 0.5
-SPOT, STRIKE, RATE, TRUE_VAR = 100.0, 100.0, 0.02, 0.04
+SPOT, STRIKE, RATE, TRUE_VAR, VAR_MAX = 100.0, 100.0, 0.02, 0.04, 1.0
 rng = np.random.default_rng(SEED)
 innovations = rng.normal(0, np.sqrt(TRUE_VAR*DT), N)
 a0, d0 = 4.0, 0.12
 a1, d1 = a0+N/2, d0+innovations @ innovations/(2*DT)
-variance = 1/rng.gamma(a1, 1/d1, S)
+variance_base = stats.invgamma(a1, scale=d1)
+retained_mass = variance_base.cdf(VAR_MAX)
+variance = variance_base.ppf(rng.uniform(0, retained_mass, S))
+mean_variance = (d1/(a1-1)
+                 * stats.invgamma.cdf(VAR_MAX, a1-1, scale=d1)/retained_mass)
 z = rng.standard_normal(S)
 terminal = SPOT*np.exp((RATE-variance/2)*HORIZON + np.sqrt(variance*HORIZON)*z)
 payoffs = np.exp(-RATE*HORIZON)*np.maximum(terminal-STRIKE, 0)
@@ -58,7 +66,7 @@ def conditional_call(v: np.ndarray | float, spot: float, strike: float, rate: fl
     return spot*stats.norm.cdf(d_1)-strike*np.exp(-rate*horizon)*stats.norm.cdf(d_1-sd)
 
 prices = conditional_call(variance, SPOT, STRIKE, RATE, HORIZON)
-plugin_price = conditional_call(d1/(a1-1), SPOT, STRIKE, RATE, HORIZON)
+plugin_price = conditional_call(mean_variance, SPOT, STRIKE, RATE, HORIZON)
 table = pd.DataFrame({'value': [payoffs.mean(), prices.mean(), plugin_price],
                       'MCSE': [payoffs.std(ddof=1)/np.sqrt(S),
                                prices.std(ddof=1)/np.sqrt(S), 0]},
@@ -94,10 +102,10 @@ parameter uncertainty. Neither interval is a prediction interval for the option 
 
 ```{python}
 fig, ax = plt.subplots(figsize=(6, 4))
-ax.hist(prices, bins=60, density=True, color='steelblue', alpha=0.7, label='predictive price distribution')
+ax.hist(prices, bins=60, density=True, color='steelblue', alpha=0.7, label='posterior distribution of conditional price')
 ax.axvline(plugin_price, color='black', ls=':', label='plug-in price')
 ax.set(xlabel='conditional call price', ylabel='density',
-       title='Predictive price distribution against the plug-in price')
+       title='Posterior conditional prices and the plug-in value')
 ax.legend()
 plt.tight_layout()
 plt.show()
@@ -119,12 +127,13 @@ The following items extend this week's vanilla Monte Carlo option-pricing simula
 1. Extend the simulator above to a European put option with the same strike and horizon,
    and report its nested-simulation price, its conditional-expectation price and its
    plug-in price, alongside the MCSE for each Monte Carlo estimate.
-2. Sensitivity check: halve $a_0$ so the variance posterior is twice as uncertain, rerun
-   the simulator, and report how the gap between the conditional-expectation price and the
-   plug-in price responds. Repeat once more with $a_0$ doubled and summarise the pattern.
+2. Sensitivity check: use the first half of the observations with the same prior,
+   recompute the posterior, and compare its variance uncertainty and the gap between
+   the posterior-averaged and plug-in prices. Keep the number of simulation draws
+   fixed. A smaller sample does not imply an exact doubling of posterior uncertainty.
 3. Derive the number of simulations $S$ needed so that the MCSE of the conditional-expectation
    price falls below one cent, using the sample standard deviation of `prices` from the
    reference implementation, then confirm your value by rerunning the simulator at that $S$.
 4. A trading desk will only quote the option if the 95% interval across conditional prices
    is narrower than 0.50. Using the reference implementation's posterior interval, decide
-   whether the desk can quote at $a_0=4$, and repeat the check after halving $a_0$.
+   whether the desk can quote at $a_0=4$, and repeat the check using the first half of the observations with the same prior.

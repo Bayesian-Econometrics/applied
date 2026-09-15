@@ -150,6 +150,12 @@ vector of coefficients. Unknown variance adds a second unknown quantity.
 
 ## Formal framework and derivation {#sec-methodology}
 
+The main derivation is the completion of the matrix square: work through how
+it identifies the posterior centre, precision and variance update. For the
+Student-$t$ marginal, focus first on why averaging unknown variance changes
+coefficient uncertainty and how to use the resulting distribution. The full
+integration is included in an optional expandable derivation.
+
 ### From individual observations to the likelihood
 
 For $k$ coefficients, including an intercept when appropriate, write
@@ -328,31 +334,35 @@ harder. For computation, this sum avoids subtracting large, nearly equal numbers
 Use three illustrative observations, not financial data:
 
 $$X=\begin{pmatrix}1&-1\\1&0\\1&1\end{pmatrix},\qquad
-y=\begin{pmatrix}-1\\1\\3\end{pmatrix},\qquad
+y=\begin{pmatrix}-1\\2\\3\end{pmatrix},\qquad
 b_0=\begin{pmatrix}0\\1\end{pmatrix},\qquad B_0=I_2,\quad a_0=3,\quad d_0=2.$$
 
-The observations lie on the line with intercept 1 and slope 2. Calculate
+The observations scatter around their least-squares line, with intercept $4/3$
+and slope 2. Its residuals are $(-1/3,\,2/3,\,-1/3)$, so the OLS residual sum
+of squares is $2/3$. Even the best-fitting line leaves unexplained variation.
+Calculate
 
 $$X^\top X=\begin{pmatrix}3&0\\0&2\end{pmatrix},\qquad
-X^\top y=\begin{pmatrix}3\\4\end{pmatrix}.$$
+X^\top y=\begin{pmatrix}4\\4\end{pmatrix}.$$
 
 Adding prior information gives
 
 $$P_1=\begin{pmatrix}4&0\\0&3\end{pmatrix},\quad
 B_1=\begin{pmatrix}1/4&0\\0&1/3\end{pmatrix},\quad
-b_1=\begin{pmatrix}3/4\\5/3\end{pmatrix}.$$
+b_1=\begin{pmatrix}1\\5/3\end{pmatrix}.$$
 
-The intercept is $(1/4)0+(3/4)1$; the slope is $(1/3)1+(2/3)2$. Both move
+The intercept is $(1/4)0+(3/4)(4/3)=1$; the slope is $(1/3)1+(2/3)2$. Both move
 toward the sample estimates. This componentwise interpretation works because
 the design and prior precision matrices are diagonal. Finally,
 
-$$Q=11+1-\left(\frac94+\frac{25}3\right)=\frac{17}{12},\qquad
-a_1=\frac92,\qquad d_1=2+\frac{17}{24}=\frac{65}{24}.$$
+$$Q=14+1-\left(4+\frac{25}3\right)=\frac83,\qquad
+a_1=\frac92,\qquad d_1=2+\frac43=\frac{10}3.$$
 
-Even though the three observations fit a line exactly, posterior noise variance
-is not zero. The prior remains informative in this tiny sample.
+At the posterior centre, the residual sum of squares is $11/9$ and the prior
+penalty is $13/9$. Their sum is $Q=8/3$. The variance update reflects both
+unexplained variation and the compromise between the sample and the prior.
 
-**Check your understanding.** Recover $Q=17/12$ using residuals at $b_1$ and
+**Check your understanding.** Recover $Q=8/3$ using residuals at $b_1$ and
 the prior penalty. Which matrix would cease to be diagonal if the explanatory
 variable were not centred at zero?
 
@@ -363,6 +373,30 @@ an answer that averages over its uncertainty:
 
 $$p(\beta\mid y,X)=\int_0^\infty
 p(\beta\mid\sigma^2,y,X)p(\sigma^2\mid y,X)\,d\sigma^2.$$
+
+Some plausible noise variances imply narrow Normal distributions for the
+coefficients and others imply wide ones. Averaging them leaves more tail
+probability than fixing variance at its posterior mean. This mixture is a
+**Student-$t$ distribution**: its heavier tails account for uncertainty about
+how noisy the observations are.
+
+With $t_\nu(m,S)$ denoting a Student-$t$ with centre $m$ and **scale matrix** $S$,
+the result is
+
+$$\boxed{\beta\mid y,X\sim t_{2a_1}\left(b_1,\frac{d_1}{a_1}B_1\right).}$$
+
+Each coefficient has a univariate marginal:
+
+$$\beta_j\mid y,X\sim t_{2a_1}\left(b_{1j},
+\text{scale}=\sqrt{\frac{d_1}{a_1}B_{1,jj}}\right).$$
+
+The scale is not the standard deviation. When $a_1>1$,
+
+$$E[\beta\mid y,X]=b_1,\qquad
+\operatorname{Var}(\beta\mid y,X)=\frac{d_1}{a_1-1}B_1.$$
+
+::: {.callout-note collapse="true"}
+## Optional derivation: integrate out the variance {.unnumbered}
 
 Let $q=(\beta-b_1)^\top B_1^{-1}(\beta-b_1)$. Multiplying the densities inside
 the integral gives, apart from constants independent of $\beta$,
@@ -377,30 +411,15 @@ then makes the dependence on $\beta$ explicit:
 $$p(\beta\mid y,X)\propto
 \left[1+\frac{q}{2d_1}\right]^{-(2a_1+k)/2}.$$
 
-This is the multivariate Student-$t$ kernel. With $t_\nu(m,S)$ denoting a
-Student-$t$ with centre $m$ and **scale matrix** $S$,
-
-$$\boxed{\beta\mid y,X\sim t_{2a_1}\left(b_1,\frac{d_1}{a_1}B_1\right).}$$
-
-Each coefficient has a univariate marginal:
-
-$$\beta_j\mid y,X\sim t_{2a_1}\left(b_{1j},
-\text{scale}=\sqrt{\frac{d_1}{a_1}B_{1,jj}}\right).$$
-
-The scale is not the standard deviation. When $a_1>1$,
-
-$$E[\beta\mid y,X]=b_1,\qquad
-\operatorname{Var}(\beta\mid y,X)=\frac{d_1}{a_1-1}B_1.$$
-
-Some plausible noise variances imply narrow Normal distributions for the
-coefficients and others imply wide ones. Averaging them leaves more tail
-probability than fixing variance at its posterior mean.
+Matching this kernel with a multivariate Student-$t$ gives degrees of freedom
+$2a_1$ and scale matrix $(d_1/a_1)B_1$, as stated above.
+:::
 
 ```{python}
 #| label: fig-regression-t-marginal
 #| fig-cap: "The hand example: integrating unknown variance yields a Student-t for the slope. The dashed Normal fixes variance at its posterior mean. The right panel enlarges the upper tail."
 #| code-fold: true
-hand_a, hand_d = 4.5, 65 / 24
+hand_a, hand_d = 4.5, 10 / 3
 hand_mean, hand_B = 5 / 3, 1 / 3
 hand_t = stats.t(2 * hand_a, loc=hand_mean,
                    scale=np.sqrt(hand_d / hand_a * hand_B))
