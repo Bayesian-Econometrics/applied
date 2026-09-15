@@ -3,37 +3,79 @@ title: "Metropolis-Hastings and NUTS sampling"
 subtitle: "Lecture 5"
 ---
 
-::: {.callout-tip}
-## Exercise session
-Practise the derivation and implementation in [Week 5: HMC versus MH](../exercise-sessions/05-metropolis-hastings-nuts.qmd).
+## Overview
+
+By the end of this lecture you can sample any posterior you are able to evaluate
+up to a constant, with no conjugacy, no envelope and no recognisable conditional
+anywhere in the model.
+
+::: {.callout-important}
+## The result of this chapter
+
+Let $\kappa(\theta \mid y)$ be a kernel of the target, known only up to its
+normalising constant, and let $q(\theta' \mid \theta)$ be any density from which
+we can draw. Proposing $\theta' \sim q(\cdot \mid \theta)$ and accepting it with
+
+$$
+\alpha(\theta, \theta') = \min\left\{1,\;
+\frac{\kappa(\theta' \mid y)\, q(\theta \mid \theta')}
+     {\kappa(\theta \mid y)\, q(\theta' \mid \theta)}\right\}
+$$
+
+gives a Markov chain whose stationary distribution is the target, whatever the
+proposal is. The unknown constant cancels from the ratio, so correctness costs
+nothing; the entire difficulty moves into the choice of $q$, which decides how far
+the chain travels per unit of computation and therefore how many independent draws
+a run is worth.
 :::
 
-## One posterior, one last time
+After working through this chapter you can
 
-Lecture 3 sampled the Student-$t$ posterior for the monthly equity premium by importance
-sampling and by rejection, and both worked only because a proposal with heavy enough tails
-could be found by hand for a three-dimensional target. Lecture 4 sampled the same
-posterior without any proposal at all, by adding one latent scale per observation until
-every full conditional had a name, and paid for it with four hundred and thirty-nine extra
-unknowns and slow mixing in the degrees of freedom. Each needed something particular about
-the problem: a proposal we could construct, or conditionals that happened to be
-recognisable.
+1. diagnose why a non-standard full conditional cannot be handled by
+   discretisation once the block has more than one or two components;
+2. derive the acceptance probability from the detailed balance equation, rather
+   than quoting it;
+3. derive the Jacobian correction that a reparameterisation of a constrained
+   parameter contributes to the acceptance ratio;
+4. implement a random walk, an independence sampler, Hamiltonian Monte Carlo and
+   the no-U-turn sampler on the same posterior;
+5. diagnose convergence and precision with trace plots, $\hat R$, the effective
+   sample size and the Monte Carlo standard error;
+6. compare samplers by effective draws per second, and say for which class of
+   models the ranking reverses.
 
-Metropolis-Hastings needs neither. It builds a Markov chain whose stationary distribution
-is the target using only the ability to evaluate an unnormalised density at a point, and
-accepts any proposal mechanism that keeps the chain irreducible. That is the weakest
-requirement of any method in this course, which is why it survives into the models where
-nothing else does: the non-Gaussian state space models of Lecture 8, the variable
-selection posteriors of Lecture 11, and any Gibbs block whose conditional refuses to be a
-named distribution, including the $\nu$ block that Lecture 4 had to put on a grid.
+Week 5 of 15, paired with the [Week 5 exercise
+session](../exercise-sessions/05-metropolis-hastings-nuts.qmd). The chapter
+assumes the importance weights and effective sample size of Lecture 3 and the
+Gibbs sampler, the ergodic theorem and the latent scale mixture of Lecture 4.
 
-This chapter runs it on the same posterior as Lectures 3 and 4, with the latent variables
-removed again, so that $\theta = (\mu, \sigma, \nu)$ and $k = 3$. It develops the random
-walk and the independence proposal, the diagnostics that decide whether any chain may be
-believed, and then Hamiltonian Monte Carlo and the no-U-turn sampler, which use the
-gradient of the log posterior to propose moves a blind random walk could never make. It
-closes with the table this arc has been building towards since Lecture 3: effective draws
-per second for every method in the three chapters, on one posterior, on one machine.
+## Motivation: the one block Gibbs could not draw {#sec-motivation}
+
+The economic question is still the one Lecture 3 asked and Lecture 4 answered: how
+large is the average monthly excess return on the US market, how wide is an
+ordinary month, and how thick are the tails. The posterior of $(\mu, \sigma, \nu)$
+that answers it has now been computed twice, by weighted independent draws and by
+a Gibbs sampler, and both routes needed something the model was kind enough to
+provide. This chapter removes that kindness and asks what is left.
+
+Lecture 4 built a Gibbs sampler for the Student-$t$ posterior of the monthly
+equity premium by adding one latent scale per month, and three of its four blocks
+came out as named distributions: a Normal for the location, an inverse-Gamma for
+the scale, and $n$ independent Gammas for the latent weights. The fourth did not.
+The conditional of the degrees of freedom given the weights,
+
+$$
+\phi(\nu \mid w) \;\propto\; \phi(\nu)\,
+\left[\frac{(\nu/2)^{\nu/2}}{\Gamma(\nu/2)}\right]^{n}
+\exp\!\left\{\frac{\nu}{2}\left(\sum_{t=1}^n \log w_t - \sum_{t=1}^n w_t\right)\right\},
+$$
+
+has $\nu$ inside a Gamma function and in an exponent at the same time, and no
+choice of prior $\phi(\nu)$ repairs that. Lecture 4 got past it by evaluating the
+conditional on a grid of spacing $0.04$ and drawing from the resulting discrete
+distribution. The chunk below reconstructs that conditional from the actual $439$
+months, at three states of the latent weights that a Gibbs sweep might produce,
+and asks what it would take to draw from it without a grid.
 
 ```{python}
 from pathlib import Path
@@ -94,24 +136,231 @@ def log_kernel(mu, sigma, nu):
     return out
 
 
+fine = np.arange(2.005, 50.0, 0.01)
+a_f = fine / 2.0
+
+
+def nu_conditional(w):
+    """The Lecture 4 conditional phi(nu | w), normalised on a fine grid."""
+    S1, S2 = np.log(w).sum(), w.sum()
+    log_c = (n * (a_f * np.log(a_f) - gammaln(a_f)) + (a_f - 1.0) * S1 - a_f * S2
+             + nu_const - (fine - nu_lo) / nu_mean)
+    d = np.exp(log_c - log_c.max())
+    return d / np.trapezoid(d, fine)
+
+
+fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.6))
+for nu_s, colour in zip([4.0, 8.6, 20.0], ["steelblue", "darkorange", "firebrick"]):
+    z2_s = ((r - grid_mean[0]) / grid_mean[1]) ** 2       # weights as a sweep would draw them
+    w_s = rng.gamma((nu_s + 1) / 2, 2.0 / (nu_s + z2_s))
+    d_s = nu_conditional(w_s)
+    axes[0].plot(fine, d_s, color=colour, lw=1.2,
+                 label=fr"weights drawn at $\nu = {nu_s}$")
+axes[0].set_xlim(2, 30); axes[0].set_xlabel(r"$\nu$"); axes[0].set_ylabel("density")
+axes[0].legend(fontsize=8); axes[0].set_title(r"$\phi(\nu \mid w)$ at three states")
+
+z2_s = ((r - grid_mean[0]) / grid_mean[1]) ** 2
+w_s = rng.gamma((grid_mean[2] + 1) / 2, 2.0 / (grid_mean[2] + z2_s))
+S1, S2 = np.log(w_s).sum(), w_s.sum()
+dens = nu_conditional(w_s)
+m1 = np.trapezoid(fine * dens, fine)
+v1 = np.trapezoid(fine ** 2 * dens, fine) - m1 ** 2
+gam = stats.gamma(a=m1 ** 2 / v1, scale=v1 / m1)      # the best a Gamma can do
+axes[1].plot(fine, dens, color="darkorange", lw=1.2, label=r"$\phi(\nu \mid w)$, exact")
+axes[1].plot(fine, gam.pdf(fine), "k--", lw=1.2, label="moment-matched Gamma")
+axes[1].set_xlim(6, 12); axes[1].set_xlabel(r"$\nu$")
+axes[1].legend(fontsize=8); axes[1].set_title("The closest named density, found by gridding")
+plt.tight_layout(); plt.show()
+
 print(f"{n} months; log kappa at (0.009, 0.038, 8) = {log_kernel(0.009, 0.038, 8.0)[0]:.3f}"
       f"   (Lecture 3 reports 759.533)")
+print(f"E[nu | w] {m1:.4f}, sd {np.sqrt(v1):.4f}; "
+      f"moment-matched Gamma shape {m1 ** 2 / v1:.3f}, scale {v1 / m1:.4f}")
+print(f"grid points used to find that Gamma: {fine.size:,}")
+print(f"largest density gap {np.abs(dens - gam.pdf(fine)).max():.4f}, "
+      f"total variation distance {0.5 * np.trapezoid(np.abs(dens - gam.pdf(fine)), fine):.4f}")
 ```
 
-The kernel is Lecture 3's, character for character, and the printed value is the
-regression test that says so. Everything in this chapter is an algorithm wrapped around
-that one function.
+The left panel is the conditional Lecture 4 had to grid, drawn at three states of
+the latent weights. It is a different density each time, narrow and far from the
+prior, and it moves bodily as the weights move, which is the first thing to
+notice: there is nothing to derive once and reuse, and the sampler faces a fresh
+unnamed density at every sweep. The right panel is the awkward part of the honest
+answer. At the state closest to the posterior the conditional happens to be very
+close to a Gamma, with the moment-matched one differing from it by at most
+$0.0008$ in density and $0.0006$ in total variation distance, so a Gibbs step that
+drew from that Gamma would be nearly right. But the shape and scale of that Gamma
+were obtained by evaluating the conditional on $4{,}800$ grid points and
+integrating, which is the very work the substitution was supposed to avoid, and
+the quality of the match is a property of this state and this sample size rather
+than a theorem. Nothing in the algebra promises it, nothing checks it during a
+run, and any error it leaves is a bias in the stationary distribution, which does
+not shrink as sweeps accumulate.
 
-## Result: Metropolis-Hastings
+So the grid stays, and the grid is the problem. It worked because $\nu$ is one
+bounded scalar, and the models from Lecture 6 onwards are full of blocks that are
+neither. A covariance matrix, a vector of forty autoregressive coefficients, a
+block of inclusion indicators: none of these can be enumerated, and some of them
+have conditional supports that shift as the other blocks move. The same obstacle
+arrives from the other direction whenever the likelihood itself is non-conjugate,
+as it is for every limited dependent variable model, every probit and logit, and
+the stochastic volatility measurement equation of Lecture 12: there the trouble is
+not one awkward block among four but the absence of any block that completes the
+square. The question this lecture answers is what to do when a block has to be
+updated and nothing in the toolkit can draw from its conditional, and the first
+step is to count exactly what the grid would cost.
+
+## The problem: what a non-standard full conditional costs {#sec-problem}
+
+### Result R-5.1: the price of discretising a conditional
+
+Let a block $\theta_b$ of dimension $d$ have a full conditional
+$\phi(\theta_b \mid \theta_{-b}, y) \propto \kappa_b(\theta_b)$ supported on a box
+of side $R$, with $\kappa_b$ available pointwise but from no named family.
+Replace the exact draw by a draw from the discrete distribution that puts mass
+proportional to $\kappa_b$ on the points of a product grid of spacing $h$. Then
+
+$$
+\#\{\text{kernel evaluations per sweep}\} = \left(\frac{R}{h}\right)^{\!d},
+$$
+
+which is exponential in the dimension of the block, and for a twice continuously
+differentiable $\kappa_b$ the griddy draw targets a distribution whose
+expectations satisfy
+
+$$
+\mathbb{E}_h[g(\theta_b)] - \mathbb{E}[g(\theta_b)] = O(h^2)
+$$
+
+for bounded smooth $g$, an error that does not decrease with the number of sweeps.
+The bound is a worst case over the box: every correction term beyond it involves
+derivatives at the two ends of the range, so when the conditional and its
+derivatives are already negligible there the realised error is far smaller than
+$h^2$.
+Moreover, if the support of the block depends on $\theta_{-b}$, the grid and its
+normalising sum must be rebuilt at every sweep, and a grid fixed in advance
+targets the wrong conditional.
+
+::: {.callout-note collapse="true"}
+## Derivation
+
+The counting statement is immediate: a product grid of spacing $h$ on a box of
+side $R$ in $d$ dimensions has $(R/h)^d$ points, and the discrete distribution
+requires $\kappa_b$ at each of them before a single draw can be taken, at every
+sweep, because $\theta_{-b}$ has changed.
+
+For the bias, write $I(g) = \int g\kappa_b / \int \kappa_b$ for the exact
+expectation and $I_h(g)$ for the grid version, in which both integrals are
+replaced by midpoint sums over the grid. The midpoint rule applied to a twice
+continuously differentiable integrand $f$ on a box has error
+
+$$
+h^d\sum_{j} f(x_j) - \int f(x)\,dx = \frac{h^{2}}{24}\int \nabla^2 f(x)\,dx + O(h^4),
+$$
+
+so numerator and denominator are each correct to order $h^2$. A ratio of two
+quantities each accurate to $O(h^2)$ is accurate to $O(h^2)$, by expanding
+$(A + a h^2)/(B + b h^2) = A/B + (a - Ab/B)h^2/B + O(h^4)$, which is the second
+display. The Euler-Maclaurin expansion of the same sum writes every further term
+as a difference of derivatives of $f$ evaluated at the two ends of the interval,
+and $\int \nabla^2 f$ is itself such a difference, so an integrand whose
+derivatives vanish at both ends loses the $h^2$ term as well and converges much
+faster than the bound. That is a property of the particular conditional, not
+something a sampler can rely on. The error is a property of the stationary distribution the griddy chain
+actually has, not of the finite run, so no number of sweeps removes it; only a
+smaller $h$ does, at the cost given by the first display.
+
+For the support statement, note that the griddy step is a valid Gibbs update only
+if the discrete distribution is the conditional restricted to the grid. If the
+conditional's support is a set $\mathcal{S}(\theta_{-b})$ that moves with the
+other blocks, a fixed grid places mass outside the current support, where
+$\kappa_b$ is zero or undefined, and leaves mass unplaced inside it. Either way
+the update no longer has the conditional as its distribution, and the invariance
+argument of Lecture 4, which needed exactly that, fails.
+:::
+
+The exponent in the first display is the same exponent that Result R-4.1 charged
+for a fixed proposal, arrived at from the other direction, and it is what makes
+discretisation a scalar trick rather than a method. The chunk below measures both
+halves of the result on the conditional of @sec-motivation, where the exact answer
+is available to compare against.
+
+```{python}
+def griddy_mean(h):
+    gr = np.arange(nu_lo + h / 2, nu_hi, h)
+    ag = gr / 2.0
+    lp = (n * (ag * np.log(ag) - gammaln(ag)) + (ag - 1.0) * S1 - ag * S2
+          + nu_const - (gr - nu_lo) / nu_mean)
+    p = np.exp(lp - lp.max()); p /= p.sum()
+    return float(p @ gr)
+
+
+exact = griddy_mean(0.0005)                       # reference, far finer than any grid used
+spacings = np.array([2.0, 1.0, 0.5, 0.25, 0.1, 0.04])
+errs = np.array([abs(griddy_mean(h) - exact) for h in spacings])
+
+fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.6))
+axes[0].loglog(spacings, np.maximum(errs, 1e-16), "o-", color="steelblue",
+               label="measured error")
+axes[0].loglog(spacings, errs[0] * (spacings / spacings[0]) ** 2, "k--", lw=1,
+               label=r"the $O(h^2)$ bound")
+axes[0].set_xlabel("grid spacing h"); axes[0].set_ylabel(r"error in $E[\nu \mid w]$")
+axes[0].legend(fontsize=9); axes[0].set_title("Discretisation bias")
+d = np.arange(1, 11)
+for R_h, colour in zip([20, 50, 100], ["steelblue", "darkorange", "firebrick"]):
+    axes[1].semilogy(d, float(R_h) ** d, color=colour, label=f"R/h = {R_h}")
+axes[1].axhline(1e9, color="black", ls=":", label="one billion evaluations")
+axes[1].set_xlabel("dimension d of the block")
+axes[1].set_ylabel("kernel evaluations per sweep")
+axes[1].legend(fontsize=8); axes[1].set_title("Cost of a product grid")
+plt.tight_layout(); plt.show()
+
+print(pd.DataFrame({"spacing": spacings, "grid points": (nu_hi - nu_lo) / spacings,
+                    "error in E[nu|w]": errs}).to_string(index=False,
+                    float_format=lambda v: f"{v:,.3e}"))
+```
+
+The left panel shows the bias falling below the bound and then below anything that
+matters. At a spacing of $2.0$ the griddy step misplaces
+$\mathbb{E}[\nu \mid w]$ by $0.28$, at $1.0$ by $0.005$, and by a spacing of
+$0.25$ the error is already smaller than the dashed $O(h^2)$ reference and beyond
+$0.1$ it is invisible, because this conditional and its derivatives are negligible
+at both ends of $(2, 50]$ and the leading term of Result R-5.1 drops out. Lecture
+4's choice of $0.04$ is therefore exact for every practical purpose, its bias
+being many orders of magnitude below the Monte Carlo standard error of $0.14$ that
+chapter reported for the same quantity. In one dimension, discretisation is a fine
+answer.
+
+The right panel prices the same accuracy in higher dimensions, and that is where
+the answer stops being fine. At the modest resolution of fifty points per
+coordinate, a three-dimensional block already needs $125{,}000$ kernel evaluations
+per sweep and a six-dimensional block more than fifteen billion, at every sweep of
+a run that needs tens of thousands of them.
+
+So the diagnosis is sharp. A grid is not a general substitute for a draw, and
+neither is a named approximation, which @sec-motivation showed puts an
+irremovable error into the answer. What is needed is a way of updating a block
+using only the ability to evaluate its density, at a cost that does not grow with
+the dimension of the block. That is what the acceptance ratio provides.
+
+## Methodology: any proposal, made correct {#sec-methodology}
+
+The repair keeps the idea of proposing and abandons the idea that the proposal has
+to be right. A candidate is drawn from a density of our choosing and then either
+accepted or rejected with a probability constructed so that the chain's stationary
+distribution is the target, whatever the proposal was.
+
+### Result R-5.2: Metropolis-Hastings
 
 ::: {.callout-important}
-## Result: the algorithm and its invariance
+## Result R-5.2
 
-Let $\kappa(\theta \mid y)$ be a kernel of the target posterior on $\mathbb{R}^k$, known
-only up to the constant $K(y)$, and let $q(\theta' \mid \theta)$ be any density from which
-we can draw, with $q(\theta' \mid \theta) > 0$ on a set rich enough to make the chain
-irreducible. Given the current state $\theta$, draw $\theta' \sim q(\cdot \mid \theta)$
-and set $\theta^{\text{new}} = \theta'$ with probability
+Let $\kappa(\theta \mid y)$ be a kernel of the target posterior on $\mathbb{R}^k$,
+known only up to the constant $K(y)$, and let $q(\theta' \mid \theta)$ be any
+density from which we can draw, with $q(\theta' \mid \theta) > 0$ on a set rich
+enough to make the chain irreducible. Given the current state $\theta$, draw
+$\theta' \sim q(\cdot \mid \theta)$ and set $\theta^{\text{new}} = \theta'$ with
+probability
 
 $$
 \alpha(\theta, \theta') = \min\left\{1,\;
@@ -119,43 +368,43 @@ $$
      {\kappa(\theta \mid y)\, q(\theta' \mid \theta)}\right\},
 $$
 
-and $\theta^{\text{new}} = \theta$ otherwise, recording the repeated state either way. The
-resulting chain satisfies detailed balance with respect to the posterior,
+and $\theta^{\text{new}} = \theta$ otherwise, recording the repeated state either
+way. The resulting chain satisfies detailed balance with respect to the posterior,
 
 $$
 \phi(\theta \mid y)\, p(\theta \to \theta') = \phi(\theta' \mid y)\, p(\theta' \to \theta),
 $$
 
-hence leaves the posterior invariant, and with irreducibility and aperiodicity converges
-to it from any start. The normalising constant $K(y)$ cancels from $\alpha$, and so does
-any constant factor in $q$.
+hence leaves the posterior invariant, and with irreducibility and aperiodicity
+converges to it from any start. The normalising constant $K(y)$ cancels from
+$\alpha$, and so does any constant factor in $q$.
 :::
 
 ::: {.callout-note collapse="true"}
 ## Derivation
 
-Detailed balance is sufficient for invariance: integrating both sides of the displayed
-equality over $\theta$ gives
+Detailed balance is sufficient for invariance: integrating both sides of the
+displayed equality over $\theta$ gives
 $\int \phi(\theta \mid y) p(\theta \to \theta')\, d\theta =
-\phi(\theta' \mid y)\int p(\theta' \to \theta)\, d\theta = \phi(\theta' \mid y)$, since the
-transition kernel integrates to one, and that is exactly the statement that a draw from
-the posterior maps to a draw from the posterior.
+\phi(\theta' \mid y)\int p(\theta' \to \theta)\, d\theta = \phi(\theta' \mid y)$,
+since the transition kernel integrates to one, and that is exactly the statement
+that a draw from the posterior maps to a draw from the posterior.
 
-Now derive $\alpha$ rather than assume it. For $\theta' \neq \theta$ the transition density
-is the proposal times the acceptance probability,
-$p(\theta \to \theta') = q(\theta' \mid \theta)\alpha(\theta, \theta')$, so detailed
-balance requires
+Now derive $\alpha$ rather than assume it. For $\theta' \neq \theta$ the
+transition density is the proposal times the acceptance probability,
+$p(\theta \to \theta') = q(\theta' \mid \theta)\alpha(\theta, \theta')$, so
+detailed balance requires
 
 $$
 \phi(\theta \mid y)\, q(\theta' \mid \theta)\, \alpha(\theta, \theta')
 = \phi(\theta' \mid y)\, q(\theta \mid \theta')\, \alpha(\theta', \theta).
 $$
 
-Suppose, without loss of generality, that the forward flow before correction is the larger
-one, $\phi(\theta \mid y) q(\theta' \mid \theta) \geq \phi(\theta' \mid y) q(\theta \mid
-\theta')$. Nothing forces us to reject the reverse move, and rejecting it would only slow
-the chain, so set $\alpha(\theta', \theta) = 1$. The equation then pins the forward
-probability down uniquely,
+Suppose, without loss of generality, that the forward flow before correction is
+the larger one, $\phi(\theta \mid y) q(\theta' \mid \theta) \geq \phi(\theta' \mid
+y) q(\theta \mid \theta')$. Nothing forces us to reject the reverse move, and
+rejecting it would only slow the chain, so set $\alpha(\theta', \theta) = 1$. The
+equation then pins the forward probability down uniquely,
 
 $$
 \alpha(\theta, \theta')
@@ -164,26 +413,29 @@ $$
 $$
 
 and the assumed inequality is exactly what makes it a probability. In the opposite
-ordering the roles swap and the same expression exceeds one, so capping at one covers
-both cases and gives the stated $\min$. Substituting the result back into the balance
-equation confirms it as an identity, since one of the two minima always equals one.
-Finally, $\phi(\theta \mid y) = \kappa(\theta \mid y)/K(y)$ appears once in the numerator
-and once in the denominator, so $K(y)$ cancels, which is the property that makes the
-method usable at all. Rejected moves must be recorded: the extra time the chain spends at
-$\theta$ is precisely what gives $\theta$ the frequency the posterior demands, and a chain
-that stored only accepted moves would target the wrong distribution.
+ordering the roles swap and the same expression exceeds one, so capping at one
+covers both cases and gives the stated $\min$. Substituting the result back into
+the balance equation confirms it as an identity, since one of the two minima
+always equals one. Finally, $\phi(\theta \mid y) = \kappa(\theta \mid y)/K(y)$
+appears once in the numerator and once in the denominator, so $K(y)$ cancels,
+which is the property that makes the method usable at all. Rejected moves must be
+recorded: the extra time the chain spends at $\theta$ is precisely what gives
+$\theta$ the frequency the posterior demands, and a chain that stored only
+accepted moves would target the wrong distribution.
 :::
 
 Validity is free: any $q$ keeping the chain irreducible gives the right stationary
-distribution. Efficiency is not, and depends entirely on $q$, which is what the rest of
-the chapter is about.
+distribution, and nothing in the argument mentions the dimension of $\theta$, so
+the exponential cost of Result R-5.1 does not appear. Efficiency is not free, and
+depends entirely on $q$.
 
 Two special cases name themselves. A symmetric proposal has
-$q(\theta' \mid \theta) = q(\theta \mid \theta')$, so the proposal terms cancel and
-$\alpha = \min\{1, \kappa(\theta')/\kappa(\theta)\}$, the original Metropolis algorithm:
-uphill moves are always accepted and a downhill move to a point half as probable is
-accepted half the time. An independence proposal has $q(\theta' \mid \theta) = q(\theta')$,
-not depending on the current state, and then
+$q(\theta' \mid \theta) = q(\theta \mid \theta')$, so the proposal terms cancel
+and $\alpha = \min\{1, \kappa(\theta')/\kappa(\theta)\}$, the original Metropolis
+algorithm: uphill moves are always accepted and a downhill move to a point half as
+probable is accepted half the time. An independence proposal has
+$q(\theta' \mid \theta) = q(\theta')$, not depending on the current state, and
+then
 
 $$
 \alpha(\theta, \theta') = \min\left\{1,\;
@@ -191,39 +443,32 @@ $$
 = \min\left\{1,\; \frac{w(\theta')}{w(\theta)}\right\},
 $$
 
-a ratio of exactly the importance weights of Lecture 3. The independence sampler is
-importance sampling turned into a chain, and it inherits importance sampling's central
-requirement, that $q$ must have tails at least as heavy as the target, for the same reason
-seen from a different angle: a state with a huge weight is a state the chain will not
-leave.
+a ratio of exactly the importance weights of Lecture 3. The independence sampler
+is importance sampling turned into a chain, and it inherits importance sampling's
+central requirement, that $q$ must have tails at least as heavy as the target, for
+the same reason seen from a different angle: a state with a huge weight is a state
+the chain will not leave.
 
-One more freedom, used constantly in practice, needs no new theory. If $P_1$ and $P_2$ are
-two transition kernels each leaving the posterior invariant, then applying them in
-sequence, or choosing between them at random at each sweep, also leaves it invariant, by
-the same composition argument used for the blocks of a Gibbs sweep in Lecture 4. This is
-what licenses a hybrid sampler: a Gibbs sweep in which one awkward block, such as the
-degrees of freedom of Lecture 4, is updated by a Metropolis-Hastings step while every
-other block keeps its exact draw, still targets the correct joint posterior.
+One more freedom, used constantly in practice, needs no new theory. If $P_1$ and
+$P_2$ are two transition kernels each leaving the posterior invariant, then
+applying them in sequence, or choosing between them at random at each sweep, also
+leaves it invariant, by the composition argument used for the blocks of a Gibbs
+sweep in Result R-4.2. This is what licenses a hybrid sampler: a Gibbs sweep in
+which one awkward block, such as the degrees of freedom of @sec-motivation, is
+updated by a Metropolis-Hastings step while every other block keeps its exact
+draw, still targets the correct joint posterior. The breakdown of Lecture 4 is
+repaired by replacing one line of the sweep.
 
-## Result: reparameterising a constrained parameter
+### Reparameterising a constrained parameter
 
-Our parameters are constrained. The scale must be positive and the degrees of freedom must
-lie in $(2, 50]$, so a Gaussian random walk in the original coordinates proposes
-impossible values and wastes them. The standard repair is to walk on an unconstrained
-scale, and the price is a Jacobian.
-
-::: {.callout-important}
-## Result: the acceptance ratio under a change of variables
-
-Let $\theta = g(\eta)$ be a smooth, invertible reparameterisation with Jacobian matrix
-$J(\eta) = \partial g/\partial \eta^\top$. The kernel of the induced target on the $\eta$
-scale is
-
-$$
-\kappa_\eta(\eta) = \kappa_\theta\big(g(\eta)\big)\, \big|\det J(\eta)\big| ,
-$$
-
-and a symmetric random walk in $\eta$ therefore accepts with
+Our parameters are constrained. The scale must be positive and the degrees of
+freedom must lie in $(2, 50]$, so a Gaussian random walk in the original
+coordinates proposes impossible values and wastes them. The standard repair is to
+walk on an unconstrained scale, and the price is a Jacobian. Let
+$\theta = g(\eta)$ be a smooth, invertible reparameterisation with Jacobian matrix
+$J(\eta) = \partial g/\partial \eta^\top$. The kernel of the induced target on the
+$\eta$ scale is $\kappa_\eta(\eta) = \kappa_\theta(g(\eta))\,|\det J(\eta)|$, so a
+symmetric random walk in $\eta$ accepts with
 
 $$
 \alpha = \min\left\{1,\;
@@ -231,34 +476,194 @@ $$
      {\kappa_\theta(g(\eta))\,|\det J(\eta)|}\right\}.
 $$
 
-For the transformations used here, $\sigma = e^{\ell}$ contributes $|d\sigma/d\ell| =
-\sigma$ and $\nu = 2 + e^{v}$ contributes $|d\nu/dv| = \nu - 2$, so the log acceptance
-ratio picks up $\log\sigma' - \log\sigma + \log(\nu' - 2) - \log(\nu - 2)$.
+::: {.callout-note collapse="true"}
+## Derivation
+
+The change-of-variables formula for densities states that if $\theta = g(\eta)$
+then the density of $\eta$ is $\phi_\eta(\eta) = \phi_\theta(g(\eta))|\det
+J(\eta)|$, because the probability of a small region must be the same however it
+is labelled, and $|\det J|$ is the factor by which $g$ stretches volume.
+Multiplying both sides by the unknown constant $K(y)$ gives the same statement for
+kernels. A symmetric random walk in $\eta$ has an acceptance ratio built from
+$\kappa_\eta$ alone, since the Gaussian proposal densities cancel, which is the
+displayed rule. For the scalar cases used here, $\sigma = e^{\ell}$ gives
+$d\sigma/d\ell = e^{\ell} = \sigma$, and $\nu = 2 + e^{v}$ gives $d\nu/dv = e^{v}
+= \nu - 2$, so the log acceptance ratio picks up
+$\log\sigma' - \log\sigma + \log(\nu' - 2) - \log(\nu - 2)$; a Fisher transform for
+a correlation would contribute $1 - \rho^2$ in the same way.
+:::
+
+The Jacobian is not an optional correction. Omitting it leaves a chain that runs
+perfectly happily and converges to the wrong distribution, one tilted by the factor
+$|\det J|$, which is among the most common bugs in applied MCMC code. The upper
+bound $\nu \le 50$ is left as a hard constraint rather than transformed away: the
+kernel returns $-\infty$ there, so such proposals are rejected automatically, and
+since the posterior of $\nu$ has essentially no mass near fifty this costs nothing.
+
+### Result R-5.3: Hamiltonian Monte Carlo
+
+A random walk explores blindly: it proposes in every direction with equal
+enthusiasm and relies on rejection to keep it near the posterior's mass. If the
+gradient of the log kernel is available, a proposal can follow the shape of the
+target instead.
+
+::: {.callout-important}
+## Result R-5.3
+
+Augment $\theta \in \mathbb{R}^k$ with a momentum $\rho \in \mathbb{R}^k$ and
+define the joint density
+$\pi(\theta, \rho) \propto \kappa(\theta \mid y)\exp(-\tfrac{1}{2}\rho^\top
+M^{-1}\rho)$, which factorises, so the $\theta$-marginal is exactly the posterior.
+With potential $U(\theta) = -\log\kappa(\theta \mid y)$ and kinetic energy
+$K(\rho) = \tfrac{1}{2}\rho^\top M^{-1}\rho$, the Hamiltonian is
+$H(\theta, \rho) = U(\theta) + K(\rho)$, and Hamilton's equations
+
+$$
+\frac{d\theta}{dt} = \frac{\partial H}{\partial \rho} = M^{-1}\rho,
+\qquad
+\frac{d\rho}{dt} = -\frac{\partial H}{\partial \theta} = \nabla \log \kappa(\theta \mid y)
+$$
+
+conserve $H$, so an exactly simulated trajectory of any length would be accepted
+with probability one. One iteration draws $\rho \sim \mathcal{N}(0, M)$, an exact
+draw from its conditional, runs $L$ leapfrog steps of size $\epsilon$, and accepts
+the endpoint with probability
+$\min\{1, \exp(H(\theta, \rho) - H(\theta^\ast, \rho^\ast))\}$. The leapfrog
+integrator is volume preserving and reversible, so no Jacobian appears and the
+proposal terms cancel, leaving only the energy error of the discretisation.
 :::
 
 ::: {.callout-note collapse="true"}
 ## Derivation
 
-The change-of-variables formula for densities states that if $\theta = g(\eta)$ then the
-density of $\eta$ is $\phi_\eta(\eta) = \phi_\theta(g(\eta))|\det J(\eta)|$, because the
-probability of a small region must be the same however it is labelled, and $|\det J|$ is
-the factor by which $g$ stretches volume. Multiplying both sides by the unknown constant
-$K(y)$ gives the same statement for kernels. A symmetric random walk in $\eta$ has an
-acceptance ratio built from $\kappa_\eta$ alone, since the Gaussian proposal densities
-cancel, which is the displayed rule. For the scalar cases used here, $\sigma = e^{\ell}$
-gives $d\sigma/d\ell = e^{\ell} = \sigma$, and $\nu = 2 + e^{v}$ gives $d\nu/dv = e^{v} =
-\nu - 2$; a Fisher transform for a correlation would contribute $1 - \rho^2$ in the same
-way. The Jacobian is not an optional correction. Omitting it leaves a chain that runs
-perfectly happily and converges to the wrong distribution, one tilted by the factor
-$|\det J|$, which is among the most common bugs in applied MCMC code.
+One leapfrog step of size $\epsilon$ is
+
+$$
+\rho_{t+\epsilon/2} = \rho_t + \tfrac{\epsilon}{2}\nabla\log\kappa(\theta_t),
+\qquad
+\theta_{t+\epsilon} = \theta_t + \epsilon M^{-1}\rho_{t+\epsilon/2},
+\qquad
+\rho_{t+\epsilon} = \rho_{t+\epsilon/2} + \tfrac{\epsilon}{2}\nabla\log\kappa(\theta_{t+\epsilon}).
+$$
+
+Each of the three sub-steps adds to one block a function of the other block alone,
+so its Jacobian matrix is triangular with a unit diagonal and determinant exactly
+one. A composition of volume-preserving maps is volume preserving, so the whole
+trajectory has unit Jacobian and contributes no factor to the acceptance ratio,
+unlike the reparameterisation above.
+
+Reversibility follows from the symmetry of the same three sub-steps: negate the
+final momentum, run the integrator $L$ steps again, and negate once more, and the
+map returns exactly to the starting point. Because the momentum distribution is
+symmetric about zero, the density of proposing $(\theta^\ast, \rho^\ast)$ from
+$(\theta, \rho)$ equals the density of the reverse proposal, so the proposal terms
+cancel from the Metropolis ratio just as they did for the symmetric random walk,
+and the ratio reduces to $\exp(H(\theta,\rho) - H(\theta^\ast,\rho^\ast))$. Were
+$H$ exactly conserved this would be one; it is not, because leapfrog is a
+second-order approximation whose energy error grows with $\epsilon^2$, and the
+Metropolis step removes the resulting bias exactly. Two implementation points
+follow from the algebra. Consecutive half-steps merge, so $L$ leapfrog steps need
+$L+1$ gradient evaluations rather than $2L$. And the mass matrix $M$ is a free
+preconditioner: taking $M^{-1}$ equal to the posterior covariance makes the
+trajectories traverse a well-conditioned surface, which is why a badly scaled
+model with $M = I$ can fail outright.
 :::
 
-The upper bound $\nu \le 50$ is left as a hard constraint rather than transformed away:
-the kernel returns $-\infty$ there, so such proposals are rejected automatically, and
-since the posterior of $\nu$ has essentially no mass near fifty this costs nothing. The
-next chunk codes the transformed target, and its gradient, which the Hamiltonian samplers
-below will need. The gradient is checked against a central difference, which is the only
-honest way to ship a hand-derived derivative.
+That last point is not academic on our posterior, where the three coordinates have
+posterior standard deviations differing by more than two orders of magnitude on
+the unconstrained scale. With $M = I$, a step size large enough to move $\nu$
+sends $\mu$ dozens of posterior standard deviations away, the energy error
+explodes and every proposal is rejected. The fix is to take
+$M^{-1} = \text{diag}(s_1^2, s_2^2, s_3^2)$ with $s_j$ the posterior standard
+deviations, which is equivalent to running the sampler in standardised
+coordinates. This is the same piece of information Lecture 3 extracted from the
+Laplace approximation to build its first proposal: every method in this arc needs
+a rough picture of the posterior's scale before it can be efficient, and only the
+use it makes of that picture differs.
+
+Two tuning constants remain, and they pull against each other. The step size
+$\epsilon$ controls the integrator's energy error, which grows quadratically in
+$\epsilon$ and eventually makes trajectories diverge, while the product
+$L\epsilon$ controls how far a proposal travels: too short and the sampler
+degenerates into an expensive random walk, too long and the trajectory curves back
+on itself and the extra gradients buy nothing. The no-U-turn sampler of Hoffman
+and Gelman (2014) removes the second of them. Instead of a fixed number of steps
+it grows the trajectory by repeated doubling, running leapfrog steps forward or
+backward in time at random, so the path becomes a balanced binary tree of length
+$2^j$ after $j$ doublings. Doubling stops when the trajectory starts to turn back
+on itself, detected by the two inner products
+
+$$
+(\theta^{+} - \theta^{-})^\top \rho^{-} < 0
+\qquad \text{or} \qquad
+(\theta^{+} - \theta^{-})^\top \rho^{+} < 0,
+$$
+
+where the superscripts mark the two ends of the current trajectory: either sign
+change means the ends have begun to approach each other, which is the U-turn the
+sampler is named for. Because a stopping rule that looked only forward would break
+reversibility and bias the chain, the criterion is checked for every
+sub-trajectory built along the way, and the next state is selected from the whole
+trajectory rather than taken from its endpoint. That selection is an
+auxiliary-variable argument. Introduce $u \mid \theta, \rho \sim \mathcal{U}(0,
+\exp\{-H(\theta,\rho)\})$; the triple $(\theta, \rho, u)$ is then uniform on the
+region under the joint density, and the candidate set, the trajectory points with
+$u \le \exp\{-H\}$, is exactly the set whose energy error relative to the start is
+not too large. Choosing the next state uniformly from that set leaves the joint
+density invariant, and the marginal of $\theta$ is the posterior. The same
+auxiliary-variable device is the basis of slice sampling, which the exercise
+session takes up as a proposal-free alternative to the griddy step.
+
+## Data: monthly US market excess returns, 1990 to 2026 {#sec-data}
+
+The dataset is the one Lectures 3 and 4 used and is not changed here: the monthly
+Fama-French factor file `data/ff_factors_monthly.parquet` from the Kenneth French
+data library, column `mkt_rf`, the excess return on the value-weighted US market
+portfolio over the one-month Treasury bill, from January 1990 to July 2026,
+$n = 439$ months. The model and priors are unchanged as well,
+$r_t \mid \mu, \sigma, \nu \sim t_\nu(\mu, \sigma)$ independently across months
+with $\mu \sim \mathcal{N}(0, 0.01^2)$, $\sigma^2 \sim \text{IG}(3, 0.0032)$ and
+$\nu - 2$ exponential with mean $10$ truncated to $(0, 48]$. The latent scales of
+Lecture 4 are gone: this chapter samples $\theta = (\mu, \sigma, \nu)$ directly,
+so $k = 3$.
+
+```{python}
+fig, ax = plt.subplots(figsize=(9, 3.6))
+ax.plot(sample.index, 100 * r, lw=0.8, color="steelblue")
+ax.axhline(0.0, color="black", lw=0.8)
+big = np.argsort(np.abs(r - r.mean()))[-4:]
+for i in big:
+    ax.annotate(f"{sample.index[i]:%b %Y}", (sample.index[i], 100 * r[i]),
+                textcoords="offset points", xytext=(4, 4 if r[i] > 0 else -10), fontsize=8)
+ax.set_xlabel("date"); ax.set_ylabel("monthly excess return, percent")
+ax.set_title("439 months of US market excess returns")
+plt.tight_layout(); plt.show()
+
+print(f"{n} months, {sample.index[0]:%Y-%m} to {sample.index[-1]:%Y-%m}")
+print(f"mean {r.mean():.5f}, sd {r.std(ddof=1):.5f}, "
+      f"worst {r.min():.4f}, best {r.max():.4f}, excess kurtosis {stats.kurtosis(r):.3f}")
+print(f"grid ground truth from Lecture 3: E[mu|r] {grid_mean[0]:.6f}, "
+      f"E[sigma|r] {grid_mean[1]:.6f}, E[nu|r] {grid_mean[2]:.6f}")
+```
+
+The four labelled months are the largest absolute moves in the window: October
+2008 at $-17.20$ percent, the crash of March 2020 and the rebound of April 2020,
+and August 1998. Months of that size are why the model has a $\nu$, why the
+posterior has the curved ridge that shows up in every figure below, and why the
+sample standard deviation of $0.0439$ overstates the scale $\sigma$ the model
+attributes to an ordinary month. The Lecture 3 grid values printed above are the
+ground truth against which every sampler in @sec-empirical is checked.
+
+## Empirical analysis: four samplers on one posterior {#sec-empirical}
+
+The random walk proposal is $\phi' = \phi + s \odot \varepsilon$ with
+$\varepsilon \sim \mathcal{N}(0, I_3)$ on the unconstrained scale
+$\phi = (\mu, \log\sigma, \log(\nu - 2))$ and $s$ a vector of step sizes, one per
+coordinate. The proposal is symmetric, so by Result R-5.2 the acceptance ratio is
+the ratio of transformed kernels and nothing else, the transformed kernel carrying
+the two Jacobian terms of @sec-methodology. We run it at a tenth of the base step,
+at the base step, and at eight times the base step, from the same poor starting
+value, which is the standard demonstration that step size is the whole game.
 
 ```{python}
 def log_target(phi):
@@ -269,47 +674,11 @@ def log_target(phi):
     return log_kernel(mu, sigma, nu)[0] + phi[1] + phi[2]     # + log Jacobians
 
 
-def grad_log_target(phi):
-    mu, sigma, nu = phi[0], np.exp(phi[1]), nu_lo + np.exp(phi[2])
-    z = (r - mu) / sigma
-    d = 1.0 + z ** 2 / nu
-    s1, s2 = (z / d).sum(), (z ** 2 / d).sum()
-    g_mu = (nu + 1) / (sigma * nu) * s1 - (mu - m_0) / s_0 ** 2
-    g_sigma = (-n / sigma + (nu + 1) / (sigma * nu) * s2
-               + 1.0 / sigma - 2 * (alpha_0 + 1) / sigma + 2 * delta_0 / sigma ** 3)
-    g_nu = (n * (0.5 * psi((nu + 1) / 2) - 0.5 * psi(nu / 2) - 0.5 / nu)
-            - 0.5 * np.log(d).sum() + (nu + 1) / (2 * nu ** 2) * s2 - 1.0 / nu_mean)
-    return np.array([g_mu, sigma * g_sigma + 1.0, (nu - nu_lo) * g_nu + 1.0])
-
-
 def to_theta(chain):
     """Map a chain on the phi scale back to (mu, sigma, nu)."""
     return np.column_stack([chain[:, 0], np.exp(chain[:, 1]), nu_lo + np.exp(chain[:, 2])])
 
 
-phi_test = np.array([0.009, np.log(0.038), np.log(6.0)])
-h = 1e-6
-fd = np.array([(log_target(phi_test + h * e) - log_target(phi_test - h * e)) / (2 * h)
-               for e in np.eye(3)])
-print("analytic gradient ", np.round(grad_log_target(phi_test), 6))
-print("finite difference ", np.round(fd, 6))
-```
-
-The analytic gradient and the finite difference agree to six decimals in every component,
-so the derivative below is the derivative of the density above and not of something
-nearby.
-
-## The random walk on this posterior
-
-The proposal is $\phi' = \phi + s \odot \varepsilon$ with
-$\varepsilon \sim \mathcal{N}(0, I_3)$ and $s$ a vector of step sizes, one per coordinate,
-because the three coordinates have posterior standard deviations differing by more than
-two orders of magnitude on the unconstrained scale. The proposal is symmetric, so the
-acceptance ratio is the ratio of transformed kernels and nothing else. We run it at a
-tenth of the base step, at the base step, and at eight times the base step, from the same
-poor starting value, which is the standard demonstration that step size is the whole game.
-
-```{python}
 def rw_metropolis(step, n_iter, rng, start, target=None):
     target = log_target if target is None else target
     phi = np.asarray(start, float)
@@ -350,28 +719,27 @@ axes[1].set_title("First 800 sweeps in the $(\\sigma, \\nu)$ plane")
 plt.tight_layout(); plt.show()
 ```
 
-The three traces are the textbook picture drawn on a real posterior. The tiny step accepts
-more than nine proposals in ten, and it does eventually leave the starting value of
-$\nu = 38$, but it then explores in steps so small that it makes excursions up to
-$\nu = 20$ lasting hundreds of sweeps, so its average over the last six thousand sweeps is
-$9.17$, well above the grid value, and would move noticeably if the chain were rerun: a
-high acceptance rate is a statement about local step size, not a certificate of
-convergence, and the $\hat R$ diagnostic below convicts this chain outright. The large
-step is rejected more than ninety-nine times in a hundred, so its trace is a staircase of
-long flat runs whose average rests on a few dozen distinct states, which is why it can
-land near the right answer without being worth anything. Only the middle step produces a
-stationary band around the Lecture 3 grid value from early on.
+The three traces are the textbook picture drawn on a real posterior. The tiny step
+accepts more than nine proposals in ten, and it does eventually leave the starting
+value of $\nu = 38$, but it then explores in steps so small that it makes
+excursions up to $\nu = 20$ lasting hundreds of sweeps, so its average over the
+last six thousand sweeps is $9.09$, well above the grid value, and would move
+noticeably if the chain were rerun: a high acceptance rate is a statement about
+local step size, not a certificate of convergence. The large step is rejected more
+than ninety-nine times in a hundred, so its trace is a staircase of long flat runs
+whose average rests on a few dozen distinct states, which is why it can land near
+the right answer without being worth anything. Only the middle step produces a
+stationary band around the Lecture 3 grid value from early on. The right panel
+shows the first eight hundred sweeps of each chain leaving the poor start and
+settling onto the curved $(\sigma, \nu)$ ridge that Lectures 3 and 4 both plotted,
+the middle chain already covering it while the tiny-step chain is still working
+its way down the upper arm. That geometry is why the step sizes have to be set per
+coordinate: a spherical proposal in the original units would be far too large for
+$\mu$ and far too small for $\nu$.
 
-The right panel shows the first eight hundred sweeps of each chain leaving the poor start
-and settling onto the curved $(\sigma, \nu)$ ridge that Lectures 3 and 4 both plotted, the
-middle chain already covering it while the tiny-step chain is still working its way down
-the upper arm. That geometry is the reason the step sizes have to be set per coordinate: a
-spherical proposal in the original units would be far too large for $\mu$ and far too
-small for $\nu$.
-
-The standard target for a random walk is an acceptance rate between roughly $0.2$ and
-$0.4$, which balances moving far against being accepted. The base step sits in that range,
-so we run it properly and check it against the ground truth.
+The standard target for a random walk is an acceptance rate between roughly $0.2$
+and $0.4$, which balances moving far against being accepted. The base step sits in
+that range, so we run it properly and check it against the ground truth.
 
 ```{python}
 def acf(x, max_lag):
@@ -410,40 +778,34 @@ print(rw_table.to_string(float_format=lambda v: f"{v:,.6f}"))
 ```
 
 Eighteen thousand kept sweeps reproduce the Lecture 3 grid posterior on all three
-parameters, every mean sitting within half a Monte Carlo standard error of the grid value,
-which is the only check that matters before anything else is discussed. They are worth
-between seven hundred and eleven hundred independent draws, so the chain spends between
-sixteen and twenty-six dependent sweeps per independent draw, and the Monte Carlo standard
-errors say that two significant digits on each posterior mean are safe and a third is
-not.
+parameters, every mean sitting within about one Monte Carlo standard error of the
+grid value, which is the only check that matters before anything else is
+discussed. They are worth between $645$ and $918$ independent draws, so the chain
+spends between twenty and twenty-eight dependent sweeps per independent draw, and
+the Monte Carlo standard errors say that two significant digits on each posterior
+mean are safe and a third is not.
 
-## Diagnosing the output
-
-Three diagnostics decide whether a chain may be quoted, and all three have appeared
-already in pieces. The autocorrelation function measures how long the chain remembers,
-the effective sample size of Lecture 4 converts that into a number of independent draws,
-and the Monte Carlo standard error $\hat\sigma/\sqrt{S_{\text{eff}}}$ turns it into the
-precision of the reported figure. The fourth is new and needs several chains.
-
-::: {.callout-important}
-## Result: the potential scale reduction factor
-
-Run $m$ chains of length $S$ from dispersed starting values and let $W$ be the mean of the
-within-chain variances and $B$ the between-chain variance of the chain means multiplied by
-$S$. Then
+Three diagnostics decide whether a chain may be quoted, and all three have
+appeared already: the autocorrelation function measures how long the chain
+remembers, the effective sample size of Lecture 4 converts that into a number of
+independent draws, and the Monte Carlo standard error
+$\hat\sigma/\sqrt{S_{\text{eff}}}$ turns it into the precision of the reported
+figure. A fourth needs several chains. Run $m$ chains of length $S$ from dispersed
+starting values, let $W$ be the mean of the within-chain variances and $B$ the
+between-chain variance of the chain means multiplied by $S$, and form the
+potential scale reduction factor
 
 $$
 \hat R = \sqrt{\frac{\frac{S-1}{S}W + \frac{1}{S}B}{W}} .
 $$
 
-The numerator is an estimate of the posterior variance that is unbiased when the chains
-have converged and biased upwards when they have not, because chains still sitting near
-their separate starting points inflate $B$; the denominator is an estimate that is biased
-downwards for the same reason, since no single chain has yet seen the whole posterior.
-Their ratio therefore exceeds one when the chains disagree and tends to one as
-$S \to \infty$ for a convergent chain. Values above about $1.01$ are treated as evidence
-against convergence.
-:::
+The numerator estimates the posterior variance without bias when the chains have
+converged and with an upward bias when they have not, because chains still sitting
+near their separate starting points inflate $B$; the denominator is biased
+downwards for the same reason, since no single chain has yet seen the whole
+posterior. Their ratio therefore exceeds one when the chains disagree and tends to
+one as $S \to \infty$ for a convergent chain, and values above about $1.01$ are
+treated as evidence against convergence.
 
 ```{python}
 starts = np.array([[-0.004, np.log(0.030), np.log(3.0)],
@@ -472,27 +834,41 @@ print(pd.DataFrame({"Rhat, good step": [rhat(good[:, :, j]) for j in range(3)],
                     "MCSE / post sd": (rw_table["MCSE"].to_numpy()
                                        / rw_post.std(axis=0, ddof=1))},
                    index=names).round(4))
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.6), sharey=True)
+for j, (ax, chains, lab) in enumerate(zip(axes, [good, tiny],
+                                          ["base step", "step x0.1"])):
+    for c in range(chains.shape[0]):
+        run_mean = np.cumsum(chains[c, :, 2]) / np.arange(1, chains.shape[1] + 1)
+        ax.plot(run_mean, lw=0.9)
+    ax.axhline(grid_mean[2], color="black", ls=":", label="grid mean, Lecture 3")
+    ax.set_xlabel("sweep after warm-up"); ax.set_title(f"Four chains, {lab}")
+axes[0].set_ylabel(r"running mean of $\nu$"); axes[0].legend(fontsize=8)
+plt.tight_layout(); plt.show()
 ```
 
-With the workable step size the four chains, launched from corners of the parameter space
-that disagree about every parameter, come back with $\hat R$ at most $1.003$, so they may
-be pooled. With the tiny step every $\hat R$ breaches the $1.01$ threshold, worst of all
-for $\nu$ at $1.065$, because each chain is still near its own start, and that is an
-instruction not to use the output rather than a suggestion to look more closely. The last
-column reports the Monte Carlo standard error as a fraction of the posterior standard
-deviation, between three and four percent for each parameter, which is the honest way to
-say how many digits the run supports: the simulation noise is an order of magnitude smaller than the posterior
-uncertainty we are trying to describe, and no more.
+With the workable step size the four chains, launched from corners of the
+parameter space that disagree about every parameter, come back with $\hat R$ at
+most $1.0012$, so they may be pooled, and the left panel shows their running means
+for $\nu$ converging onto the grid value from both sides. With the tiny step every
+$\hat R$ breaches the $1.01$ threshold, worst of all for $\nu$ at $1.084$, and the
+right panel shows why: each chain's running mean is still drifting in the
+direction of its own starting value after three thousand sweeps. That is an
+instruction not to use the output rather than a suggestion to look more closely.
+The last column of the table reports the Monte Carlo standard error as a fraction
+of the posterior standard deviation, between three and four percent for each
+parameter, which is the honest way to say how many digits the run supports: the
+simulation noise is an order of magnitude smaller than the posterior uncertainty
+we are trying to describe, and no more.
 
-## The independence sampler, and its link to Lecture 3
-
-The independence proposal reuses, without a single change, the heavy-tailed proposal
-Lecture 3 built for importance sampling: a Student-$t_5$ for $\mu$ and for $\sigma$ whose
-polynomial tails dominate the posterior's, and for $\nu$ the prior itself, which is safe
-by construction because the likelihood is bounded, so $\kappa \le \bar l\,\phi$ and the
-weights cannot explode. The acceptance ratio is then the ratio of the importance weights
-of that same proposal, which makes this the cleanest comparison in the course: the same
-$q$, the same weights, one used to reweight independent draws and the other to drive a
+The independence proposal reuses, without a single change, the heavy-tailed
+proposal Lecture 3 built for importance sampling: a Student-$t_5$ for $\mu$ and
+for $\sigma$ whose polynomial tails dominate the posterior's, and for $\nu$ the
+prior itself, which is safe by construction because the likelihood is bounded, so
+$\kappa \le \bar l\,\phi$ and the weights cannot explode. By Result R-5.2 the
+acceptance ratio is then the ratio of the importance weights of that same
+proposal, which makes this the cleanest comparison in the course: the same $q$,
+the same weights, one used to reweight independent draws and the other to drive a
 chain.
 
 ```{python}
@@ -534,94 +910,45 @@ print(f"independence sampler: acceptance {ind_acc:.3f}, {n_iter:,} sweeps "
 print(ind_table.to_string(float_format=lambda v: f"{v:,.6f}"))
 ```
 
-The independence sampler accepts about a quarter of its proposals, matches the grid values
-within Monte Carlo error, and produces effective sample sizes several times larger than
-the random walk's at a fraction of the wall-clock cost, because the whole proposal path
-and all its kernel evaluations are computed in two vectorised calls rather than one at a
-time inside a Python loop. It is the fastest chain in this chapter, and it is worth being
-clear about why: we handed it a proposal built by looking at this specific
-three-dimensional posterior. An independence sampler's acceptance rate is governed by how
-well one fixed $q$ covers the target everywhere at once, the requirement that fails as
-soon as $k$ grows, exactly as the importance weights of Lecture 3 degenerate. A random
-walk only ever has to be locally reasonable.
+The independence sampler accepts $0.279$ of its proposals, matches the grid
+values to within two Monte Carlo standard errors, and produces effective sample
+sizes three to four times larger than the random walk's at three quarters of the
+wall-clock cost, because
+the whole proposal path and all its kernel evaluations are computed in two
+vectorised calls rather than one at a time inside a Python loop. It is the fastest
+chain in this chapter, and it is worth being clear about why: we handed it a
+proposal built by looking at this specific three-dimensional posterior. An
+independence sampler's acceptance rate is governed by how well one fixed $q$
+covers the target everywhere at once, which is the requirement Result R-4.1 showed
+fails geometrically as $k$ grows. A random walk only ever has to be locally
+reasonable.
 
-## Hamiltonian Monte Carlo
-
-A random walk explores blindly: it proposes in every direction with equal enthusiasm and
-relies on rejection to keep it near the posterior's mass. Hamiltonian Monte Carlo uses the
-gradient we coded above to propose moves that follow the shape of the posterior instead.
-
-::: {.callout-important}
-## Result: Hamiltonian Monte Carlo
-
-Augment $\theta \in \mathbb{R}^k$ with a momentum $\rho \in \mathbb{R}^k$ and define the
-joint density $\pi(\theta, \rho) \propto \kappa(\theta \mid y)\exp(-\tfrac{1}{2}\rho^\top
-M^{-1}\rho)$, which factorises, so the $\theta$-marginal is exactly the posterior. With
-potential $U(\theta) = -\log\kappa(\theta \mid y)$ and kinetic energy
-$K(\rho) = \tfrac{1}{2}\rho^\top M^{-1}\rho$, the Hamiltonian is
-$H(\theta, \rho) = U(\theta) + K(\rho)$, and Hamilton's equations
-
-$$
-\frac{d\theta}{dt} = \frac{\partial H}{\partial \rho} = M^{-1}\rho,
-\qquad
-\frac{d\rho}{dt} = -\frac{\partial H}{\partial \theta} = \nabla \log \kappa(\theta \mid y)
-$$
-
-conserve $H$, so an exactly simulated trajectory of any length would be accepted with
-probability one. One iteration draws $\rho \sim \mathcal{N}(0, M)$, an exact draw from its
-conditional, runs $L$ leapfrog steps of size $\epsilon$, and accepts the endpoint with
-probability $\min\{1, \exp(H(\theta, \rho) - H(\theta^\ast, \rho^\ast))\}$. The leapfrog
-integrator is volume preserving and reversible, so no Jacobian appears and the proposal
-terms cancel, leaving only the energy error of the discretisation.
-:::
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-One leapfrog step of size $\epsilon$ is
-
-$$
-\rho_{t+\epsilon/2} = \rho_t + \tfrac{\epsilon}{2}\nabla\log\kappa(\theta_t),
-\qquad
-\theta_{t+\epsilon} = \theta_t + \epsilon M^{-1}\rho_{t+\epsilon/2},
-\qquad
-\rho_{t+\epsilon} = \rho_{t+\epsilon/2} + \tfrac{\epsilon}{2}\nabla\log\kappa(\theta_{t+\epsilon}).
-$$
-
-Each of the three sub-steps adds to one block a function of the other block alone, so its
-Jacobian matrix is triangular with a unit diagonal and determinant exactly one. A
-composition of volume-preserving maps is volume preserving, so the whole trajectory has
-unit Jacobian and contributes no factor to the acceptance ratio, unlike the
-reparameterisation result earlier in this chapter.
-
-Reversibility follows from the symmetry of the same three sub-steps: negate the final
-momentum, run the integrator $L$ steps again, and negate once more, and the map returns
-exactly to the starting point. Because the momentum distribution is symmetric about zero,
-the density of proposing $(\theta^\ast, \rho^\ast)$ from $(\theta, \rho)$ equals the
-density of the reverse proposal, so the proposal terms cancel from the Metropolis ratio
-just as they did for the symmetric random walk, and the ratio reduces to
-$\exp(H(\theta,\rho) - H(\theta^\ast,\rho^\ast))$. Were $H$ exactly conserved this would
-be one; it is not, because leapfrog is a second-order approximation whose energy error
-grows with $\epsilon^2$, and the Metropolis step removes the resulting bias exactly.
-Two implementation points follow from the algebra. Consecutive half-steps merge, so $L$
-leapfrog steps need $L+1$ gradient evaluations rather than $2L$. And the mass matrix $M$
-is a free preconditioner: taking $M^{-1}$ equal to the posterior covariance makes the
-trajectories traverse a well-conditioned surface, which is why a badly scaled model with
-$M = I$ can fail outright.
-:::
-
-That last point is not academic here. With $M = I$ on our posterior, where the three
-coordinates have posterior standard deviations of roughly $0.002$, $0.058$ and $0.51$ on
-the unconstrained scale, a step size large enough to move $\nu$ sends $\mu$ dozens of
-posterior standard deviations away, the energy error explodes and every proposal is
-rejected. The fix is to take $M^{-1} = \text{diag}(s_1^2, s_2^2, s_3^2)$ with $s_j$ the
-posterior standard deviations, which is equivalent to running the sampler in standardised
-coordinates, and we estimate those from the random-walk chain we already have. This is the
-same piece of information Lecture 3 extracted from the Laplace approximation to build its
-first proposal: every method in this arc needs a rough picture of the posterior's scale
-before it can be efficient, and only the use it makes of that picture differs.
+Hamiltonian Monte Carlo needs the gradient of the log target, which is derived by
+hand and then checked against a central difference, the only honest way to ship a
+hand-derived derivative. The mass matrix is the diagonal of posterior variances
+estimated from the random-walk chain we already have.
 
 ```{python}
+def grad_log_target(phi):
+    mu, sigma, nu = phi[0], np.exp(phi[1]), nu_lo + np.exp(phi[2])
+    z = (r - mu) / sigma
+    d = 1.0 + z ** 2 / nu
+    s1, s2 = (z / d).sum(), (z ** 2 / d).sum()
+    g_mu = (nu + 1) / (sigma * nu) * s1 - (mu - m_0) / s_0 ** 2
+    g_sigma = (-n / sigma + (nu + 1) / (sigma * nu) * s2
+               + 1.0 / sigma - 2 * (alpha_0 + 1) / sigma + 2 * delta_0 / sigma ** 3)
+    g_nu = (n * (0.5 * psi((nu + 1) / 2) - 0.5 * psi(nu / 2) - 0.5 / nu)
+            - 0.5 * np.log(d).sum() + (nu + 1) / (2 * nu ** 2) * s2 - 1.0 / nu_mean)
+    return np.array([g_mu, sigma * g_sigma + 1.0, (nu - nu_lo) * g_nu + 1.0])
+
+
+phi_test = np.array([0.009, np.log(0.038), np.log(6.0)])
+h = 1e-6
+fd = np.array([(log_target(phi_test + h * e) - log_target(phi_test - h * e)) / (2 * h)
+               for e in np.eye(3)])
+print("analytic gradient ", np.round(grad_log_target(phi_test), 6))
+print("finite difference ", np.round(fd, 6))
+
 centre = rw_chain[burn:].mean(axis=0)
 scale = rw_chain[burn:].std(axis=0, ddof=1)
 print("posterior sd on the unconstrained scale:", np.round(scale, 4))
@@ -669,76 +996,30 @@ print(f"HMC: acceptance {hmc_acc:.3f}, {hmc_iter:,} iterations, "
 print(hmc_table.to_string(float_format=lambda v: f"{v:,.6f}"))
 ```
 
-Preconditioned, Hamiltonian Monte Carlo behaves completely differently from the random
-walk. Its high acceptance rate, which for a random walk would be a warning sign, is here
-the intended operating point, since a trajectory that conserves energy well should be
-accepted almost always. The effective sample sizes equal the number of kept draws, so
-eighteen thousand Hamiltonian iterations deliver eighteen thousand effectively independent
-draws from a posterior that costs the random walk around twenty sweeps apiece, and the
-posterior means match the grid values within Monte Carlo error. One detail of those
-effective sample sizes is worth naming: Geyer's rule truncates the sum of
-autocorrelations at the first non-positive pair, so a chain with no detectable positive
-dependence returns the number of draws exactly, which is what the identical entries mean.
-The cost is eight gradient evaluations per iteration against one density evaluation for
-the random walk, and the comparison table below is where that trade is settled.
+The analytic gradient and the finite difference agree to six decimals in every
+component, so the derivative used below is the derivative of the density above and
+not of something nearby. Preconditioned, Hamiltonian Monte Carlo then behaves
+completely differently from the random walk. Its high acceptance rate, which for a
+random walk would be a warning sign, is here the intended operating point, since a
+trajectory that conserves energy well should be accepted almost always. The
+effective sample sizes equal the number of kept draws, so eighteen thousand
+Hamiltonian iterations deliver eighteen thousand effectively independent draws
+from a posterior that costs the random walk more than twenty sweeps apiece, and
+the posterior means match the grid values to within one and a half Monte Carlo
+standard errors. One detail of
+those effective sample sizes is worth naming: Geyer's rule truncates the sum of
+autocorrelations at the first non-positive pair, so a chain with no detectable
+positive dependence returns the number of draws exactly, which is what the
+identical entries mean. The cost is eight gradient evaluations per iteration
+against one density evaluation for the random walk, and @sec-discussion settles
+that trade.
 
-The two tuning constants pull against each other. The step size $\epsilon$ controls the
-integrator's energy error, which grows quadratically in $\epsilon$ and eventually makes
-trajectories diverge, while the product $L\epsilon$ controls how far a proposal travels:
-too short and the sampler degenerates into an expensive random walk, too long and the
-trajectory curves back on itself and the extra gradients buy nothing. Our values,
-$\epsilon = 0.35$ and $L = 8$, were found by trying a handful of combinations, which is
-exactly the manual labour the next section removes.
-
-## The no-U-turn sampler
-
-The no-U-turn sampler of Hoffman and Gelman (2014) chooses $L$ by itself. Instead of a
-fixed number of steps it grows the trajectory by repeated doubling, running leapfrog steps
-forward or backward in time at random, so the path becomes a balanced binary tree of
-length $2^j$ after $j$ doublings. Doubling stops when the trajectory starts to turn back
-on itself, detected by the two inner products
-
-$$
-(\theta^{+} - \theta^{-})^\top \rho^{-} < 0
-\qquad \text{or} \qquad
-(\theta^{+} - \theta^{-})^\top \rho^{+} < 0,
-$$
-
-where the superscripts mark the two ends of the current trajectory: either sign change
-means the ends have begun to approach each other, which is the U-turn the sampler is named
-for. Because a stopping rule that looked only forward would break reversibility and bias
-the chain, the criterion is checked for every sub-trajectory built along the way, and the
-next state is selected from the whole trajectory by the slice rule below rather than taken
-from its endpoint.
-
-::: {.callout-important}
-## Result: slice selection along the trajectory
-
-Introduce an auxiliary variable $u \mid \theta, \rho \sim \mathcal{U}\big(0,
-\exp\{-H(\theta,\rho)\}\big)$. The pair $(\theta, \rho, u)$ is then uniform on the region
-under the joint density, and the set of trajectory points with
-$u \le \exp\{-H\}$, the candidate set, is exactly the set of points whose energy error
-relative to the starting point is not too large. Choosing the next state uniformly at
-random from that candidate set leaves the joint density invariant, and the marginal of
-$\theta$ is the posterior. This is the auxiliary-variable construction of slice sampling,
-where a draw from a density is replaced by two uniform draws, here applied to selecting a
-point along a trajectory rather than a point on the real line.
-:::
-
-The same auxiliary-variable idea is a sampler in its own right. Slice sampling draws
-$u \mid \theta \sim \mathcal{U}(0, \kappa(\theta))$ and then $\theta$ uniformly from the
-horizontal slice $\{\theta : \kappa(\theta) > u\}$; both steps are exact draws from
-uniform conditionals of the joint distribution on the region under $\kappa$, so by the
-Gibbs invariance argument of Lecture 4 their composition leaves that joint distribution,
-and hence the posterior, invariant. It has no proposal and nothing to tune, which makes it
-a natural replacement for the grid step Lecture 4 used for the degrees of freedom inside
-an otherwise exact Gibbs sweep.
-
-The implementation below is the naive recursive version of the no-U-turn sampler: it
-carries the two ends of the trajectory, doubles in a random direction, and stops on the
-first U-turn or on a maximum tree depth. Dual averaging, which tunes $\epsilon$ during
-warm-up to hit a target acceptance rate, is omitted, so $\epsilon$ is still ours to set;
-$L$ is not.
+The implementation of the no-U-turn sampler below is the naive recursive version:
+it carries the two ends of the trajectory, doubles in a random direction, and
+stops on the first U-turn or at a maximum tree depth, selecting the next state by
+the slice rule of @sec-methodology. Dual averaging, which tunes $\epsilon$ during
+warm-up to hit a target acceptance rate, is omitted, so $\epsilon$ is still ours
+to set; $L$ is not.
 
 ```{python}
 def leapfrog(psi, p, g, step):
@@ -808,20 +1089,7 @@ nuts_table = summarise("NUTS", nuts_post, nuts_secs)
 print(f"NUTS: {nuts_iter:,} iterations, {nuts_leaps:,} leapfrog steps, "
       f"mean tree depth {nuts_depth.mean():.2f}, {nuts_secs:.2f} seconds")
 print(nuts_table.to_string(float_format=lambda v: f"{v:,.6f}"))
-```
 
-The no-U-turn sampler reaches the same posterior, with means again inside Monte Carlo
-error of the grid values, and with no choice of trajectory length at all: the mean tree
-depth says it settled on trajectories of a handful of leapfrog steps, the same region as
-the eight we tuned by hand. What it does not do here is beat the tuned Hamiltonian
-sampler, because doubling spends gradients on directions that are then discarded and the
-recursion is Python calls rather than array arithmetic. On a posterior we could tune by
-hand in five minutes that overhead buys nothing. On a forty-parameter vector
-autoregression, where hand tuning is not on the table and a badly chosen $L$ costs far
-more than the recursion does, it is why NUTS is the default engine of modern
-probabilistic programming systems.
-
-```{python}
 fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
 for series, label, colour in [(rw_post[:, 2], "RW-MH", "steelblue"),
                               (ind_post[:, 2], "independence MH", "seagreen"),
@@ -836,27 +1104,57 @@ axes[1].plot(rw_post[:400, 1], rw_post[:400, 2], lw=0.8, color="steelblue", labe
 axes[1].set_xlabel(r"$\sigma$"); axes[1].set_ylabel(r"$\nu$"); axes[1].set_ylim(2, 25)
 axes[1].legend(fontsize=8); axes[1].set_title("400 kept sweeps in the same plane")
 plt.tight_layout(); plt.show()
+
+for series, label in [(rw_post[:, 2], "RW-MH"), (ind_post[:, 2], "independence MH"),
+                      (hmc_post[:, 2], "HMC"), (nuts_post[:, 2], "NUTS")]:
+    a = acf(series, 40)
+    print(f"{label:>16}: autocorrelation of nu at lag 1 {a[1]:6.3f}, "
+          f"lag 5 {a[5]:6.3f}, lag 40 {a[40]:6.3f}")
 ```
 
-The left panel ranks the four chains at a glance. The random walk's autocorrelation in
-$\nu$ is still clearly positive after forty lags, the independence sampler's has decayed
-much faster, and both gradient-based chains are essentially uncorrelated after one or two
-lags. The right panel shows the same fact geometrically: in four hundred kept sweeps the
-random walk traces a dense tangle confined to a patch of the $(\sigma, \nu)$ ridge, while
-the Hamiltonian chain jumps across the whole ridge repeatedly, which is what an effective
-sample size close to the number of draws looks like when it is drawn rather than tabulated.
+The no-U-turn sampler reaches the same posterior, with means again inside Monte
+Carlo error of the grid values, and with no choice of trajectory length at all: a
+mean tree depth of $2.39$ says it settled on trajectories of about five leapfrog
+steps, the same region as the eight we tuned by hand, at a cost of $36{,}886$
+leapfrog steps over eight thousand iterations. The left panel of the figure
+ranks the four chains at a glance. The random walk's autocorrelation in $\nu$ is
+still clearly positive after forty lags, the independence sampler's has decayed
+much faster, and both gradient-based chains are essentially uncorrelated after one
+or two lags. The right panel shows the same fact geometrically: in four hundred
+kept sweeps the random walk traces a dense tangle confined to a patch of the
+$(\sigma, \nu)$ ridge, while the Hamiltonian chain jumps across the whole ridge
+repeatedly, which is what an effective sample size close to the number of draws
+looks like when it is drawn rather than tabulated.
 
-## What every method in Lectures 3 to 5 costs
+Four samplers, four sets of tuning decisions, and one posterior. It is worth
+recording what each of them needed from us before it worked. The random walk
+needed three step sizes, and got them from a preliminary look at the posterior
+scale; with the wrong ones it either crawls or stands still, as the first figure
+showed. The independence sampler needed a full proposal density with heavy enough
+tails, which is the most demanding requirement of the four and the one that stops
+being satisfiable as $k$ grows. Hamiltonian Monte Carlo needed a gradient, a mass
+matrix and two constants, and the no-U-turn sampler needed all of that except the
+trajectory length. What none of them needed is a conjugate structure, a named
+conditional or a normalising constant, which is exactly the shortage that ended
+Lecture 4, and all four reproduce the same posterior for $(\mu, \sigma, \nu)$ to
+within Monte Carlo error. The economic reading is therefore unchanged from
+@sec-motivation: a monthly premium near $0.0091$, an ordinary month of scale
+$0.0378$, and degrees of freedom near $8.6$ that keep the tails thick. What
+differs across the four is only how much computation each answer cost, and that is
+what the closing table measures.
+
+## Discussion: what each method costs, and the 111 coefficients ahead {#sec-discussion}
 
 We can now price the whole arc. The convention is effective draws per second: the
-effective sample size divided by the wall-clock time that produced it, with the effective
-sample size taken as the smallest across the three parameters for a chain, as the weighted
-ESS of Lecture 3 for importance sampling, and as the number of accepted draws for
-rejection sampling, whose output is exactly independent. The three Lecture 3 methods are
-re-run here, with the code and the settings of that chapter, so that every number in the
-table comes off the same machine in the same session; the Gibbs figures are carried in
-from Lecture 4, whose run of sixty thousand sweeps took $10.7$ seconds for a smallest
-effective sample size of $756$, on $\nu$.
+effective sample size divided by the wall-clock time that produced it, with the
+effective sample size taken as the smallest across the three parameters for a
+chain, as the weighted ESS of Lecture 3 for importance sampling, and as the number
+of accepted draws for rejection sampling, whose output is exactly independent. The
+three Lecture 3 methods are re-run here, with the code and the settings of that
+chapter, so that every number comes off the same machine in the same session; the
+Gibbs figures are carried in from Lecture 4, whose run of sixty thousand sweeps
+took about nine seconds for a smallest effective sample size of $781$, on
+$\nu$.
 
 ```{python}
 S_is, N_want, log_M = 40_000, 20_000, 752.880      # log M as located in Lecture 3
@@ -884,12 +1182,12 @@ post = np.vstack(kept)[:N_want]
 rej_secs = time.perf_counter() - t0
 rej_rate = sum(a.shape[0] for a in kept) / n_tried
 
-gibbs_ess, gibbs_secs = 756.0, 10.7                 # carried in from Lecture 4
+gibbs_ess, gibbs_secs = 780.6, 8.9                  # carried in from Lecture 4
 rows = [
     ("Lecture 3  IS, heavy-tailed q", ess_is, is_secs, w_h @ th_h),
     ("Lecture 3  SIR", ess_is, sir_secs, sir.mean(axis=0)),
     ("Lecture 3  rejection", float(N_want), rej_secs, post.mean(axis=0)),
-    ("Lecture 4  Gibbs, augmented", gibbs_ess, gibbs_secs, np.array([0.009110, 0.037805, 8.693])),
+    ("Lecture 4  Gibbs, augmented", gibbs_ess, gibbs_secs, np.array([0.009117, 0.037784, 8.640])),
     ("Lecture 5  RW-MH", rw_table["ESS"].min(), rw_secs, rw_post.mean(axis=0)),
     ("Lecture 5  independence MH", ind_table["ESS"].min(), ind_secs, ind_post.mean(axis=0)),
     ("Lecture 5  HMC", hmc_table["ESS"].min(), hmc_secs, hmc_post.mean(axis=0)),
@@ -903,180 +1201,128 @@ print(f"rejection sampling acceptance rate {rej_rate:.4f}\n")
 print(comparison.to_string(float_format=lambda v: f"{v:,.4f}"))
 print(f"\ngrid ground truth (Lecture 3):  E[mu|r] {grid_mean[0]:.4f}   "
       f"E[sigma|r] {grid_mean[1]:.4f}   E[nu|r] {grid_mean[2]:.4f}")
-```
 
-Read the table one column at a time. The last three columns say that all eight methods
-agree on the posterior: every reported mean sits within Monte Carlo error of the
-Lecture 3 grid values of $0.009126$, $0.037756$ and $8.598$, which is the point of running
-the whole arc on one target and the precondition for comparing anything else. The
-disagreement is entirely about cost.
-
-On this posterior the independent methods of Lecture 3 win outright. Importance sampling
-with the heavy-tailed proposal and rejection sampling both deliver on the order of ten
-thousand effective draws per second, several times the best chain here and more than an
-order of magnitude above the random walk, for the plain reason that their work is a handful of
-vectorised array operations over forty thousand points at once, while every Markov chain
-in Lectures 4 and 5 is a Python loop that evaluates the kernel one state at a time.
-Sampling importance resampling inherits the effective sample size of the weighted cloud it
-resamples from, so it can never beat it, and its extra cost buys the convenience of
-unweighted draws. Among the chains, the independence sampler and Hamiltonian Monte Carlo
-lead at a couple of thousand effective draws a second, the first because its proposals are
-generated and scored in two vectorised calls, the second because almost every iteration
-yields an effectively independent draw; NUTS and the random walk follow a long way behind
-at a few hundred each, the automatically tuned Hamiltonian sampler paying for its doubling
-recursion and the random walk for its dependence. Gibbs sampling comes last by a wide
-margin, at around seventy effective draws a second, because it pays for four hundred and
-thirty-nine latent variables per sweep and then mixes slowly in exactly the parameter,
-$\nu$, that those latent variables are coupled to. The wall-clock column is the one that
-varies from machine to machine and from run to run; the effective sample sizes do not.
-
-That ranking is not a general ranking, and taking it as one would be the wrong lesson from
-this chapter. Every entry in the first three rows depends on a proposal that covers a
-three-dimensional posterior well, and Lecture 3 already showed what happens when the
-proposal is merely good rather than excellent: the Normal proposal's effective sample size
-fell to eight percent of its draws on this same target. In the forty-parameter model of
-Lecture 6 no such proposal exists, the weights degenerate completely, the rejection rate
-goes to one, and the first three rows of this table become unavailable rather than slow.
-The last four rows survive, because a random walk, a Hamiltonian trajectory or a Gibbs
-sweep only ever has to be locally sensible. Gibbs sampling in particular earns its keep
-precisely where it looks worst here: it needs no tuning at all, it scales to models whose
-conditionals stay standard however many blocks they have, and in Lecture 12 the latent
-variables that make it slow on this posterior become the object of interest themselves.
-The honest summary is that this table measures the three-dimensional case, and that the
-methods it ranks lowest are the ones still standing when the dimension grows.
-
-## A closing aside: the Challenger disaster
-
-On 28 January 1986 the Space Shuttle Challenger broke apart shortly after launch, killing
-all seven crew. The cause was the failure of an O-ring seal, and the leading factor was
-the temperature at launch, about 31 degrees Fahrenheit. The record needed to see it coming
-existed: twenty-three previous launches with the temperature and whether at least one
-O-ring failed. The analysis presented the night before used only the launches that had
-experienced failures, discarding the warm, failure-free launches that would have anchored
-the relationship.
-
-The model is a logistic regression,
-$\log\{\Pr(y_i = 1)/[1 - \Pr(y_i = 1)]\} = \alpha + \beta x_i$, with
-$\mathcal{N}(0, 1000)$ priors, whose posterior has no conjugate form for exactly the
-reason this chapter exists: the $\log(1 + e^{\eta})$ term admits no completing the square.
-The random-walk sampler coded above, pointed at a different log target and given two
-coordinates instead of three, samples it without any other modification, and the quantity
-that mattered on the night is a predictive one, the failure probability at 31 degrees,
-obtained by pushing every retained draw through the logistic function.
-
-```{python}
-temp = np.array([53, 57, 58, 63, 66, 67, 67, 67, 68, 69, 70, 70, 70, 70, 72,
-                 73, 75, 75, 76, 76, 78, 79, 81], dtype=float)
-fail = np.array([1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0],
-                dtype=float)
-temp_c = temp - temp.mean()
-
-
-def log_target_challenger(par):
-    eta = par[0] + par[1] * temp_c
-    return (np.sum(fail * eta - np.logaddexp(0.0, eta))
-            - 0.5 * (par[0] ** 2 + par[1] ** 2) / 1000.0)
-
-
-ch_chain, ch_acc, _ = rw_metropolis(np.array([1.0, 0.14]), 12_000, rng, np.zeros(2),
-                                    target=log_target_challenger)
-alpha_draws = ch_chain[2_000:, 0] - ch_chain[2_000:, 1] * temp.mean()   # undo centring
-beta_draws = ch_chain[2_000:, 1]
-p31 = 1.0 / (1.0 + np.exp(-(alpha_draws + 31 * beta_draws)))
-tipping = -alpha_draws / beta_draws
-
-print(f"{len(temp)} launches, {int(fail.sum())} with a failure; acceptance {ch_acc:.3f}")
-print(f"beta: mean {beta_draws.mean():.4f}, sd {beta_draws.std(ddof=1):.4f}, "
-      f"P(beta < 0 | data) = {(beta_draws < 0).mean():.3f}")
-print(f"P(failure at 31 F): median {np.median(p31):.3f}, "
-      f"95% interval [{np.quantile(p31, 0.025):.3f}, {np.quantile(p31, 0.975):.3f}]")
-print(f"tipping point -alpha/beta: median {np.median(tipping):.1f} F, "
-      f"mean {tipping.mean():.1f} F")
-
-xg = np.linspace(30, 85, 200)
-P = 1.0 / (1.0 + np.exp(-(alpha_draws[:, None] + beta_draws[:, None] * xg[None, :])))
-fig, ax = plt.subplots(figsize=(7, 3.8))
-ax.fill_between(xg, np.quantile(P, 0.025, axis=0), np.quantile(P, 0.975, axis=0),
-                color="grey", alpha=0.3, label="95% band")
-ax.plot(xg, np.median(P, axis=0), color="black", label="posterior median")
-ax.scatter(temp, fail, color="steelblue", zorder=3, label="23 launches")
-ax.axvline(31, color="firebrick", ls=":", label="launch temperature, 31 F")
-ax.set_xlabel("temperature (F)"); ax.set_ylabel("P(O-ring failure)")
-ax.legend(fontsize=8); ax.set_title("What the pre-launch record said")
+fig, ax = plt.subplots(figsize=(8, 3.8))
+order = comparison["ESS/sec"].sort_values()
+ax.barh(np.arange(len(order)), order.to_numpy(),
+        color=["#527a99" if "Lecture 5" in s else "#c58a3a" for s in order.index])
+ax.set_yticks(np.arange(len(order))); ax.set_yticklabels(order.index, fontsize=8)
+ax.set_xscale("log"); ax.set_xlabel("effective draws per second (log scale)")
+ax.set_title("One posterior, eight methods, one machine")
 plt.tight_layout(); plt.show()
 ```
 
-The slope on temperature is negative with posterior probability close to one, so warmer
-launches are safer, and the predicted failure probability at 31 degrees has a median close
-to one with a credible interval lying entirely above one half. The band widens sharply
-below the coldest observed launch at 53 degrees, as it should, because the model is
-extrapolating there, but a wide band around a probability near one is not a reason for
-comfort. The tipping point, the temperature at which the predicted probability crosses one
-half, is the ratio $-\alpha/\beta$, whose posterior mean and median differ, here by half a
-degree, because draws with $\beta$ near zero send the ratio far into either tail. The gap
-is small in this sample only because the slope is estimated well away from zero; this is
-the same warning Lecture 2 gave about ratios of coefficients, and the median is the
-summary to quote. Nothing here needed a method more exotic than the random walk of the first
-section, applied to twenty-three observations instead of four hundred and thirty-nine.
+Read the table one column at a time. The last three columns say that all eight
+methods agree on the posterior: every reported mean sits within Monte Carlo error
+of the Lecture 3 grid values of $0.009126$, $0.037756$ and $8.598$, the eight
+estimates of $\mathbb{E}[\nu \mid r]$ spanning $8.54$ to $8.72$ against Monte Carlo
+standard errors of $0.03$ to $0.15$, which is the point of running the whole arc on
+one target and the precondition for comparing anything else. The disagreement is
+entirely about cost, and on this posterior the independent methods of Lecture 3
+win outright. Importance sampling with the heavy-tailed proposal delivers about
+five thousand effective draws per second and rejection sampling twelve thousand,
+the latter five times the best chain here and thirty-five times the random walk,
+for the plain reason that their
+work is a handful of vectorised array operations over forty thousand points at
+once, while every Markov chain in Lectures 4 and 5 is a Python loop that evaluates
+the kernel one state at a time. Sampling importance resampling inherits the
+effective sample size of the weighted cloud it resamples from, so it can never
+beat it. Among the chains, the independence sampler and Hamiltonian Monte Carlo
+lead at a couple of thousand effective draws a second, the first because its
+proposals are generated and scored in two vectorised calls, the second because
+almost every iteration yields an effectively independent draw; NUTS and the random
+walk follow a long way behind at $454$ and $347$, the automatically tuned sampler
+paying for its doubling recursion and the random walk for its dependence. Gibbs
+sampling comes last, at about $88$ effective draws a second, because it
+pays for four hundred and thirty-nine latent variables per sweep and then mixes
+slowly in exactly the parameter those latent variables are coupled to. The
+wall-clock column is the one that varies from machine to machine; the effective
+sample sizes do not.
 
-## Takeaways
+That ranking is not a general ranking, and taking it as one would be the wrong
+lesson. Every entry in the first three rows depends on a proposal that covers a
+three-dimensional posterior well, and Result R-4.1 gave the rate at which such a
+proposal stops existing. The last four rows survive that, because a random walk, a
+Hamiltonian trajectory or a Gibbs sweep only ever has to be locally sensible, and
+Gibbs sampling in particular earns its keep precisely where it looks worst here,
+since in Lecture 12 the latent variables that make it slow become the object of
+interest themselves.
 
-Metropolis-Hastings converts the ability to evaluate an unnormalised posterior into the
-ability to sample it. Its acceptance probability is not a recipe but the unique solution
-of the detailed balance equation, from which the normalising constant cancels, and any
-proposal that keeps the chain irreducible gives the correct stationary distribution, so
-the choice of proposal is entirely a question of efficiency. A symmetric random walk
-cancels the proposal terms; an independence proposal turns the acceptance ratio into a
-ratio of the importance weights of Lecture 3; a reparameterisation to remove a constraint
-contributes a Jacobian that must not be forgotten; and kernels that each leave the
-posterior invariant may be mixed freely, which is what lets a Metropolis step stand in for
-the one Gibbs block whose conditional has no name.
+The limitation that ends this act is not about the sampler at all. Every method in
+Lectures 3 to 5 has been asked to compute a posterior for three parameters from
+$439$ observations, and all eight of them can. Lecture 6 asks for something the
+computation cannot rescue. A monthly vector autoregression on six macroeconomic
+series with twelve lags carries $111$ coefficients per equation, estimated on
+eleven years of monthly data, that is $120$ observations, and the least squares
+answer fits the sample almost perfectly while producing forecasts that explode.
+Sampling that posterior is easy, because it is conditionally Normal and a Gibbs
+sweep handles it; the trouble is that the posterior itself is nearly flat in most
+directions, so no sampler, however efficient, can turn $120$ observations into
+$111$ well-determined numbers. The enemy stops being intractability and becomes
+estimation error, and the weapon stops being an algorithm and becomes the prior.
+Lecture 6 introduces the Minnesota prior and shows that shrinking coefficients
+towards a random walk turns an unusable regression into a forecasting model.
 
-No chain may be read off its output alone. Trace plots at three step sizes showed a
-high acceptance rate coexisting with total failure to converge, $\hat R$ from four
-dispersed starts separated the working chain from the stuck one, and the effective sample
-size and the Monte Carlo standard error said how many digits of each posterior mean the
-run supports. On this posterior every sampler in the chapter, plus the three from Lecture 3
-and the Gibbs sampler of Lecture 4, agreed with the grid ground truth within Monte Carlo
-error, which is the only reason their costs can be compared at all.
+## Exercises
 
-Hamiltonian Monte Carlo replaces blind proposals by gradient-guided leapfrog trajectories
-with a Metropolis correction for the discretisation error, and needs a mass matrix that
-knows the posterior's scales before it works at all; the no-U-turn sampler removes the
-remaining choice of trajectory length by doubling until the path turns back on itself. On
-three parameters neither beats a well-chosen independence proposal, and the ranking
-inverts as soon as the dimension grows beyond what a fixed proposal can cover, which is
-the situation from Lecture 6 onwards. We now have one method that works given a gradient,
-one that works given standard conditionals, and a clear account of what each costs.
+These are the chapter's practice questions; the [Week 5 exercise
+session](../exercise-sessions/05-metropolis-hastings-nuts.qmd) works through them
+and adds the lab.
 
-## Reading these results in the sources' notation
+1. By hand. Derive the acceptance probability of Result R-5.2 from detailed
+   balance without looking at the derivation, then specialise it to a symmetric
+   proposal and to an independence proposal. Finally, take the reparameterisation
+   $\sigma = e^{\ell}$ and show that omitting the Jacobian term makes the chain
+   converge to a density proportional to $\kappa_\theta(\sigma)/\sigma$, and say
+   what that does to the posterior mean of $\sigma$.
 
-| This course | Source (Chib and Greenberg, Lopes) | Relation |
-|---|---|---|
-| kernel $\kappa(\theta \mid y)$, `log_kernel` | $\pi(\theta)$ or $f^*(\theta)$ | identical object, unnormalised |
-| proposal $q(\theta' \mid \theta)$ | candidate-generating density $q(\theta, \theta')$ | identical, argument order differs |
-| $\alpha(\theta, \theta')$ | probability of move $\alpha(\theta, \theta')$ | identical |
-| independence proposal $q(\theta')$ | importance function $\iota(\theta)$ of Lecture 3 | same density, used as a chain rather than as weights |
-| momentum $\rho$, mass matrix $M$ | $p$, and $M$ or the metric | identical |
-| $\hat R$ | potential scale reduction factor, Gelman-Rubin | identical |
+2. Computational. Replace the griddy step for $\nu$ in the Gibbs sampler of
+   Lecture 4 with a random walk Metropolis step on $\log(\nu - 2)$, using the
+   composition argument of @sec-methodology. Verify that the hybrid sampler
+   reproduces the posterior of Lecture 4, tune the step size to an acceptance rate
+   near $0.3$, and compare the effective sample size per second of the two
+   versions.
 
-: Notation bridge {.striped}
+3. On real data. Take the logistic regression of a recession indicator on the term
+   spread from the FRED monthly file, with $\mathcal{N}(0, 10^2)$ priors on both
+   coefficients, and sample its posterior with the random walk of
+   @sec-empirical, changing only the log target. Report the posterior probability
+   that the slope is negative, the predicted recession probability at the current
+   value of the spread, and the $\hat R$ of four dispersed chains.
 
-## Reading guide and sources
+Exercise 1 is the one to attempt before the session, since the Jacobian question
+is the single most common source of silently wrong MCMC output. Exercises 2 and 3
+reuse the code of @sec-empirical with the target function replaced.
 
-Supplied UPM Class 3 for Metropolis updates and transformations, and Case 5 for the
-Challenger logistic regression. Greenberg (2008), Sections 7.2 to 7.3, develops
-Metropolis-Hastings and its diagnostics. Chib and Greenberg (1995) is the clearest single
-account of where the acceptance probability comes from. Neal (2011) is the standard
-reference on Hamiltonian Monte Carlo, and Hoffman and Gelman (2014) introduce the
-no-U-turn sampler and the dual-averaging step size adaptation omitted here. The UPM
-materials are by Audronė Virbickaitė and Martina Zaharieva, adapted to this course's
-notation and weekly sequence.
+## Reading and references
 
-## References
+The Metropolis-Hastings algorithm and the derivation of its acceptance
+probability in @sec-methodology follow UPM Class 3 and Chib and Greenberg (1995),
+which is the clearest single account of where the acceptance probability comes
+from; Greenberg (2008), Sections 7.2 and 7.3, develops the same material together
+with the diagnostics of @sec-empirical. The griddy Gibbs step whose cost Result
+R-5.1 counts is due to Ritter and Tanner (1992), and the midpoint-rule argument
+behind its $O(h^2)$ bias is standard numerical analysis. The potential scale
+reduction factor is Gelman and Rubin (1992). Neal (2011) is the standard reference
+on Hamiltonian Monte Carlo, including the volume-preservation argument used in
+Result R-5.3, and Hoffman and Gelman (2014) introduce the no-U-turn sampler, the
+slice selection rule quoted in @sec-methodology and the dual-averaging step size
+adaptation omitted from the implementation. The UPM materials are by Audronė
+Virbickaitė and Martina Zaharieva, adapted to this course's notation and weekly
+sequence.
+
+Where the sources write the target kernel as $\pi(\theta)$ or $f^*(\theta)$, the
+proposal as a candidate-generating density $q(\theta, \theta')$ with the arguments
+in the other order, or the momentum as $p$, the objects are the ones used here.
+The independence proposal is the importance function of Lecture 3 under another
+name, used to drive a chain rather than to weight draws.
+
+The data are the monthly factors of the Kenneth French data library, distributed
+with this course as a repository snapshot.
 
 Chib and Greenberg (1995), "Understanding the Metropolis-Hastings Algorithm," *The
-American Statistician*. Hoffman and Gelman (2014), "The No-U-Turn Sampler," *Journal of
-Machine Learning Research*. Neal (2011), "MCMC using Hamiltonian dynamics," in the
-*Handbook of Markov Chain Monte Carlo*. Gelman et al., *Bayesian Data Analysis* (3rd ed.),
-chapters 11 and 12. Koop, *Bayesian Econometrics*, chapter 4.
+American Statistician*. Hoffman and Gelman (2014), "The No-U-Turn Sampler,"
+*Journal of Machine Learning Research*. Neal (2011), "MCMC using Hamiltonian
+dynamics," in the *Handbook of Markov Chain Monte Carlo*. Gelman et al.,
+*Bayesian Data Analysis* (3rd ed.), ch. 11 and 12. Koop, *Bayesian Econometrics*,
+ch. 4.

@@ -3,35 +3,74 @@ title: "The linear regression model"
 subtitle: "Lecture 2"
 ---
 
-::: {.callout-note}
-## Lecture and exercise
-Read the model and work through the derivations before running the examples.
-The [Week 2 exercise session](../exercise-sessions/02-linear-regression.qmd) contains the practical lab and the
-chapter's practice questions.
+## Overview
+
+By the end of this lecture you can report a probability distribution over a
+portfolio's exposures to several risk factors at once, together with a
+distribution over the noise around them, from one closed-form update that needs
+no simulation.
+
+::: {.callout-important}
+## The result of this chapter
+
+For a linear model with unknown coefficient vector $\beta$ and unknown error
+variance, a prior centred at $b_0$ with precision $B_0^{-1}$, and least-squares
+estimate $\hat\beta$, the posterior mean of the coefficients is
+
+$$
+b_1 = \left(B_0^{-1} + X^\top X\right)^{-1}
+      \left(B_0^{-1}b_0 + X^\top X\hat\beta\right),
+$$
+
+a matrix-weighted average of what the prior believed and what the sample
+delivered, each weighted by the precision it brings. Because the weights are
+matrices rather than scalars, one prior shrinks hard along directions the design
+barely identifies and hardly at all along directions it pins down, and the whole
+update stays in closed form only while the prior keeps the coefficients and the
+variance tied to one another.
 :::
 
-## Start with a fund manager's question: how much market risk do we hold?
+After working through this chapter you can
+
+1. derive the Normal-Inverse-Gamma posterior by completing the matrix square, and
+   read its mean as a matrix-weighted average;
+2. diagnose in math which questions a one-parameter model of the sign of a return
+   cannot answer;
+3. implement the conjugate update for arbitrary $n$ and $k$, and check it against
+   a least-squares routine run on augmented data;
+4. interpret the two pieces of the variance update, the sample misfit and the
+   prior-data conflict;
+5. compare the marginal posterior of a coefficient with its Normal approximation
+   and with the classical confidence interval;
+6. compute the posterior probability that an exposure exceeds a benchmark value.
+
+Week 2 of 15, paired with the [Week 2 exercise
+session](../exercise-sessions/02-linear-regression.qmd). The chapter assumes
+Bayes theorem, conjugacy and the weighted-average reading of a posterior mean
+from Lecture 1, together with matrix algebra and least squares.
+
+## Motivation: how much market risk does a bank portfolio carry? {#sec-motivation}
 
 A manager describes a portfolio as roughly market neutral. The risk officer wants
-evidence, and the question that settles it is this: if the market's excess return rises by
-one percentage point, by how much does the portfolio's expected excess return rise? That
-number is the market beta. It is not the probability that the portfolio rises, and it is
-not the correlation.
+evidence, and the question that settles it is this: if the market's excess return
+rises by one percentage point, by how much does the portfolio's expected excess
+return rise? That number is the market beta. It is not the probability that the
+portfolio rises, which is the only object Lecture 1 could produce, and it is not
+the correlation.
 
-The running example of this chapter is one such portfolio, the US banking industry, and the
-question is asked of it in the form applied finance uses, a regression of the industry's
-excess return on the market, size and value factors of Fama and French. Banks are not an
-arbitrary choice. They are levered by construction, which suggests a market beta above one;
-they carry large book values against modest market values, which suggests a strong positive
-loading on the value factor; and they are dominated by a handful of very large
-institutions, which suggests a size loading at or below zero. Each claim is a statement
-about a coefficient, and by the end of the chapter each has a posterior distribution.
+The running example of this chapter is one such portfolio, the US banking
+industry, and the question is asked of it in the form applied finance uses, a
+regression of the industry's excess return on the market, size and value factors
+of Fama and French. Banks are not an arbitrary choice. They are levered by
+construction, which suggests a market beta above one; they carry large book values
+against modest market values, which suggests a strong positive loading on the
+value factor; and they are dominated by a handful of very large institutions,
+which suggests a size loading at or below zero. Each claim is a statement about a
+coefficient, and by the end of the chapter each has a posterior distribution.
 
-The first lecture introduced Bayes' theorem on a one-parameter model, where prior,
-likelihood and posterior could be drawn on one picture. This lecture moves the same
-machinery to the linear regression model, the block from which every later chapter is
-built. The result stated below holds for arbitrary sample size $n$ and arbitrary number of
-regressors $k$; the banking regression is what we check it on.
+Before any of that, the classical answer is worth having on the page, because it
+is what the risk officer would otherwise be handed. Least squares gives one number
+per exposure and a standard error beside it.
 
 ```{python}
 from pathlib import Path
@@ -46,54 +85,7 @@ DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
 rng = np.random.default_rng(2026)
 plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
                      "grid.alpha": 0.3, "font.size": 11})
-```
 
-The seed is used only for the Monte Carlo checks later in the chapter. No data are
-simulated anywhere below.
-
-## The model in matrix form
-
-Consider the industry and the factors in a single month $i$. The expected excess return is
-a linear function of the factors, and the realised return differs from it:
-
-$$y_i=\underbrace{\beta_0+\beta_1x_i+\beta_2 z_i+\beta_3 w_i}_{\text{conditional mean}}+
-\underbrace{\varepsilon_i}_{\text{unexplained return}}.$$
-
-We assume the unexplained part is Normal with mean zero and variance $\sigma^2$,
-independently across months. Symmetry, constant variance and independence are substantive
-simplifications, not consequences of being Bayesian. Inserting the residual
-$y_i - \beta_0 - \beta_1 x_i - \beta_2 z_i - \beta_3 w_i$ into the Normal density gives the
-density of one observation, its squared residual divided by $\sigma^2$ because a two
-percent error is surprising when the typical error is half a percent and unremarkable when
-it is five percent.
-
-Stack the $n$ observations into $y$ and the $k$ regressors into the $n \times k$ matrix
-$X$, whose first column is ones. Multiplying the $n$ densities turns the prefactors into
-$(2\pi\sigma^2)^{-n/2}$ and adds the exponents, so that $y \mid \beta, \sigma^2 \sim
-\mathcal{N}(X\beta, \sigma^2 I_n)$ with
-
-$$
-p(y \mid \beta, \sigma^2) = (2\pi\sigma^2)^{-n/2}
-\exp\!\left\{-\tfrac{1}{2\sigma^2}(y - X\beta)^\top (y - X\beta)\right\}.
-$$
-
-Read as a function of $\beta \in \mathbb{R}^k$ and $\sigma^2 > 0$ with $y$ and $X$ held
-fixed, this is the likelihood. Its exponent is a quadratic form in $\beta$, the signature
-of a Gaussian kernel, so a Gaussian prior and completing the square return another
-Gaussian, while the factor $(\sigma^2)^{-n/2}$ signals an inverse-Gamma.
-
-Here $y$ holds the banking portfolio's excess return and $X$ a constant, the market excess
-return, the size factor and the value factor, so $\beta_1$ is the industry's beta,
-$\beta_0$ its alpha, and $\beta_2$ and $\beta_3$ its size and value loadings. Both files
-come from the Kenneth French data library in decimal form, so the dependent variable is the
-banking return minus the risk-free rate. The sample starts in January 1990, which excludes
-the savings and loan crisis and so describes a reasonably homogeneous regulatory regime.
-
-*Reading the computation.* The first column is the intercept, followed by the market, size
-and value exposures. There are no true values to compare against; the only benchmark is
-economic reasoning about what a bank's exposures ought to look like.
-
-```{python}
 ff = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
 industry = pd.read_parquet(DATA / "ff_industry49_monthly.parquet")
 
@@ -109,64 +101,216 @@ ssr = (y - X @ b_ols) @ (y - X @ b_ols)
 s2_ols = ssr / (n - k)
 se_ols = np.sqrt(s2_ols * np.diag(np.linalg.inv(X.T @ X)))
 
-print(f"{n} months, {panel.index[0]:%Y-%m} to {panel.index[-1]:%Y-%m}, k = {k}")
-print(pd.DataFrame({"OLS": b_ols, "OLS se": se_ols}, index=names).round(4))
-print(f"\nOLS s^2 {s2_ols:.6f}   residual sd {np.sqrt(s2_ols):.4f}   "
-      f"R^2 {1 - ssr / ((y - y.mean())**2).sum():.4f}")
-```
-
-The sample is $439$ months, from January 1990 to July 2026, and every one of the three
-economic predictions survives contact with the data. The market beta is $1.1933$ with a
-standard error of $0.0331$, comfortably above one. The value loading is $0.8234$ with a
-standard error of $0.0444$, which is enormous: a bank portfolio behaves almost like a
-market position plus four fifths of a long-value position. The size loading is $-0.1004$
-with a standard error of $0.0473$, negative, small and only about two standard errors from
-zero, the ambiguity one would expect from an industry containing both money centre banks
-and several hundred small regional lenders. The alpha is $-0.0021$ per month, minus
-twenty-one basis points, with a standard error of $0.0014$. The three factors explain
-$78\%$ of the monthly variation, leaving a residual standard deviation of $2.95\%$ per
-month.
-
-*Reading the computation.* Each point is one month, with the market excess return on the
-horizontal axis and the banking industry's excess return on the vertical axis. The line is
-the fitted relationship holding the size and value factors at zero, so the vertical scatter
-around it is the part of banking returns that the market alone does not explain.
-
-```{python}
 grid_mkt = np.linspace(panel["mkt_rf"].min(), panel["mkt_rf"].max(), 50)
-fit_line = b_ols[0] + b_ols[1] * grid_mkt
-
 fig, ax = plt.subplots()
 ax.scatter(panel["mkt_rf"], y, s=10, alpha=0.45, color="steelblue")
-ax.plot(grid_mkt, fit_line, color="black", lw=1.4,
+ax.plot(grid_mkt, b_ols[0] + b_ols[1] * grid_mkt, color="black", lw=1.4,
         label=f"fitted slope {b_ols[1]:.2f}")
 ax.plot(grid_mkt, grid_mkt, ":", color="grey", lw=1.2, label="slope one")
 ax.set_xlabel("market excess return")
 ax.set_ylabel("banking industry excess return")
 ax.legend(fontsize=9)
 ax.set_title("Banks against the market, 1990-2026")
-plt.tight_layout()
-plt.show()
+plt.tight_layout(); plt.show()
+
+print(f"{n} months, {panel.index[0]:%Y-%m} to {panel.index[-1]:%Y-%m}, k = {k}")
+print(pd.DataFrame({"OLS": b_ols, "OLS se": se_ols}, index=names).round(4))
+print(f"\nOLS s^2 {s2_ols:.6f}   residual sd {np.sqrt(s2_ols):.4f}   "
+      f"R^2 {1 - ssr / ((y - y.mean())**2).sum():.4f}")
 ```
 
-The cloud is tight and clearly steeper than the dotted forty-five degree line, which is the
-visual content of a beta above one. The largest deviations sit in a handful of months in
-2008 and 2009, when banks fell far more than their market exposure alone would predict, and
-those months are also where the value factor does most of its work.
+Each point in the figure is one month, with the market excess return on the
+horizontal axis and the banking industry's excess return on the vertical axis.
+The line is the fitted relationship holding the size and value factors at zero, so
+the vertical scatter around it is the part of banking returns that the market
+alone does not explain. The cloud is tight and clearly steeper than the dotted
+forty-five degree line, which is the visual content of a beta above one. The
+largest deviations sit in a handful of months in 2008 and 2009, when banks fell
+far more than their market exposure alone would predict, and those months are also
+where the value factor does most of its work.
 
-## The Normal-Inverse-Gamma prior
+The sample is $439$ months, from January 1990 to July 2026, and every one of the
+three economic predictions survives contact with the data. The market beta is
+$1.1933$ with a standard error of $0.0331$, comfortably above one. The value
+loading is $0.8234$ with a standard error of $0.0444$, which is enormous: a bank
+portfolio behaves almost like a market position plus four fifths of a long-value
+position. The size loading is $-0.1004$ with a standard error of $0.0473$,
+negative, small and only about two standard errors from zero, the ambiguity one
+would expect from an industry containing both money centre banks and several
+hundred small regional lenders. The alpha is $-0.0021$ per month, minus twenty-one
+basis points, with a standard error of $0.0014$. The three factors explain $78\%$
+of the monthly variation, leaving a residual standard deviation of $2.95\%$ per
+month.
 
-We need beliefs about two unknowns: plausible exposures and a plausible residual variance.
-The variance must be positive, so an unrestricted Normal prior is a poor choice for it. An
-inverse-Gamma is one convenient positive distribution whose kernel has a power of $\sigma^2$
-and an exponential in $1/\sigma^2$, matching the variance terms in the Normal likelihood.
-Other positive priors are possible and usually require a sampler.
+Four numbers and four standard errors are not what the risk officer asked for. He
+wants the probability that the market beta exceeds one, and Result R-1.1 of
+Lecture 1 showed why a standard error cannot deliver a probability about a
+parameter: the coverage statement is about the interval, which is random before
+the data arrive, and not about the coefficient, which is a fixed unknown. Nothing
+in the switch from one parameter to four changes that argument, and increasing the
+sample does not repair it either. The repair in Lecture 1 was to give the unknown
+a distribution, and the same repair is available here. There are now five unknowns
+rather than one, four coefficients and an error variance, so the object being
+constructed is a five-dimensional posterior rather than a curve that fits on a
+page, but the rule producing it is unchanged.
 
-For the coefficients a Normal prior states a centre and an uncertainty around it. Scaling
-that uncertainty by $\sigma^2$ produces the joint prior below: if the model is very noisy,
-more prior variation in the coefficients is allowed too, and that dependence is what buys
-the closed form. An independent coefficient prior is a different model, studied with Gibbs
-sampling in Lecture 4. The Normal-Inverse-Gamma prior is therefore hierarchical,
+What has changed is that Lecture 1's machinery cannot represent this question in
+the first place. It counted positive months and learned a single probability;
+nothing in it refers to the market's return in a given month, and nothing in it
+has a slope. Before building the replacement it is worth being precise about what
+that model does and does not identify, because the list of its failures is the
+specification of what has to replace it.
+
+## The problem: counting months cannot measure an exposure {#sec-problem}
+
+### Result R-2.1: what a model of the sign of a return identifies
+
+Let $y_1, \dots, y_n$ be observed returns, let $L_t = \mathbf{1}\{y_t > 0\}$ and
+take the Lecture 1 model $L_t \mid \theta \sim \text{Bernoulli}(\theta)$
+independently, so that with $y = \sum_t L_t$ the likelihood is
+
+$$
+p(L_1, \dots, L_n \mid \theta) = \theta^{\,y}(1-\theta)^{\,n-y}.
+$$
+
+Three consequences follow, for any $n$ and any prior $f(\theta)$ on $(0,1)$.
+
+First, the count is sufficient: the likelihood depends on the data only through
+$y$, so for any function $g$,
+
+$$
+\mathbb{E}\!\left[g(\theta) \mid L_1,\dots,L_n\right] = \mathbb{E}\!\left[g(\theta) \mid y\right],
+$$
+
+and two samples with the same signs have the identical posterior however far apart
+their magnitudes are. Second, the mean determines the spread:
+$\mathbb{E}[L_t \mid \theta] = \theta$ and
+$\operatorname{Var}[L_t \mid \theta] = \theta(1-\theta)$, so the model has no free
+scale parameter and cannot be told that one month was turbulent and another calm.
+Third, the model contains no conditioning variable, so a derivative of the form
+$\partial\,\mathbb{E}[y_t \mid x_t]/\partial x_t$, which is what an exposure is, is
+not a functional of $\theta$ at all: there is no $x$ in the model to differentiate
+with respect to.
+
+The three failures are separate and each has to be repaired. The first needs the
+magnitude of a return to enter the likelihood, the second needs a variance
+parameter that is free to be learned, and the third needs a conditional mean that
+moves with observed covariates. The computation below makes the first two visible
+on the banking data by constructing a second sample with exactly the same signs
+and deliberately different magnitudes.
+
+```{python}
+sgn = (y > 0).astype(int)                        # keep only the sign of each month
+y_pos = int(sgn.sum())
+sign_post = stats.beta(1 + y_pos, 1 + n - y_pos)
+
+y_alt = np.where(y > 0, y, 3.0 * y)              # same signs, losing months tripled
+pos_alt = int((y_alt > 0).sum())
+alt_post = stats.beta(1 + pos_alt, 1 + n - pos_alt)
+b_alt = np.linalg.solve(X.T @ X, X.T @ y_alt)
+
+tg = np.linspace(0.45, 0.75, 400)
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3.8))
+ax1.plot(tg, sign_post.pdf(tg), lw=2.5, color="steelblue", label="original returns")
+ax1.plot(tg, alt_post.pdf(tg), "--", lw=2.0, color="firebrick",
+         label="losing months tripled")
+ax1.set_xlabel(r"$\theta$, probability of a positive month")
+ax1.set_ylabel("posterior density"); ax1.legend(fontsize=9)
+ax1.set_title("The sign model cannot tell the two apart")
+ax2.scatter(panel["mkt_rf"], y, s=9, alpha=0.4, color="steelblue", label="original")
+ax2.scatter(panel["mkt_rf"], y_alt, s=9, alpha=0.4, color="firebrick", label="tripled")
+ax2.plot(grid_mkt, b_ols[0] + b_ols[1] * grid_mkt, color="steelblue", lw=1.6)
+ax2.plot(grid_mkt, b_alt[0] + b_alt[1] * grid_mkt, color="firebrick", lw=1.6)
+ax2.set_xlabel("market excess return"); ax2.set_ylabel("banking excess return")
+ax2.legend(fontsize=9); ax2.set_title("The regression can")
+plt.tight_layout(); plt.show()
+
+print(f"positive months: original {y_pos} of {n}, tripled losses {pos_alt} of {n}")
+print(f"sign model  E[theta|data]  original {sign_post.mean():.6f}   "
+      f"tripled {alt_post.mean():.6f}")
+print(f"sign model  implied Var(L_t) = theta(1-theta) = "
+      f"{sign_post.mean()*(1-sign_post.mean()):.6f} in both samples")
+print(f"market beta   original {b_ols[1]:.4f}   tripled {b_alt[1]:.4f}")
+print(f"monthly sd    original {y.std(ddof=1):.4f}   tripled {y_alt.std(ddof=1):.4f}")
+```
+
+The two posterior densities in the left panel are not merely close, they are the
+same curve drawn twice, because both samples contain $260$ positive months out of
+$439$ and the likelihood sees nothing else. Both report a posterior mean of
+$0.5918$ for the probability of a positive month, to six decimals, in two worlds
+that any investor would distinguish immediately. The right panel shows what was
+thrown away: tripling every losing month leaves the signs untouched but drags the
+fitted line from a slope of $1.1933$ to one of $2.4394$, and raises the monthly
+standard deviation of the portfolio from $6.26\%$ to $13.38\%$. A model whose
+answer is identical across those two worlds is not a model of risk, and the
+invariance is not a small-sample artefact: it is the sufficiency statement of
+Result R-2.1, and it would survive any amount of extra data.
+
+The middle line of the printout is the second failure in one number. The sign model
+reports a variance of $0.2416$ for $L_t$ whichever sample it is given, because
+$\theta(1-\theta)$ is a function of the mean and nothing in the data can move it
+independently. A risk officer who asks how volatile the portfolio is gets the
+volatility of a coin flip, in units of a coin flip. The third failure needs no
+computation to see, since the word "beta" does not appear anywhere in the
+Beta-Binomial model: the number in the right panel exists only because a second
+series, the market return, entered the calculation, and $\theta$ has nowhere to
+put it.
+
+Lecture 1's posterior probability of a losing month was an honest answer to the
+question it was asked, and it remains so. What Result R-2.1 says is that the
+question the risk officer asks next cannot be phrased in that model's vocabulary at
+all, so no amount of care with priors or intervals will produce it. The smallest
+model that repairs all three failures at once keeps the magnitude of $y_t$, gives
+the spread a parameter of its own, and makes the conditional mean a function of
+observed regressors. That is the Normal linear regression with an unknown variance,
+and the rest of the chapter is the Bayesian analysis of it.
+
+## Methodology: the Normal-Inverse-Gamma regression {#sec-methodology}
+
+Consider one observation $i$ and let its expected value be a linear function of $k$
+observed regressors, with the realised value differing from it by an unexplained
+amount:
+
+$$y_i=\underbrace{\beta_0+\beta_1x_i+\beta_2 z_i+\beta_3 w_i}_{\text{conditional mean}}+
+\underbrace{\varepsilon_i}_{\text{unexplained part}}.$$
+
+We assume the unexplained part is Normal with mean zero and variance $\sigma^2$,
+independently across observations. Symmetry, constant variance and independence are
+substantive simplifications, not consequences of being Bayesian, and each is relaxed
+somewhere later in the course. Inserting the residual into the Normal density gives
+the density of one observation, its squared residual divided by $\sigma^2$ because a
+two percent error is surprising when the typical error is half a percent and
+unremarkable when it is five percent. Stacking the $n$ observations into $y$ and the
+$k$ regressors into the $n \times k$ matrix $X$, whose first column is ones,
+multiplying the $n$ densities turns the prefactors into $(2\pi\sigma^2)^{-n/2}$ and
+adds the exponents, so that
+$y \mid \beta, \sigma^2 \sim \mathcal{N}(X\beta, \sigma^2 I_n)$ with
+
+$$
+p(y \mid \beta, \sigma^2) = (2\pi\sigma^2)^{-n/2}
+\exp\!\left\{-\tfrac{1}{2\sigma^2}(y - X\beta)^\top (y - X\beta)\right\}.
+$$
+
+Read as a function of $\beta \in \mathbb{R}^k$ and $\sigma^2 > 0$ with $y$ and $X$
+held fixed, this is the likelihood, and all three failures of Result R-2.1 are
+repaired at once: the magnitude of $y_i$ enters through the squared residual,
+$\sigma^2$ is a free parameter, and the conditional mean moves with the regressors.
+Its exponent is a quadratic form in $\beta$, the signature of a Gaussian kernel, so a
+Gaussian prior and completing the square return another Gaussian, while the factor
+$(\sigma^2)^{-n/2}$ signals an inverse-Gamma.
+
+### The prior, and why the variance appears inside it
+
+We need beliefs about two unknowns: plausible coefficients and a plausible residual
+variance. The variance must be positive, so an unrestricted Normal prior is a poor
+choice for it, while an inverse-Gamma has a kernel with a power of $\sigma^2$ and an
+exponential in $1/\sigma^2$, matching the variance terms in the likelihood. For the
+coefficients a Normal prior states a centre and an uncertainty around it. Scaling
+that uncertainty by $\sigma^2$ produces the joint prior below: if the model is very
+noisy, more prior variation in the coefficients is allowed too, and that dependence
+is what buys the closed form. An independent coefficient prior is a different model,
+studied with Gibbs sampling in Lecture 4. The Normal-Inverse-Gamma prior is
+therefore hierarchical,
 
 $$
 \beta \mid \sigma^2 \sim \mathcal{N}\!\left(b_0, \sigma^2 B_0\right), \qquad
@@ -174,71 +318,54 @@ $$
 $$
 
 the inverse-Gamma in the shape-scale parameterisation $p(\sigma^2) \propto
-(\sigma^2)^{-\alpha_0-1}\exp(-\delta_0/\sigma^2)$, exactly `scipy.stats.invgamma(a=alpha0,
-scale=delta0)`, with mean $\bar\sigma^2 = \delta_0/(\alpha_0-1)$ for $\alpha_0>1$.
+(\sigma^2)^{-\alpha_0-1}\exp(-\delta_0/\sigma^2)$, exactly
+`scipy.stats.invgamma(a=alpha0, scale=delta0)`, with mean
+$\bar\sigma^2 = \delta_0/(\alpha_0-1)$ for $\alpha_0>1$.
 
-The $\sigma^2$ inside $\sigma^2 B_0$ is the price of conjugacy: prior uncertainty about the
-coefficients is proportional to the noise, so $B_0$ is not in the units of $\beta$. To give
-coefficient $j$ the prior standard deviation $\tau_j$ we set $B_{0,jj} =
-\tau_j^2/\bar\sigma^2$, which is the moment inversion $B_0 = \operatorname{Var}[\beta] /
-\mathbb{E}[\sigma^2]$ applied one coefficient at a time.
+The $\sigma^2$ inside $\sigma^2 B_0$ is the price of conjugacy, so $B_0$ is not in the
+units of $\beta$: to give coefficient $j$ the prior standard deviation $\tau_j$ we set
+$B_{0,jj} = \tau_j^2/\bar\sigma^2$, the moment inversion
+$B_0 = \operatorname{Var}[\beta] / \mathbb{E}[\sigma^2]$ one coefficient at a time.
 
 ### The prior as extra regression rows
 
-Before deriving anything, it is worth seeing what this prior is, because the most useful
-way to read it makes the entire update obvious and is how shrinkage priors are implemented
-in practice. A Normal prior on $\beta$ is a set of artificial regression rows.
-
-Let $C$ be any matrix with $C^\top C = B_0^{-1}$, for instance an upper Cholesky factor,
-and consider the artificial regression equation
+The most useful way to read this prior makes the entire update obvious and is how
+shrinkage priors are implemented in practice. A Normal prior on $\beta$ is a set of
+artificial regression rows. Let $C$ be any matrix with $C^\top C = B_0^{-1}$, for
+instance an upper Cholesky factor, and consider the artificial equation
 
 $$
 C b_0 = C\beta + \varepsilon_0, \qquad \varepsilon_0 \sim \mathcal{N}(0, \sigma^2 I_k),
 $$
 
-which rearranges to $\beta = b_0 - C^{-1}\varepsilon_0$, a Normal vector with mean $b_0$
-and covariance $\sigma^2 C^{-1}C^{-\top} = \sigma^2 B_0$. That is exactly the prior. Now
-stack those $k$ artificial rows underneath the $n$ real ones,
+which rearranges to $\beta = b_0 - C^{-1}\varepsilon_0$, a Normal vector with mean
+$b_0$ and covariance $\sigma^2 C^{-1}C^{-\top} = \sigma^2 B_0$, exactly the prior.
+Stack those $k$ artificial rows underneath the $n$ real ones,
+$\tilde y = (y^\top, (Cb_0)^\top)^\top$ and
+$\tilde X = (X^\top, C^\top)^\top$, and note that
 
 $$
-\tilde y = \begin{pmatrix} y \\ C b_0 \end{pmatrix}, \qquad
-\tilde X = \begin{pmatrix} X \\ C \end{pmatrix}, \qquad
-\begin{pmatrix} \varepsilon \\ \varepsilon_0 \end{pmatrix} \sim \mathcal{N}(0, \sigma^2 I_{n+k}),
-$$
-
-and note that the residual sum of squares of the stacked system is
-
-$$
-\|\tilde y - \tilde X\beta\|^2 = \|y - X\beta\|^2 + \|Cb_0 - C\beta\|^2
+\|\tilde y - \tilde X\beta\|^2
 = (y-X\beta)^\top(y-X\beta) + (\beta - b_0)^\top B_0^{-1}(\beta - b_0),
 $$
 
-precisely the two squared distances that the likelihood and the prior contribute to the
-joint exponent. Differentiating with respect to $\beta$ and setting the derivative to zero
-gives the normal equations of the stacked system,
+precisely the two squared distances that likelihood and prior contribute to the
+joint exponent. Differentiating and setting the derivative to zero gives the normal
+equations of the stacked system,
+$(X^\top X + B_0^{-1})\,b_1 = X^\top y + B_0^{-1}b_0$, so the posterior mean is the
+least-squares solution of an augmented regression and the posterior precision is the
+augmented cross-product matrix. The artificial rows express soft restrictions, with
+a tighter prior making the row harder to violate. They are not extra observed months
+and not extra degrees of freedom, so they must not be counted as observations when
+updating the inverse-Gamma shape. The dummy-observation form of the Minnesota prior
+in Lecture 6 is this same trick applied to a vector autoregression.
 
-$$
-(X^\top X + B_0^{-1})\,b_1 = X^\top y + B_0^{-1}b_0 ,
-$$
+### Result R-2.2: the posterior and its matrix-weighted mean
 
-so the posterior mean is the least-squares solution of an augmented regression, and the
-posterior precision is the augmented cross-product matrix. Everything in the next section
-is this identity written out carefully.
-
-The artificial rows express soft restrictions: they say where coefficients should sit
-before the data speak, with a tighter prior making the row harder to violate. They are not
-extra observed months and not extra degrees of freedom, so they must not be counted as
-observations when updating the inverse-Gamma shape, and an augmented-data likelihood must
-not be used to compute model evidence, because the prior's normalising constants still
-matter. The dummy-observation form of the Minnesota prior in Lecture 6 is this same trick
-applied to a vector autoregression.
-
-## Result: the posterior under the Normal-Inverse-Gamma prior
-
-For the model $y \mid \beta, \sigma^2 \sim \mathcal{N}(X\beta, \sigma^2 I_n)$ with $X$ of
-full column rank $k$, and the prior $\beta \mid \sigma^2 \sim \mathcal{N}(b_0, \sigma^2
-B_0)$, $\sigma^2 \sim \text{IG}(\alpha_0, \delta_0)$, the posterior is
-Normal-Inverse-Gamma with
+For the model $y \mid \beta, \sigma^2 \sim \mathcal{N}(X\beta, \sigma^2 I_n)$ with
+$X$ of full column rank $k$, and the prior $\beta \mid \sigma^2 \sim
+\mathcal{N}(b_0, \sigma^2 B_0)$, $\sigma^2 \sim \text{IG}(\alpha_0, \delta_0)$, the
+posterior is Normal-Inverse-Gamma with parameters
 
 $$
 B_1^{-1} = B_0^{-1} + X^\top X, \qquad
@@ -247,50 +374,49 @@ b_1 = B_1\!\left(B_0^{-1}b_0 + X^\top y\right), \qquad
 \delta_1 = \delta_0 + \frac{Q}{2},
 $$
 
-where $Q = y^\top y + b_0^\top B_0^{-1}b_0 - b_1^\top B_1^{-1}b_1$, and the three
-distributions one actually reports are
+where $Q = y^\top y + b_0^\top B_0^{-1}b_0 - b_1^\top B_1^{-1}b_1$. Precisions add,
+and since $X^\top y = X^\top X\hat\beta$ with $\hat\beta$ the least-squares estimate,
+the coefficient mean is the matrix-weighted average
 
 $$
-\beta \mid \sigma^2, y \sim \mathcal{N}\!\left(b_1,\; \sigma^2 B_1\right), \qquad
-\sigma^2 \mid y \sim \text{IG}(\alpha_1, \delta_1), \qquad
-\beta \mid y \sim t_{2\alpha_1}\!\left(b_1,\; \tfrac{\delta_1}{\alpha_1}B_1\right).
+b_1 = \left(B_0^{-1} + X^\top X\right)^{-1}
+      \left(B_0^{-1}b_0 + X^\top X\hat\beta\right),
 $$
 
-Precisions add, and $b_1$ is a matrix-weighted average of the prior mean and the
-least-squares fit. The third line is a multivariate Student $t$ with $\nu = 2\alpha_1$
-degrees of freedom and scale matrix $\Sigma_1 = (\delta_1/\alpha_1)B_1$, whose variance is
-$\frac{\nu}{\nu-2}\Sigma_1 = \mathbb{E}[\sigma^2 \mid y]\,B_1$; coefficient $j$ has a
-univariate $t_\nu$ marginal with location $b_{1,j}$ and scale $\sqrt{\Sigma_{1,jj}}$.
+which is Result R-1.3 of Lecture 1 with matrices in place of scalars. Setting
+$B_0^{-1} = 0$ returns $\hat\beta$ exactly, and letting the sample grow sends
+$X^\top X$ to dominance over any fixed $B_0^{-1}$, so the prior fades at the rate at
+which information accumulates. Because the weights are matrices, the fading is not
+uniform: a direction of the coefficient space in which $X^\top X$ is small stays
+under the prior's control long after the well-identified directions have been
+surrendered to the data.
 
-Multiplying likelihood by prior gives a joint kernel proportional to
-$(\sigma^2)^{-(n+k)/2-\alpha_0-1}\exp\{-\frac{1}{2\sigma^2}[\cdot]\}$, where the bracket
-collects $(y-X\beta)^\top(y-X\beta) + (\beta-b_0)^\top B_0^{-1}(\beta-b_0) + 2\delta_0$.
-The first two terms are the augmented residual sum of squares of the previous section, so
-completing the square in $\beta$ turns them into $(\beta-b_1)^\top B_1^{-1}(\beta-b_1) + Q$
-with $b_1$ and $B_1$ as stated. Holding $\sigma^2$ fixed, the coefficient kernel is
-$\exp[-(\beta-b_1)^\top B_1^{-1}(\beta-b_1)/(2\sigma^2)]$, whose centre and quadratic
-coefficient identify the Normal conditional. Integrating that kernel out uses the fact that
-a normalised $k$-dimensional Normal density integrates to one, so its unnormalised kernel
-integrates to its missing constant,
+The remainder $Q$ is convenient to compute but says nothing in that form. It can
+also be written as
 
-$$\int \exp\left[-\frac{(\beta-b_1)^\top B_1^{-1}(\beta-b_1)}{2\sigma^2}\right]d\beta
-=(2\pi\sigma^2)^{k/2}|B_1|^{1/2}.$$
+$$
+Q = \underbrace{\text{SSR}}_{\text{misfit of the data}}
+\; + \; \underbrace{(b_0 - \hat\beta)^\top\left[B_0 + (X^\top X)^{-1}\right]^{-1}(b_0 - \hat\beta)}_{\text{prior-data conflict}},
+$$
 
-The only variance-dependent piece is $(\sigma^2)^{k/2}$, which changes the power from
-$-(n+k)/2-\alpha_0-1$ to $-n/2-\alpha_0-1$ and leaves $\exp[-(\delta_0 + Q/2)/\sigma^2]$.
-Comparing with the inverse-Gamma density identifies $\alpha_1 = \alpha_0 + n/2$ and
-$\delta_1 = \delta_0 + Q/2$. The $k/2$ disappears because the coefficients were integrated
-out; it would remain if they were held fixed, which is the difference between the marginal
-and the full conditional below. The Student $t$ marginal follows from the representation
-$\beta = b_1 + \sigma L z$ with $LL^\top = B_1$ and $z \sim \mathcal{N}(0, I_k)$, since
-$\sigma^2 \sim \text{IG}(\alpha_1,\delta_1)$ is the same as $2\delta_1/\sigma^2 \sim
-\chi^2_{2\alpha_1}$, so the representation divides a Gaussian vector by an independent root
-chi-square, which is the definition of a multivariate $t$.
+with $\text{SSR} = (y - X\hat\beta)^\top(y - X\hat\beta)$. Read this way the variance
+update is transparent: the data contribute their own misfit and the prior the distance
+between what it expected and what the sample delivered, weighted by how precise each
+source is. If prior and data agree, only the residual sum of squares raises $\delta_1$;
+if they disagree sharply while both claim precision, the term is large and the
+posterior for $\sigma^2$ shifts up, because the conflict has to go somewhere and the
+error variance is the only place left. This form needs a proper prior, since $B_0$
+appears rather than $B_0^{-1}$.
 
 ::: {.callout-note collapse="true"}
 ## Derivation: completing the matrix square, step by step
 
-For any candidate $\beta$, set $P_1=B_0^{-1}+X^\top X$ and
+Multiplying likelihood by prior gives a joint kernel proportional to
+$(\sigma^2)^{-(n+k)/2-\alpha_0-1}\exp\{-\frac{1}{2\sigma^2}[\cdot]\}$, where the
+bracket collects
+$(y-X\beta)^\top(y-X\beta) + (\beta-b_0)^\top B_0^{-1}(\beta-b_0) + 2\delta_0$. The
+first two terms are the augmented residual sum of squares of the previous
+subsection. For any candidate $\beta$, set $P_1=B_0^{-1}+X^\top X$ and
 $d=X^\top y+B_0^{-1}b_0$. Then
 
 $$
@@ -302,16 +428,23 @@ $$
 \end{aligned}
 $$
 
-The first line expands both quadratic forms and discards nothing. The second
-groups the terms by their power of $\beta$. The third adds and subtracts
+The first line expands both quadratic forms and discards nothing. The second groups
+the terms by their power of $\beta$. The third adds and subtracts
 $d^\top P_1^{-1} d$, which is the completion itself, and identifies
 $b_1 = P_1^{-1}d$ and $B_1 = P_1^{-1}$. The leftover is
 $Q = y^\top y + b_0^\top B_0^{-1}b_0 - b_1^\top B_1^{-1} b_1$.
 
 An equivalent, manifestly nonnegative expression for the remainder is
-$Q=\|y-Xb_1\|^2+(b_1-b_0)^\top B_0^{-1}(b_1-b_0)$, which is the augmented
-residual sum of squares evaluated at $b_1$. It is useful for checking an
-implementation: the two forms must agree.
+$Q=\|y-Xb_1\|^2+(b_1-b_0)^\top B_0^{-1}(b_1-b_0)$, the augmented residual sum of
+squares evaluated at $b_1$. It is useful for checking an implementation: the two
+forms must agree.
+
+For the interpretable form, substitute $X^\top y = X^\top X\hat\beta$ into
+$b_1 = B_1(B_0^{-1}b_0 + X^\top X\hat\beta)$, write
+$b_1 - \hat\beta = B_1 B_0^{-1}(b_0 - \hat\beta)$ and
+$b_1 - b_0 = B_1 X^\top X(\hat\beta - b_0)$, substitute both into the nonnegative
+form, and collect the two terms in $b_0 - \hat\beta$ using
+$B_0^{-1}B_1 X^\top X = [B_0 + (X^\top X)^{-1}]^{-1}$.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -320,9 +453,9 @@ implementation: the two forms must agree.
 Set $X=\mathbf1_n$ and write the intercept prior as
 $\beta\mid\sigma^2\sim\mathcal N(b_0,\sigma^2/\kappa_0)$, so that
 $B_0^{-1} = \kappa_0$. The general result gives the updated mean
-$b_1 = (\kappa_0b_0+n\bar y)/(\kappa_0+n)$, a weighted average of the prior mean
-and the sample mean with weights $\kappa_0$ and $n$. Completing the square uses
-the identity
+$b_1 = (\kappa_0b_0+n\bar y)/(\kappa_0+n)$, a weighted average of the prior mean and
+the sample mean with weights $\kappa_0$ and $n$. Completing the square uses the
+identity
 
 $$
 \sum_i(y_i-\beta)^2+\kappa_0(\beta-b_0)^2
@@ -333,58 +466,44 @@ $$
 
 in which three quantities have different jobs: variation around the sample mean,
 disagreement between the prior and the data, and remaining uncertainty about the
-coefficient. The first two are the scalar case of $Q$ and the third is the
-posterior kernel.
+coefficient. The first two are the scalar case of $Q$, split exactly as the
+misfit-plus-conflict form above splits it, and the third is the posterior kernel.
 
-A numerical instance takes four observations $x=(-2,-1,1,2)$, $y=(-3,-1,2,4)$
-with no intercept, so that $\sum x_t^2=10$, $\sum x_ty_t=17$ and
-$\sum y_t^2=30$, with $\beta\mid\sigma^2\sim N(1,\sigma^2/2)$ and
-$\sigma^2\sim IG(3,2)$. The exponent contains
+A numerical instance takes four observations $x=(-2,-1,1,2)$, $y=(-3,-1,2,4)$ with
+no intercept, so that $\sum x_t^2=10$, $\sum x_ty_t=17$ and $\sum y_t^2=30$, with
+$\beta\mid\sigma^2\sim N(1,\sigma^2/2)$ and $\sigma^2\sim IG(3,2)$. The exponent
+contains
 
 $$\sum_t(y_t-\beta x_t)^2+2(\beta-1)^2
 =32-38\beta+12\beta^2
 =12(\beta-19/12)^2+23/12,$$
 
-so $\beta\mid\sigma^2,y\sim N(19/12,\sigma^2/12)$ and, after the
-$(\sigma^2)^{1/2}$ contributed by integrating $\beta$ out,
-$\sigma^2\mid y\sim IG(5,71/24)$. Integrating the variance out in turn gives a
-$t_{10}$ marginal for $\beta$ centred on $19/12\approx1.58$ with scale
-$\sqrt{(71/24)/(5\cdot12)}\approx0.222$. Least squares would report
-$17/10=1.7$; the posterior moves that exposure toward the prior benchmark of one
-because four observations cannot establish a hedging ratio. Regression
-generalises this from one mean to a vector of conditional means, and the matrix
-square is the identical completion performed for several coefficients at once.
+so $\beta\mid\sigma^2,y\sim N(19/12,\sigma^2/12)$ and, after the $(\sigma^2)^{1/2}$
+contributed by integrating $\beta$ out, $\sigma^2\mid y\sim IG(5,71/24)$. Integrating
+the variance out in turn gives a $t_{10}$ marginal for $\beta$ centred on
+$19/12\approx1.58$ with scale $\sqrt{(71/24)/(5\cdot12)}\approx0.222$. Least squares
+would report $17/10=1.7$; the posterior moves that exposure toward the prior
+benchmark of one because four observations cannot establish a hedging ratio.
+Regression generalises this from one mean to a vector of conditional means, and the
+matrix square is the identical completion performed for several coefficients at
+once.
 :::
 
-### Result: an equivalent form for the variance update
+### Result R-2.3: the marginals one reports and the conditionals a sampler needs
 
-The remainder $Q$ is convenient to compute but says nothing in the form above. Writing
-$\hat\beta = (X^\top X)^{-1}X^\top y$ for the least-squares estimate, it can also be
-written as
+Under the assumptions of Result R-2.2 the joint posterior factorises two ways. The
+first gives the objects a reader wants,
 
 $$
-Q = \underbrace{\text{SSR}}_{\text{misfit of the data}}
-\; + \; \underbrace{(b_0 - \hat\beta)^\top\left[B_0 + (X^\top X)^{-1}\right]^{-1}(b_0 - \hat\beta)}_{\text{prior-data conflict}},
+\sigma^2 \mid y \sim \text{IG}(\alpha_1, \delta_1), \qquad
+\beta \mid y \sim t_{2\alpha_1}\!\left(b_1,\; \tfrac{\delta_1}{\alpha_1}B_1\right),
 $$
 
-with $\text{SSR} = (y - X\hat\beta)^\top(y - X\hat\beta)$. The derivation substitutes
-$X^\top y = X^\top X\hat\beta$ into $b_1 = B_1(B_0^{-1}b_0 + X^\top X\hat\beta)$, writes
-$b_1 - \hat\beta = B_1 B_0^{-1}(b_0 - \hat\beta)$ and $b_1 - b_0 = B_1 X^\top X(\hat\beta -
-b_0)$, substitutes both into the nonnegative form $Q = \|y - Xb_1\|^2 + (b_1-b_0)^\top
-B_0^{-1}(b_1-b_0)$, and collects the two terms in $b_0 - \hat\beta$ using
-$B_0^{-1}B_1 X^\top X = [B_0 + (X^\top X)^{-1}]^{-1}$.
-
-Read this way the variance update is transparent. The data contribute their own misfit and
-the prior the distance between what it expected and what the sample delivered, in a metric
-that weighs the disagreement by how precise each is. If prior and data agree, only the
-residual sum of squares raises $\delta_1$. If they disagree sharply while both claim
-precision, the term is large and the posterior for $\sigma^2$ shifts up, because the
-conflict has to go somewhere and the error variance is the only place left. The form needs
-a proper prior, since $B_0$ appears rather than $B_0^{-1}$.
-
-### Result: the two full conditionals
-
-The same joint posterior factorises the other way round, which is what a sampler needs:
+a multivariate Student $t$ with $\nu = 2\alpha_1$ degrees of freedom and scale matrix
+$\Sigma_1 = (\delta_1/\alpha_1)B_1$, whose variance is
+$\frac{\nu}{\nu-2}\Sigma_1 = \mathbb{E}[\sigma^2 \mid y]\,B_1$, and coefficient $j$ has
+a univariate $t_\nu$ marginal with location $b_{1,j}$ and scale
+$\sqrt{\Sigma_{1,jj}}$. The second gives the objects a sampler needs,
 
 $$
 \beta \mid \sigma^2, y \sim \mathcal{N}(b_1, \sigma^2 B_1), \qquad
@@ -392,31 +511,176 @@ $$
 \delta_1 + \tfrac{1}{2}(\beta - b_1)^\top B_1^{-1}(\beta - b_1)\right).
 $$
 
-The second differs from the marginal $\text{IG}(\alpha_1,\delta_1)$ by exactly the $k/2$
-that integrating the coefficients out removed, plus the quadratic form contributed by the
-fixed $\beta$; both come from reading the joint kernel as a function of $\sigma^2$ with
-$\beta$ held fixed rather than integrated. Cycling between these two draws is a two-block
-Gibbs sampler, the subject of Lecture 4. Here the answer is known, so the sampler is a test
-rather than a tool and is left to the exercise session.
+The two inverse-Gamma shapes differ by exactly the $k/2$ that integrating the
+coefficients out removes. Cycling between the two conditional draws is a two-block
+Gibbs sampler, the subject of Lecture 4; here the answer is known in closed form, so
+a sampler is a test rather than a tool.
 
-We now set the prior and encode the four formulas as one function, taking $B_0^{-1}$ as an
-argument so that a matrix of zeros can be passed later. The prior states the null model
-asset pricing theory offers before any data are seen. Alpha is centred at zero, because a
-non-zero alpha on a liquid, heavily arbitraged industry index is a strong claim, with a
-prior standard deviation of twenty basis points a month. The market beta is centred at one,
-the exposure of the market portfolio to itself, with a prior standard deviation of one
-half, spanning everything from a defensive utility-like sector to a doubly levered one. The
-size and value loadings are centred at zero, the neutral position for an industry that is
-not a disguised bet on small or on cheap firms, each with a prior standard deviation of one
-half. The variance prior is $\text{Inverse-Gamma}(3, 0.0018)$, whose mean $0.0009$ is a
-residual standard deviation of three percent a month, the order of magnitude of
-idiosyncratic monthly volatility for a diversified industry portfolio.
+::: {.callout-note collapse="true"}
+## Derivation: integrating one block out, then the other
 
-*Reading the computation.* P1 collects prior and sample information and b1 solves the
-resulting linear system, while Q is what remains after completing the square. The second
-half draws $\sigma^2$ from its marginal and then $\beta$ from $\mathcal{N}(b_1, \sigma^2
-B_1)$, which samples the joint posterior exactly, so the sampled moments must reproduce the
-analytic ones.
+Holding $\sigma^2$ fixed in the completed kernel of Result R-2.2, the part depending
+on $\beta$ is $\exp[-(\beta-b_1)^\top B_1^{-1}(\beta-b_1)/(2\sigma^2)]$, whose centre
+and quadratic coefficient identify the Normal conditional
+$\mathcal{N}(b_1, \sigma^2 B_1)$. Integrating that kernel out uses the fact that a
+normalised $k$-dimensional Normal density integrates to one, so its unnormalised
+kernel integrates to its missing constant,
+
+$$\int \exp\left[-\frac{(\beta-b_1)^\top B_1^{-1}(\beta-b_1)}{2\sigma^2}\right]d\beta
+=(2\pi\sigma^2)^{k/2}|B_1|^{1/2}.$$
+
+The only variance-dependent piece is $(\sigma^2)^{k/2}$, which changes the power from
+$-(n+k)/2-\alpha_0-1$ to $-n/2-\alpha_0-1$ and leaves
+$\exp[-(\delta_0 + Q/2)/\sigma^2]$. Comparing with the inverse-Gamma density
+identifies $\alpha_1 = \alpha_0 + n/2$ and $\delta_1 = \delta_0 + Q/2$. The $k/2$
+disappears because the coefficients were integrated out; it remains when they are
+held fixed, which is the entire difference between the marginal and the full
+conditional for $\sigma^2$, and the quadratic form in that conditional is what is
+left of the bracket when $\beta$ is not at $b_1$.
+
+Integrating the other way round, substitute $u = 1/\sigma^2$ in the joint posterior
+and use $\int_0^\infty u^{a-1}e^{-bu}du=\Gamma(a)/b^{a}$ with $a = \alpha_1 + k/2$ and
+$b = \delta_1 + \frac12(\beta-b_1)^\top B_1^{-1}(\beta-b_1)$ to obtain
+
+$$
+p(\beta\mid y)\propto
+\left[\delta_1+\tfrac12(\beta-b_1)^\top B_1^{-1}(\beta-b_1)\right]^{-(\alpha_1+k/2)},
+$$
+
+the multivariate $t$ written as a kernel. The same conclusion follows from the
+representation $\beta = b_1 + \sigma L z$ with $LL^\top = B_1$ and
+$z \sim \mathcal{N}(0, I_k)$, since $\sigma^2 \sim \text{IG}(\alpha_1,\delta_1)$ is the
+same as $2\delta_1/\sigma^2 \sim \chi^2_{2\alpha_1}$, so the representation divides a
+Gaussian vector by an independent root chi-square, which is the definition of a
+multivariate $t$. The Student tails are therefore not a technicality: small posterior
+probability on large variances still contributes to extreme coefficient values.
+Substituting $\mathbb{E}[\sigma^2\mid y]$ into a Normal matches the covariance when
+the moment exists, but does not reproduce the marginal distribution.
+:::
+
+### The noninformative limit
+
+The conventional noninformative choice for this model is
+$p(\beta, \sigma^2) \propto 1/\sigma^2$, flat in $\beta$ over $\mathbb{R}^k$ and flat
+in $\log \sigma^2$ over $\mathbb{R}$. The second half follows from the
+change-of-variable rule: if $\log\sigma^2$ is uniform then transforming back
+multiplies by the Jacobian $d\log\sigma^2/d\sigma^2 = 1/\sigma^2$, and flatness on the
+log scale is the natural statement for a positive scale parameter because it makes the
+prior invariant to the units of measurement. The prior is improper, which is tolerable
+here but never automatic; the posterior is proper provided $X$ has full column rank,
+$n > k$ and the residual sum of squares is positive.
+
+Multiplying it into the likelihood and using the identity
+$(y-X\beta)^\top(y-X\beta) = \text{SSR} + (\beta - \hat\beta)^\top X^\top X(\beta-\hat\beta)$,
+which is the same completion of the square with $B_0^{-1} = 0$, gives a
+Normal-Inverse-Gamma kernel centred at the least-squares estimate with precision
+matrix $X^\top X$, hence
+
+$$
+\beta \mid y \sim t_{n-k}\!\left(\hat\beta, \; s^2 (X^\top X)^{-1}\right),
+\qquad
+\sigma^2 \mid y \sim \text{Inverse-Gamma}\!\left(\frac{n-k}{2}, \frac{\text{SSR}}{2}\right),
+$$
+
+with $s^2 = \text{SSR}/(n-k)$, alongside the conditionals
+$\beta \mid \sigma^2, y \sim \mathcal{N}(\hat\beta, \sigma^2 (X^\top X)^{-1})$ and
+$\sigma^2 \mid \beta, y \sim \text{IG}(n/2, (y-X\beta)^\top(y-X\beta)/2)$, whose shape
+is $n/2$ rather than $(n-k)/2$ because holding $\beta$ fixed forgoes the $k$ degrees of
+freedom that estimating it costs. In the general result the same answers appear as the
+formal substitution $B_0^{-1} \to 0$, $\alpha_0 \to -k/2$, $\delta_0 \to 0$, where the
+shape $-k/2$ removes the $(\sigma^2)^{-k/2}$ the conjugate prior contributes; a negative
+inverse-Gamma shape is a statement about the kernel and not an instruction to sample one.
+That marginal is what makes the Bayesian and classical answers coincide numerically here,
+which @sec-discussion checks.
+
+## Data: the banking industry and the Fama-French factors, 1990 to 2026 {#sec-data}
+
+The chapter's dataset is two monthly files from the Kenneth French data library,
+`data/ff_factors_monthly.parquet` for the three factors and the risk-free rate and
+`data/ff_industry49_monthly.parquet` for the forty-nine industry portfolios, of which
+we use the `banks` column. Both are in decimal form, so the dependent variable is the
+banking industry return minus the one-month Treasury bill rate. The sample starts in
+January 1990, which excludes the savings and loan crisis and so describes a reasonably
+homogeneous regulatory regime, and ends in July 2026, giving $439$ complete months and
+$k = 4$ regressors.
+
+```{python}
+cols = pd.DataFrame({"banks_x": y, "mkt_rf": panel["mkt_rf"].to_numpy(),
+                     "smb": panel["smb"].to_numpy(), "hml": panel["hml"].to_numpy()},
+                    index=panel.index)
+print(cols.describe().T[["mean", "std", "min", "max"]].round(4))
+print("\ncorrelations with the banking excess return:")
+print(cols.corr()["banks_x"].drop("banks_x").round(4))
+
+fig, ax = plt.subplots()
+ax.plot(cols.index, 100 * cols["banks_x"], lw=0.8, color="steelblue",
+        label="banking industry")
+ax.plot(cols.index, 100 * cols["mkt_rf"], lw=0.8, color="grey", alpha=0.7,
+        label="market")
+ax.axhline(0.0, color="black", lw=1)
+ax.set_ylabel("monthly excess return, percent"); ax.legend(fontsize=9)
+ax.set_title(f"Banks and the market, {cols.index[0]:%Y-%m} to {cols.index[-1]:%Y-%m}")
+plt.tight_layout(); plt.show()
+```
+
+The banking industry earns an average excess return of $0.82\%$ a month against the
+market's $0.74\%$, but with a monthly standard deviation of $6.26\%$ against
+$4.39\%$, so the extra eight basis points a month are bought with more than four
+tenths of extra volatility. Its worst month is a loss of $27.3\%$ and its best a
+gain of $19.9\%$, against a market range of minus $17.2\%$ to plus $13.6\%$, and
+the figure shows where those months are: the two series track each other closely
+for most of the sample and then separate violently in 2008 and 2009, when the grey
+market line falls and the blue banking line falls much further. The size and value
+factors are much quieter, with monthly standard deviations of $3.10\%$ and
+$3.22\%$ and means of $0.05\%$ and $0.17\%$.
+
+The correlations are the first sanity check on the regression to come. Banks
+correlate $0.77$ with the market, $0.33$ with the value factor and $0.08$ with the
+size factor, so the market is the dominant exposure and value the clear second,
+which is the ordering @sec-empirical will find in the coefficients. The size
+correlation is positive while the size coefficient will turn out slightly negative,
+and that is not an inconsistency: a correlation is a bivariate statistic and a
+regression coefficient is a partial one, holding the other two factors fixed, which
+is exactly the distinction a multiple regression exists to draw. One dataset is
+used for the whole chapter and it is never swapped.
+
+## Empirical analysis: the posterior for the banking industry's exposures {#sec-empirical}
+
+### Setting the prior
+
+Everything in @sec-methodology assumed that $b_0$, $B_0$, $\alpha_0$ and $\delta_0$
+were given. Getting them is the part of applied Bayesian work that no formula settles.
+Two routes are standard. The first uses the interpretability of the conjugate form and
+asks a subject-matter question rather than a distributional one: for a coefficient with
+a plausible range $[\beta_L, \beta_U]$, take the prior mean to be the midpoint and the
+prior standard deviation to be $(\beta_U - \beta_L)/6$, which puts almost all of the
+prior mass inside the range. The second starts from elicited marginal moments and
+inverts the parameterisation, $b_0 = \mathbb{E}[\beta]$ and
+$B_0 = \operatorname{Var}[\beta]/\mathbb{E}[\sigma^2]$, which is the rule the code below
+uses. That second formula also exposes the awkwardness of the conjugate prior: because
+the coefficient prior is scaled by the variance, one cannot fix beliefs about $\beta$
+without committing to beliefs about $\sigma^2$, and being uninformative about the
+variance destroys the coefficient prior, since letting $\delta_0 \to 0$ sends $B_0^{-1}$
+to zero as well. A cheap middle course is to be informative only where beliefs exist: a
+zero block in $B_0^{-1}$ contributes no prior precision and every formula goes through
+unchanged, because they only ever use $B_0^{-1}$.
+
+Our prior states the null model asset pricing theory offers before any data are seen.
+Alpha is centred at zero, because a non-zero alpha on a liquid, heavily arbitraged
+industry index is a strong claim, with a prior standard deviation of twenty basis points
+a month. The market beta is centred at one, the exposure of the market portfolio to
+itself, with a prior standard deviation of one half, spanning everything from a defensive
+utility-like sector to a doubly levered one. The size and value loadings are centred at
+zero, the neutral position for an industry that is not a disguised bet on small or on
+cheap firms, each with a prior standard deviation of one half. The variance prior is
+$\text{Inverse-Gamma}(3, 0.0018)$, whose mean $0.0009$ is a residual standard deviation
+of three percent a month, the order of magnitude of idiosyncratic monthly volatility for
+a diversified industry portfolio.
+
+The function below encodes the four formulas of Result R-2.2, taking $B_0^{-1}$ as an
+argument so that a matrix of zeros can be passed later. Its second half draws $\sigma^2$
+from its marginal and then $\beta$ from $\mathcal{N}(b_1, \sigma^2 B_1)$, which samples
+the joint posterior exactly, so the sampled moments must reproduce the analytic ones.
 
 ```{python}
 a0, d0 = 3.0, 0.0018                         # Inverse-Gamma(3, 0.0018)
@@ -449,20 +713,31 @@ print(f"\na1 = {post['a1']:.1f}   d1 = {post['d1']:.6f}   "
       f"E[sigma^2|y] = {post['d1']/(post['a1']-1):.6f}")
 ```
 
-Each posterior mean sits between the prior mean and the OLS estimate, and the movement is a
-direct reading of how much each prior claimed to know. The intercept is the only
-coefficient that moves visibly: OLS puts alpha at $-0.0021$, the prior insists on zero with
-a standard deviation of $0.0020$, and the posterior lands at $-0.0013$, a little under two
-thirds of the way back to the data. The other three barely move, from $1.1933$ to $1.1890$,
-from $-0.1004$ to $-0.0998$ and from $0.8234$ to $0.8152$, because a prior standard
-deviation of $0.5$ is worth almost nothing against $439$ months. The posterior mean of the
-error variance is $0.000867$, essentially the least-squares $s^2$. The composition-sampled
-means agree with the analytic ones to four decimals, and we keep the draws for the
-sample-based summaries below.
+Each posterior mean sits between the prior mean and the OLS estimate, exactly as the
+matrix-weighted average of Result R-2.2 requires, and the movement is a direct reading of
+how much each prior claimed to know. The intercept is the only coefficient that moves
+visibly: OLS puts alpha at $-0.0021$, the prior insists on zero with a standard deviation
+of $0.0020$, and the posterior lands at $-0.0013$, a little under two thirds of the way
+back to the data. The other three barely move, from $1.1933$ to $1.1890$, from $-0.1004$
+to $-0.0998$ and from $0.8234$ to $0.8152$, because a prior standard deviation of $0.5$ is
+worth almost nothing against $439$ months. The posterior mean of the error variance is
+$0.000867$, essentially the least-squares $s^2$. The composition-sampled means agree with
+the analytic ones to four decimals, and we keep the draws for the sample-based summaries
+below.
 
-*Reading the computation.* Each point is one joint draw of alpha and the market beta from
-the composition sampler above. A tilted cloud shows correlation directly; a circular cloud
-would show none.
+It is worth pausing on what the arithmetic just did, because it is the whole content of
+Result R-2.2 in four lines of a table. The prior contributed a precision of
+$\bar\sigma^2/\tau_j^2$ to each coefficient, which is $225$ for the intercept and
+$0.0036$ for each of the other three, while the sample contributed the corresponding
+diagonal entry of $X^\top X$, which is $439$ for the intercept and $0.87$, $0.42$ and
+$0.46$ for the market, size and value columns. The intercept is the one place where the
+two contributions are of comparable size, $225$ against $439$, so it is the one place
+where the posterior sits visibly between prior and sample; on the three slopes the sample
+precision is more than two orders of magnitude larger and the prior is arithmetically
+irrelevant. That is the honest way to report a prior's influence, as a ratio of
+precisions rather than as an assurance that the prior was weak.
+
+### What the joint posterior shows that the marginals cannot
 
 ```{python}
 fig, ax = plt.subplots()
@@ -472,25 +747,28 @@ ax.axhline(post["b1"][1], color="grey", lw=1)
 ax.set_xlabel(r"alpha  $\beta_0$")
 ax.set_ylabel(r"market beta  $\beta_1$")
 ax.set_title("Joint posterior draws of alpha and the market beta")
-plt.tight_layout()
-plt.show()
+plt.tight_layout(); plt.show()
 
 corr_ab = np.corrcoef(beta_draws[:, 0], beta_draws[:, 1])[0, 1]
 print(f"correlation between alpha and beta_mkt draws: {corr_ab:.3f}")
 ```
 
+Each point is one joint draw of alpha and the market beta from the composition sampler.
 The cloud tilts gently down and to the right, and the printed correlation of $-0.14$ is
 negative: draws that assign a higher alpha tend to pair it with a lower market beta,
 because both compete to explain the same realised returns through $X^\top X$. The tilt is
 mild rather than dramatic, and the reason is economic. The average market excess return
 over these $439$ months is small relative to the month-to-month variation in that factor,
-so the intercept and the slope are nearly, though not quite, separately identified. Neither
-marginal density could have shown this.
+so the intercept and the slope are nearly, though not quite, separately identified.
+Neither marginal density could have shown this, and it is the matrix in the
+matrix-weighted average made visible.
 
-*Reading the computation.* The first lines recover $Q$ from the posterior parameters and
-rebuild it from the residual sum of squares plus the conflict term; the rest builds the
-artificial prior rows from a square root of the prior precision and runs plain least
-squares on the stacked system. Both identities must hold to machine precision.
+### Where the posterior variance comes from
+
+The next computation recovers $Q$ from the posterior parameters and rebuilds it from the
+residual sum of squares plus the conflict term of Result R-2.2, then builds the artificial
+prior rows from a square root of the prior precision and runs plain least squares on the
+stacked system. Both identities must hold to machine precision.
 
 ```{python}
 XtX = X.T @ X
@@ -513,28 +791,24 @@ print(f"augmented residual sum of squares {ssr_aug:.10f}")
 ```
 
 The two forms of $Q$ agree to ten decimals, and the split shows where the posterior
-variance comes from. The residual sum of squares is $0.3774$ and the prior-data conflict is
-$0.0032$, just under one percent of $Q$. Almost all of that disagreement comes from the
+variance comes from. The residual sum of squares is $0.3774$ and the prior-data conflict
+is $0.0032$, just under one percent of $Q$. Almost all of that disagreement comes from the
 intercept, the only coefficient on which the prior was tight enough for a disagreement to
 count, while the gap of nearly $0.2$ in the market beta is weighted by an almost vanishing
 precision. A conflict term worth one percent of the residual sum of squares is a prior the
-data can live with; had we insisted on a market beta of one with a prior standard deviation
-of $0.02$, the term would have dominated $Q$ and the posterior for $\sigma^2$ would have
-been pushed up to absorb what is really a misspecified prior. The augmented least-squares
-estimate reproduces the posterior mean to machine precision and its residual sum of squares
-is $Q$, so the whole conjugate analysis can be executed with a least-squares routine and no
-Bayesian code at all.
+data can live with; had we insisted on a market beta of one with a prior standard
+deviation of $0.02$, the term would have dominated $Q$ and the posterior for $\sigma^2$
+would have been pushed up to absorb what is really a misspecified prior. The augmented
+least-squares estimate reproduces the posterior mean to machine precision and its residual
+sum of squares is $Q$, so the whole conjugate analysis can be executed with a least-squares
+routine and no Bayesian code at all.
 
-## Marginal posteriors
+### The marginal posterior of the market beta
 
-The marginal for $\beta$ was stated above as a multivariate $t$. We plot the market beta's
-univariate marginal against its Normal approximation and against the reference-prior
-posterior centred at OLS, which gives intervals numerically identical to classical $t$
-confidence intervals with a different probability interpretation.
-
-*Reading the computation.* The $t$ density uses a scale matrix rather than a covariance
-matrix. Compare its tails with the Normal approximation; matching a centre alone does not
-make two distributions identical.
+We now plot the market beta's univariate $t$ marginal from Result R-2.3 against its Normal
+approximation and against the reference-prior posterior of @sec-methodology centred at OLS.
+The $t$ density uses a scale matrix rather than a covariance matrix, so the tails are worth
+comparing directly; matching a centre alone does not make two distributions identical.
 
 ```{python}
 nu, j = 2 * post["a1"], 1                    # degrees of freedom, market beta
@@ -552,8 +826,7 @@ ax.set_xlabel(r"market beta $\beta_1$")
 ax.set_ylabel("density")
 ax.legend(fontsize=9)
 ax.set_title("Marginal posterior of the banking industry's market beta")
-plt.tight_layout()
-plt.show()
+plt.tight_layout(); plt.show()
 
 print(f"posterior mean {post['b1'][j]:.4f}   95% interval "
       f"[{t_post.ppf(0.025):.4f}, {t_post.ppf(0.975):.4f}]")
@@ -564,14 +837,23 @@ The posterior and its Normal approximation are indistinguishable, because $\nu =
 degrees of freedom are far more than the $t$ needs to look Gaussian; the two would separate
 visibly with fifteen observations. The reference-prior posterior is almost exactly on top
 of both, since with $439$ months the prior on the market beta removes essentially no
-uncertainty. The benchmark value of one is off the left of the plotted density: the
-credible interval runs from $1.1245$ to $1.2534$ and the posterior probability that the
-market beta exceeds one is $0.99999999$. For a risk officer that is the answer to the
-opening question, and it is a statement no confidence interval can make.
+uncertainty. The benchmark value of one is off the left of the plotted density: the credible
+interval runs from $1.1245$ to $1.2534$ and the posterior probability that the market beta
+exceeds one is $0.99999999$. For the risk officer that is the answer to the opening
+question, and it is a statement no confidence interval can make.
 
-*Reading the computation.* Prior and posterior for the variance are both Inverse-Gamma
-densities differing only in their two parameters. A posterior that has moved away from the
-prior and narrowed shows the data overruling the prior guess about the noise level.
+Two things in that sentence are worth separating. The probability is enormous because the
+data are plentiful and the effect is large, not because the Bayesian machinery is
+generous: the gap between $1.189$ and the benchmark is nearly six posterior standard
+deviations. And the probability is conditional on this model, this prior and these $439$
+months, so it is a statement about a coefficient in a three-factor linear model with
+Normal errors, not about the bank portfolio in any imaginable world. The reference-prior
+curve lying on top of the other two is the reassuring half of that: with a sample this
+size, a reader who rejected our prior outright would reach the same conclusion, so the
+result is not an artefact of the prior. @sec-discussion returns to the half that is not
+reassuring, which is the Normal assumption rather than the prior.
+
+### The residual variance
 
 ```{python}
 sg = np.linspace(0.0002, 0.0030, 400)
@@ -585,51 +867,28 @@ ax.set_xlabel(r"$\sigma^2$")
 ax.set_ylabel("density")
 ax.legend(fontsize=9)
 ax.set_title("Prior and posterior for the residual variance")
-plt.tight_layout()
-plt.show()
+plt.tight_layout(); plt.show()
 ```
 
-The posterior is far narrower than the prior and sits on the least-squares $s^2$ of
-$0.000868$, a residual standard deviation of $2.95\%$ per month against the $3\%$ the prior
-guessed. Four hundred and thirty-nine months are extremely informative about volatility and
-much less so about a mean return, the standard asymmetry in financial data.
+Prior and posterior are both inverse-Gamma densities differing only in their two
+parameters. The posterior is far narrower than the prior and sits on the least-squares
+$s^2$ of $0.000868$, a residual standard deviation of $2.95\%$ per month against the $3\%$
+the prior guessed. Four hundred and thirty-nine months are extremely informative about
+volatility and much less so about a mean return, the standard asymmetry in financial data,
+and it is why the conflict term above was driven by the intercept and not by $\sigma^2$.
 
-### Marginalising is different from fixing a variance
-
-Integrating the Normal coefficient density over the inverse-Gamma variance gives the kernel
-
-$$
-p(\beta\mid y)\propto
-\left[\delta_1+\frac12(\beta-b_1)^\top B_1^{-1}(\beta-b_1)\right]^{-(\alpha_1+k/2)},
-$$
-
-which is the multivariate $t$ written as a kernel. To obtain it, substitute $u=1/\sigma^2$
-in the joint posterior and use $\int_0^\infty u^{a-1}e^{-bu}du=\Gamma(a)/b^{a}$ with
-$a = \alpha_1 + k/2$ and $b = \delta_1 + \frac12(\beta-b_1)^\top B_1^{-1}(\beta-b_1)$. This
-explains the Student tails: small posterior probability on large variances still
-contributes to extreme coefficient values. Substituting $\mathbb{E}[\sigma^2\mid y]$ into a
-Normal matches the covariance when the moment exists, but does not reproduce the marginal
-distribution. Predicting a new return adds observation noise as well, which is the subject
-of the prediction lecture.
-
-## Summarising the marginals
+### Point estimates and intervals
 
 Decision theory supplies the point estimate: report the value minimising the posterior
-expected loss $\mathbb{E}[L(\theta,\hat\theta)\mid y]$. Squared-error loss is minimised by
-the posterior mean and absolute-error loss by the median. For a continuous parameter exact
-zero-one loss assigns the same expected loss to every point, and the mode instead arises as
-the limit of maximising posterior mass in a shrinking neighbourhood. For a symmetric
-unimodal $t$ all three coincide; the right-skewed inverse-Gamma has mean
-$\delta_1/(\alpha_1-1)$ and mode $\delta_1/(\alpha_1+1)$.
-
-The equal-tailed interval cuts $\alpha/2$ of the mass from each tail, so its endpoints are
-posterior quantiles, while the highest-posterior-density interval is the shortest interval
-carrying the target mass. They coincide on a symmetric unimodal posterior; on a skewed one
-the second is narrower, and since it has no closed form we take it from draws.
-
-*Reading the computation.* Sorting draws produces interval summaries while the analytic
-distributions supply means and modes. The shortest single interval is appropriate because
-both marginals are unimodal; a multimodal region can be disconnected.
+expected loss $\mathbb{E}[L(\theta,\hat\theta)\mid y]$, which is the mean under
+squared-error loss and the median under absolute-error loss, while the mode arises as the
+limit of maximising posterior mass in a shrinking neighbourhood. For a symmetric unimodal
+$t$ all three coincide; the right-skewed inverse-Gamma has mean $\delta_1/(\alpha_1-1)$ and
+mode $\delta_1/(\alpha_1+1)$. The equal-tailed interval cuts $2.5\%$ of the mass from each
+tail, so its endpoints are posterior quantiles, while the highest-posterior-density interval
+is the shortest interval carrying the target mass. They coincide on a symmetric unimodal
+posterior; on a skewed one the second is narrower, and since it has no closed form we take
+it from the draws.
 
 ```{python}
 def hpd_interval(draws, cred_mass=0.95):
@@ -660,250 +919,27 @@ significant figure, because $445$ degrees of freedom leave the inverse-Gamma bar
 with a short sample the gap between mode and mean would be the difference between two
 materially different volatility forecasts.
 
-## Choosing the prior in practice
+## Discussion: the exposures are settled, the shape of the returns is not {#sec-discussion}
 
-Everything so far assumed that $b_0$, $B_0$, $\alpha_0$ and $\delta_0$ were given. Getting
-them is the part of applied Bayesian work that no formula settles, so it is worth being
-explicit about the routes available.
+The risk officer has his answer. The banking industry carries a market beta of $1.189$ with
+a ninety-five percent credible interval from $1.125$ to $1.253$, and the probability that
+the exposure exceeds one is $0.99999999$. The portfolio is not market neutral, and it is
+not only a levered market position either: the value loading of $0.815$ says that four
+fifths of a long-value position sits inside it, which is why the hedge that a beta of one
+point two would suggest failed in 2008, when value and banks fell together. The alpha of
+minus thirteen basis points a month is the one coefficient the prior moved, and it should
+be reported as what it is, a number on which theory and the sample disagree and on which
+$439$ months are not decisive. What the committee of Lecture 1 was given, a single
+probability of a losing month, is not in this answer at all, and that is the measure of
+the distance travelled: the object now reported is a five-dimensional distribution from
+which any function of the exposures and the noise can be read off, including that
+probability if anyone still wants it.
 
-The first route uses the interpretability of the conjugate form: ask a subject-matter
-question rather than a distributional one. For a coefficient with a plausible range
-$[\beta_L, \beta_U]$ take the prior mean to be the midpoint and, if the marginal prior is
-roughly Normal, the prior standard deviation to be $(\beta_U - \beta_L)/6$, which puts
-almost all of the prior mass inside the range. The second route starts from elicited
-marginal moments and inverts the parameterisation, $b_0 = \mathbb{E}[\beta]$ and $B_0 =
-\operatorname{Var}[\beta]/\mathbb{E}[\sigma^2]$, the rule the code above used.
-
-That formula also exposes the awkwardness of the conjugate prior. Because the coefficient
-prior is scaled by the variance, one cannot fix beliefs about $\beta$ without committing to
-beliefs about $\sigma^2$, and being uninformative about the variance destroys the
-coefficient prior: letting $\delta_0 \to 0$ sends $B_0^{-1}$ to zero as well. The practical
-workaround is to set $\delta_0$ from a preliminary least-squares fit with a small shape such
-as $\alpha_0 = 1.5$. The honest way out is to give $\beta$ and $\sigma^2$ independent
-priors, which breaks conjugacy and is why Lecture 4 builds a sampler.
-
-A cheap middle course is to be informative only where beliefs exist. If $\beta$ splits into
-a block we have views on and a block we do not, give $b_0$ a zero subvector and $B_0^{-1}$
-a zero diagonal block; every formula above goes through unchanged, because they only ever
-use $B_0^{-1}$, and the zero block contributes no prior precision. For the banking
-regression that is right economically, since theory speaks about the market beta and not
-about alpha or the size and value loadings. The exercise session works through such a
-prior, elicited from the range $[0.6, 1.6]$ for the market beta and flat elsewhere.
-
-### Result: Zellner's g-prior
-
-One choice of $B_0$ deserves its own name because it removes the matrix from the
-elicitation problem altogether. Tie the prior covariance to the design,
-
-$$
-\beta \mid \sigma^2 \sim \mathcal{N}\!\left(0, \; g\,\sigma^2 (X^\top X)^{-1}\right),
-\qquad g > 0 ,
-$$
-
-so that $B_0 = g(X^\top X)^{-1}$ and $B_0^{-1} = X^\top X/g$. Substituting into the general
-result, the posterior precision is $B_1^{-1} = X^\top X + X^\top X/g = X^\top X(1+1/g)$, so
-
-$$
-B_1 = \frac{g}{1+g}(X^\top X)^{-1}, \qquad
-b_1 = B_1 X^\top y = \frac{g}{1+g}\hat\beta, \qquad
-\operatorname{Var}[\beta \mid y] = \mathbb{E}[\sigma^2\mid y]\frac{g}{1+g}(X^\top X)^{-1},
-$$
-
-using $b_1 = B_1(B_0^{-1}\cdot 0 + X^\top y)$ and $(X^\top X)^{-1}X^\top y = \hat\beta$.
-Every coefficient is shrunk towards zero by the same scalar factor $g/(1+g)$, which is
-$1/2$ at $g = 1$, rises to one as $g \to \infty$, recovering least squares, and falls to
-zero as $g \to 0$, recovering the prior.
-
-The appeal is that the prior inherits the geometry of the regressors, so directions the
-data identify poorly are the directions the prior is vague about, and $g$ reads as a prior
-sample size relative to the data. The price is that the prior is not a statement about the
-world, since it changes whenever the design changes. That is acceptable as a default in
-model comparison, which is why the g-prior reappears in Lecture 9.
-
-*Reading the computation.* The table checks the scalar-shrinkage formula against the general
-update, and the figure traces the posterior mean of the market beta from the prior value of
-zero to least squares as $g$ grows.
-
-```{python}
-g_grid = np.array([0.05, 0.2, 1.0, 5.0, 20.0, 100.0, 1000.0])
-g_means, err = [], 0.0
-for g in g_grid:
-    gp = nig_update(y, X, np.zeros(k), XtX / g, a0, d0)
-    g_means.append(gp["b1"])
-    err = max(err, np.abs(gp["b1"] - g / (1.0 + g) * b_ols).max())
-g_means = np.array(g_means)
-print(f"largest deviation from the g/(1+g) shrinkage formula: {err:.2e}")
-print(pd.DataFrame({"g": g_grid, "post mean of beta_mkt": g_means[:, 1],
-                    "g/(1+g)": g_grid / (1.0 + g_grid)}).round(4).to_string(index=False))
-
-fig, ax = plt.subplots()
-ax.semilogx(g_grid, g_means[:, 1], "o-", label="posterior mean of the market beta")
-ax.axhline(b_ols[1], color="grey", lw=1, ls="--", label=f"OLS = {b_ols[1]:.3f}")
-ax.axhline(0.0, color="black", lw=1, ls=":", label="prior mean = 0")
-ax.set_xlabel("prior weight $g$"); ax.set_ylabel(r"$\beta_1$")
-ax.legend(fontsize=9); ax.set_title("The g-prior shrinks by a single scalar factor")
-plt.tight_layout(); plt.show()
-```
-
-The deviation from the closed-form shrinkage is at machine precision, and the curve climbs
-from the prior mean of zero towards the least-squares estimate of $1.1933$, reaching
-$1.1921$ at $g = 1000$, with most of the movement between $g = 0.2$ and $g = 20$. At
-$g = 1$ the posterior mean is $0.5966$, exactly half of least squares, which would describe
-banks as a defensive sector, and at $g = 5$ it is $0.9944$, which would describe them as an
-exact market proxy. Neither statement is supported by anything in the data; both are
-artefacts of the choice of $g$. Reporting a g-prior result without reporting $g$ is
-reporting nothing.
-
-## Shrinkage with a single tightness parameter
-
-The g-prior turns prior strength into one number by borrowing the design matrix. The same
-can be done with the economically meaningful prior specified earlier, by keeping its centre
-$b_0 = (0, 1, 0, 0)$ and giving every coefficient the same prior standard deviation
-$\lambda$. That makes $\lambda$ a single tightness dial: at $\lambda \to 0$ the posterior
-is the prior, at $\lambda \to \infty$ it is least squares, and in between it traces the
-shrinkage path.
-
-The dial matters most when the sample is short, so we run it twice, on the full sample and
-on the first twenty-four months, January 1990 to December 1991. That is the position of an
-analyst covering a newly listed sector, and those two years span a banking recession in
-which the short-sample estimate is unusually far from the full-sample one.
-
-*Reading the computation.* The left panel plots the posterior mean of the market beta
-against $\lambda$ on a logarithmic scale for both samples, with the least-squares values as
-horizontal lines. The right panel shows its marginal posterior at three values of $\lambda$
-on the twenty-four month sample, so the width of the belief can be read alongside its
-centre.
-
-```{python}
-ys, Xs = y[:24], X[:24]
-b_ols_s = np.linalg.solve(Xs.T @ Xs, Xs.T @ ys)
-
-def tight_update(yy, XX, lam):
-    B0i = np.linalg.inv(np.diag(np.full(k, lam**2) / sigma2_bar))
-    return nig_update(yy, XX, b0, B0i, a0, d0)
-
-lam_grid = np.logspace(-3, 1, 41)
-mean_full = np.array([tight_update(y, X, L)["b1"][1] for L in lam_grid])
-mean_short = np.array([tight_update(ys, Xs, L)["b1"][1] for L in lam_grid])
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-ax1.semilogx(lam_grid, mean_full, label="439 months")
-ax1.semilogx(lam_grid, mean_short, "--", label="first 24 months")
-ax1.axhline(b_ols[1], color="grey", lw=1, ls=":", label=f"OLS 439m {b_ols[1]:.2f}")
-ax1.axhline(b_ols_s[1], color="black", lw=1, ls=":", label=f"OLS 24m {b_ols_s[1]:.2f}")
-ax1.set_xlabel(r"prior tightness $\lambda$"); ax1.set_ylabel(r"posterior mean of $\beta_1$")
-ax1.legend(fontsize=8); ax1.set_title("One dial from prior to least squares")
-
-gb2 = np.linspace(0.6, 2.1, 500)
-for L in (0.05, 0.25, 1.00):
-    ps = tight_update(ys, Xs, L)
-    sc = np.sqrt(ps["d1"] / ps["a1"] * np.diag(ps["B1"]))
-    dist = stats.t(df=2 * ps["a1"], loc=ps["b1"][1], scale=sc[1])
-    lo, hi = dist.ppf([0.025, 0.975])
-    print(f"lambda {L:4.2f}:  24 months, posterior mean {ps['b1'][1]:.3f}, "
-          f"95% [{lo:.3f}, {hi:.3f}], width {hi - lo:.3f}   |   "
-          f"439 months, posterior mean {tight_update(y, X, L)['b1'][1]:.4f}")
-    ax2.plot(gb2, dist.pdf(gb2), label=rf"$\lambda = {L:.2f}$")
-ax2.axvline(b_ols_s[1], color="black", lw=1, ls=":", label=f"OLS 24m {b_ols_s[1]:.2f}")
-ax2.axvline(1.0, color="grey", lw=1, label="prior mean 1")
-ax2.set_xlabel(r"market beta $\beta_1$"); ax2.set_ylabel("posterior density")
-ax2.legend(fontsize=8); ax2.set_title("Twenty-four months, three tightness settings")
-plt.tight_layout(); plt.show()
-
-print(f"24-month OLS market beta {b_ols_s[1]:.3f}, full-sample {b_ols[1]:.3f}")
-```
-
-Both curves in the left panel start pinned at the prior value of one and end at their own
-least-squares estimates, but they climb at different points on the axis, and that gap is
-the content of the picture. With $439$ months the posterior mean is already $1.1085$ at
-$\lambda = 0.05$ and $1.1875$ at $\lambda = 0.25$, the latter within a fifth of a standard
-error of the least-squares $1.1933$, so anything but an extremely tight prior leaves the
-data in charge.
-With twenty-four months the same settings give $1.084$ and $1.449$ on the way to a
-short-sample least-squares value of $1.688$, so the prior is still doing visible work at
-tightness levels the full sample shrugs off. The right panel adds the
-uncertainty: at $\lambda = 0.05$ the posterior sits at $1.084$ with a $95\%$ interval of
-width $0.254$, and at $\lambda = 1.00$ at $1.635$ with width $0.651$. The tight prior has
-not learned anything about banks in 1990 and 1991, it has restated itself with a narrow
-interval, and over those two years banks were far more sensitive to the market than they
-have been since. A narrow posterior around the wrong centre is false confidence, not
-precision, so a sweep of this kind belongs alongside any small-sample result.
-
-## The noninformative limit
-
-The conventional noninformative choice for this model is
-
-$$
-p(\beta, \sigma^2) \propto \frac{1}{\sigma^2},
-$$
-
-flat in $\beta$ over $\mathbb{R}^k$ and flat in $\log \sigma^2$ over $\mathbb{R}$. The
-second half follows from the change-of-variable rule: if $\log\sigma^2$ is uniform then
-transforming back multiplies by the Jacobian $d\log\sigma^2/d\sigma^2 = 1/\sigma^2$.
-Flatness on the log scale is the natural statement for a positive scale parameter, because
-it makes the prior invariant to the units of measurement.
-
-This prior is improper: neither factor integrates to a finite number. That is tolerable
-here but never automatic. The posterior is proper in this model provided $X$ has full
-column rank, $n > k$ and the residual sum of squares is positive. Replacing the flat prior
-on each coefficient by a uniform density on $(-B, B)$ gives a proper prior for any finite
-$B$, and for $B$ large enough the posterior is numerically indistinguishable from the
-improper one. The improper prior is shorthand for that limit, not a new kind of object.
-
-Multiplying this prior into the likelihood gives the posterior kernel
-
-$$
-p(\beta, \sigma^2 \mid y) \propto (\sigma^2)^{-(n+2)/2}
-\exp\left[-\frac{\text{SSR} + (\beta - \hat\beta)^\top X^\top X(\beta - \hat\beta)}{2\sigma^2}\right],
-$$
-
-using the algebraic identity $(y-X\beta)^\top(y-X\beta) = \text{SSR} + (\beta -
-\hat\beta)^\top X^\top X(\beta-\hat\beta)$, which is the same completion of the square as
-before with $B_0^{-1} = 0$. It is a Normal-Inverse-Gamma kernel centred at the
-least-squares estimate with precision matrix $X^\top X$, so
-
-$$
-\beta \mid \sigma^2, y \sim \mathcal{N}\!\left(\hat\beta, \sigma^2 (X^\top X)^{-1}\right),
-\qquad
-\sigma^2 \mid y \sim \text{Inverse-Gamma}\!\left(\frac{n-k}{2}, \frac{\text{SSR}}{2}\right),
-$$
-
-and, factorising the other way,
-
-$$
-\sigma^2 \mid \beta, y \sim \text{Inverse-Gamma}\!\left(\frac{n}{2},
-\frac{(y - X\beta)^\top(y - X\beta)}{2}\right),
-\qquad
-\beta \mid y \sim t_{n-k}\!\left(\hat\beta, \; s^2 (X^\top X)^{-1}\right),
-$$
-
-with $s^2 = \text{SSR}/(n-k)$. The first is the conditional a sampler needs, and its shape
-is $n/2$ rather than $(n-k)/2$ because holding $\beta$ fixed forgoes the $k$ degrees of
-freedom that estimating it costs. The second is the marginal a reader wants, and it makes
-the Bayesian and classical answers coincide numerically in this one model. The moments
-follow directly,
-
-$$
-\mathbb{E}[\beta \mid y] = \hat\beta, \qquad
-\operatorname{Var}[\beta \mid y] = \frac{\text{SSR}}{n-k-2}(X^\top X)^{-1}
-= \mathbb{E}[\sigma^2 \mid y]\,(X^\top X)^{-1},
-$$
-
-the variance existing only for $n - k > 2$, a reminder that the flat prior buys its
-convenience by leaving the tails to the data alone.
-
-In the general result the same answers appear as the formal substitution $B_0^{-1} \to 0$,
-$\alpha_0 \to -k/2$, $\delta_0 \to 0$, where the shape $-k/2$ removes the
-$(\sigma^2)^{-k/2}$ the conjugate prior contributes: it gives $B_1 = (X^\top X)^{-1}$,
-$b_1 = \hat\beta$, $\alpha_1 = (n-k)/2$ and $\delta_1 = \text{SSR}/2$, hence
-$\delta_1/\alpha_1 = s^2$. A negative inverse-Gamma shape is not a proper prior, nor a
-limit within the proper family, so this is a statement about the kernel and not an
-instruction to sample one.
-
-*Reading the computation.* This is a formal calculation under an improper joint prior, not
-an instruction to sample a negative-shape inverse-Gamma. Compare the resulting $t$-based
-uncertainty with the classical regression formulas, remembering that the sampling
-distribution of a statistic and the posterior of a parameter are different objects.
+Before trusting any of it, the machinery is worth checking against something already known.
+The noninformative limit of @sec-methodology says that with $B_0^{-1} \to 0$,
+$\alpha_0 \to -k/2$ and $\delta_0 \to 0$ the same code must return the classical regression
+output exactly, with the posterior mean equal to $\hat\beta$, the $t$ scale equal to the
+classical standard error and $2\delta_1$ equal to the residual sum of squares.
 
 ```{python}
 diffuse = nig_update(y, X, np.zeros(k), np.zeros((k, k)), -k / 2.0, 0.0)
@@ -914,39 +950,104 @@ print(pd.DataFrame({"OLS": b_ols, "diffuse post mean": diffuse["b1"],
 print(f"\ndf 2*a1 = {2*diffuse['a1']:.1f}   n-k = {n-k}   "
       f"2*d1 = {2*diffuse['d1']:.8f}   SSR = {ssr:.8f}   "
       f"d1/a1 = {diffuse['d1']/diffuse['a1']:.8f}   s^2 = {s2_ols:.8f}")
+
+fig, axes = plt.subplots(1, 4, figsize=(11, 3.0))
+for jj, (ax, nm) in enumerate(zip(axes, names)):
+    d = stats.t(df=2 * diffuse["a1"], loc=diffuse["b1"][jj], scale=scale_diff[jj])
+    lo, hi = b_ols[jj] - 1.96 * se_ols[jj], b_ols[jj] + 1.96 * se_ols[jj]
+    gg = np.linspace(lo - 2 * se_ols[jj], hi + 2 * se_ols[jj], 300)
+    ax.plot(gg, d.pdf(gg), color="steelblue", lw=1.6)
+    ax.axvline(lo, color="black", lw=1, ls=":")
+    ax.axvline(hi, color="black", lw=1, ls=":")
+    ax.set_title(nm, fontsize=10); ax.set_yticks([])
+axes[0].set_ylabel("density")
+fig.suptitle("Diffuse posteriors with the classical 95% confidence limits dotted")
+plt.tight_layout(); plt.show()
 ```
 
 Every pair agrees to eight decimals: the diffuse posterior mean is the OLS estimate, the
-$t$ scale is the classical standard error, the degrees of freedom are $n-k$ and $2\delta_1$
-is the residual sum of squares. Confidence and credible interval coincide numerically,
-though one is a statement about the parameter and the other about the procedure. The next
-lecture replaces this closed form with Monte Carlo integration, which is what we must do
-once the prior is no longer conjugate.
+$t$ scale is the classical standard error, the degrees of freedom are $n-k = 435$ and
+$2\delta_1$ is the residual sum of squares. In the figure the dotted classical limits sit
+on the $2.5\%$ and $97.5\%$ points of each posterior density, which is the coincidence
+stated at the end of @sec-methodology drawn four times. The two intervals are numerically
+the same and conceptually different: one is a statement about the parameter given these
+$439$ months, the other about a procedure applied to samples we did not see. That the
+numbers agree in this one model is a reason to trust the implementation, not a reason to
+think the distinction of Lecture 1 has gone away. It is also a warning about how far the
+coincidence travels, which is not far: it needs the flat prior, the Normal likelihood and
+a design of full column rank with $n > k$, and every one of those is dropped somewhere in
+the next six lectures. In Lecture 6, where the whole point is a prior tight enough to
+rescue a regression with more coefficients than the data can support, the two answers
+differ by enough to change a forecast.
 
-## Reading these results in the sources' notation
+What the check does not do is defend the model. Everything above rests on
+$\varepsilon_i \sim \mathcal{N}(0, \sigma^2)$, and the 2008 and 2009 months of @sec-data
+are already a warning: the largest residuals are far larger than a Gaussian with
+$\sigma = 0.0295$ makes plausible. The natural repair is to let the errors have fatter
+tails than the Normal, which means a Student $t$ with its degrees of freedom $\nu$ treated
+as a third unknown rather than fixed. That single change destroys everything this chapter
+relied on. There is no conjugate prior for $\nu$, the exponent stops being a quadratic form
+in $\beta$, the square can no longer be completed, and the normalising constant
+$\int\int p(y \mid \beta, \sigma^2, \nu) p(\beta, \sigma^2, \nu)\, d\beta\, d\sigma^2 d\nu$
+has no closed form. Lecture 3 takes that posterior as its subject: with fat tails and an
+unknown degrees of freedom nothing can be written down, and every summary must instead be
+computed, by Monte Carlo integration, importance sampling and rejection sampling.
 
-Bauwens and Koop write the variance prior as an inverted-gamma-2 density, $\sigma^2 \sim
-\text{IG}_2(\nu_0, s_0)$ with density proportional to
-$(\sigma^2)^{-(\nu_0+2)/2}\exp[-s_0/(2\sigma^2)]$, and parameterise the coefficient prior
-by a precision matrix $M_0$. The bridge is $M_0 = B_0^{-1}$, $\nu_0 = 2\alpha_0$ and
-$s_0 = 2\delta_0$, applied identically to the posterior parameters, and their
-noninformative limit $M_0 \to 0$, $s_0 \to 0$, $\nu_0 \to -k$ is the substitution used
-above. The full translation table is in the week's exercise session.
+## Exercises
 
-## Reading guide and sources
+These are the chapter's practice questions; the [Week 2 exercise
+session](../exercise-sessions/02-linear-regression.qmd) works through them and adds the
+lab.
 
-UPM Class 5 and the Normal-model Case 2 practical: completing the square and
-marginalisation. SGPE Lecture 2, PDF pp. 11-15, develops the dummy-observation reading of
-the conjugate prior and the single-parameter shrinkage picture used above. Chan, *Notes on
-Bayesian Macroeconometrics*, pp. 8-11, motivates the same addition of information in the
-scalar Normal model; his independent-prior regression is a different model, studied in
-Lecture 4. Greenberg (2008), Sections 4.1 to 4.3 and 8.1, separates prior specification from
-posterior calculation.
+1. By hand. Starting from the completed square of Result R-2.2, derive the interpretable
+   form $Q = \text{SSR} + (b_0-\hat\beta)^\top[B_0 + (X^\top X)^{-1}]^{-1}(b_0-\hat\beta)$,
+   stating where each substitution is used. Then set $k = 1$ with $X = \mathbf{1}_n$ and
+   verify that your expression reduces to the scalar identity in the collapsed derivation,
+   identifying the scalar counterparts of both terms.
 
-The explanations and exercises are adapted to this course's notation and weekly
-structure; consult the cited originals for the full treatments.
+2. Computational. Implement the two-block Gibbs sampler of Result R-2.3 for this model:
+   draw $\beta \mid \sigma^2, y$, then $\sigma^2 \mid \beta, y$, and iterate. Run it for
+   $20{,}000$ sweeps on the banking regression and compare the sampled marginals with the
+   analytic $t$ and inverse-Gamma of Result R-2.3. Explain, using the two inverse-Gamma
+   shapes, why a sampler that used $\text{IG}(\alpha_1, \delta_1)$ in the second block would
+   be wrong.
 
-## References
+3. On real data. Repeat @sec-empirical for a different industry portfolio in
+   `ff_industry49_monthly.parquet`, for example `util` or `softw`. Elicit the prior for the
+   market beta by the six-sigma rule from a range you can defend in two sentences, leave the
+   other three coefficients with a zero block in $B_0^{-1}$, and report the posterior mean,
+   the ninety-five percent credible interval and $\Pr(\beta_1 > 1 \mid y)$. Say in one
+   paragraph whether the prior or the data is driving your answer, and back the claim with
+   the split of $Q$.
+
+Exercise 1 is the one to attempt before the session, because Lecture 6 uses the conflict
+term to explain what a shrinkage prior costs. Exercises 2 and 3 are written for the session
+itself and reuse the `nig_update` function with two lines changed.
+
+## Reading and references
+
+The model in matrix form, the completion of the square and the marginalisation in
+@sec-methodology follow UPM Class 5 and its Normal-model Case 2 practical. SGPE Lecture 2,
+PDF pp. 11-15, develops the dummy-observation reading of the conjugate prior that
+@sec-methodology uses to motivate the update and that @sec-empirical checks numerically.
+Chan, *Notes on Bayesian Macroeconometrics*, pp. 8-11, motivates the same addition of
+information in the scalar Normal model; his independent-prior regression is a different
+model, studied in Lecture 4. Greenberg (2008), Sections 4.1 to 4.3 and 8.1, separates prior
+specification from posterior calculation, and is the source for the decision-theoretic
+reading of point estimates in @sec-empirical. The noninformative limit and its coincidence
+with classical output follow Koop, Chapter 3.
+
+One notational warning is worth carrying to those sources. Bauwens and Koop write the
+variance prior as an inverted-gamma-2 density, $\sigma^2 \sim \text{IG}_2(\nu_0, s_0)$, and
+parameterise the coefficient prior by a precision matrix $M_0$; the bridge is
+$M_0 = B_0^{-1}$, $\nu_0 = 2\alpha_0$ and $s_0 = 2\delta_0$, applied identically to the
+posterior parameters, and their noninformative limit $M_0 \to 0$, $s_0 \to 0$,
+$\nu_0 \to -k$ is the substitution used in @sec-methodology. The full translation table is in
+the week's exercise session.
+
+The explanations and exercises are adapted to this course's notation and weekly structure;
+consult the cited originals for the full treatments.
 
 Koop, *Bayesian Econometrics*, ch. 2-4. Box and Tiao, *Bayesian Inference in Statistical
 Analysis* (1973), ch. 2 and 8. Chan et al., *Bayesian Econometric Methods*, ch. 2-4.
+Greenberg, *Introduction to Bayesian Econometrics* (2008), ch. 4 and 8.

@@ -3,699 +3,80 @@ title: "Causal inference"
 subtitle: "Lecture 10"
 ---
 
-::: {.callout-note}
-## Lecture and exercise
-Read the model and work through the derivations before running the examples.
-The [Week 10 exercise session](../exercise-sessions/10-causal-inference.qmd) contains the practical lab and the
-chapter's practice questions.
+## Overview
+
+By the end of this lecture you can write down exactly what a causal question demands
+that a predictive one does not, and say which assumptions convert an estimated
+association into an estimate of an effect, since no amount of model fit can supply them
+on its own.
+
+::: {.callout-important}
+## The result of this chapter
+
+For a binary intervention $D$ and potential outcomes $Y(1), Y(0)$, of which only one is
+ever observed, $Y = D\,Y(1) + (1-D)\,Y(0)$, the causal effect
+$$
+\tau = \mathbb{E}[Y(1) - Y(0)]
+$$
+is a property of a joint distribution over outcomes that never both occur, not a
+property of the data alone. Recovering $\tau$ from an estimated contrast requires
+further conditions, about how units came to be treated and about which unobserved
+outcomes that process rules out, and those conditions are supplied by the analyst, not
+estimated from the sample. A posterior computed under a false or unstated condition is
+precise and wrong in exactly the same way a point estimate would be.
 :::
 
-## Start with a policy evaluation: did a training programme raise earnings?
+After working through this chapter you can
 
-A government funds job training for disadvantaged workers. Participants later
-earn more than some nonparticipants. **How much of that difference was caused by
-the programme?** Selection into treatment and treatment effectiveness are distinct questions.
+1. state the potential-outcomes model of a causal effect and derive why it is a
+   missing-data problem rather than a parameter-estimation problem;
+2. derive the conditions under which an observed contrast identifies a causal effect,
+   and say in words what each one rules out;
+3. diagnose, on a worked event study, why an estimated effect can depend entirely on a
+   dating rule rather than on the policy the rule is meant to date;
+4. implement the Bayesian posterior for a causal contrast under stated identifying
+   assumptions, using the conjugate machinery of Lecture 2;
+5. compare that posterior across a grid of equally defensible identifying choices and
+   read the resulting spread as a statement about identification, not sampling error;
+6. state plainly, for a specific data set, when it cannot identify a causal effect and
+   explain why collecting more of the same data would not change the answer.
 
-Write $Y_i(1)$ for earnings with training and $Y_i(0)$ for earnings without it.
-Only one is observed: $Y_i=D_iY_i(1)+(1-D_i)Y_i(0)$.
-This first equation is bookkeeping for the missing counterfactual, not a
-statistical distribution. We need an assignment design or assumptions before
-regression can answer a causal question.
+Week 10 of 15, paired with the [Week 10 exercise
+session](../exercise-sessions/10-causal-inference.qmd). The chapter uses the conjugate
+Normal-inverse-Gamma posterior of Lecture 2 and nothing from Lectures 3 to 9: every
+posterior below is available in closed form, because the difficulty this week is not
+computational.
 
-Consider illustrative workers in two equally sized prior-earnings groups.
-Treated and control outcome means are 14 and 12 thousand dollars in the first
-group, and 24 and 20 in the second. The equally weighted adjusted contrast is
-$\tfrac12(14-12)+\tfrac12(24-20)=3$ thousand dollars.
-If treated workers are disproportionately in the higher-earnings group, an
-unadjusted difference uses different weights and need not equal 3.
+## Motivation: an effect that looks like it is there {#sec-motivation}
 
-BART replaces these two coarse groups with a flexible conditional-mean surface
-$f(d,x)$. Under consistency, overlap and conditional exchangeability,
-$E[Y(d)\mid X=x]=f(d,x)$. For each posterior surface draw calculate
-
-$$\tau^{(s)}=\frac1n\sum_i[f^{(s)}(1,x_i)-f^{(s)}(0,x_i)].$$
-
-If three illustrative draws give effects 2, 3 and 4, their average is 3, but
-the spread is essential: it records uncertainty about the fitted causal mean
-contrast. Three draws are only an explanation, not an adequate MCMC run.
-Both treatment predictions must use the same surface draw.
-
-The empirical application uses a job-training policy setting, while the
-simulation exercise lets us check recovery against a known effect. Randomised
-and observational comparison samples support different identifying assumptions.
-If important confounders are unobserved, flexibility alone does not fix the
-problem; the later IV section asks what additional information an instrument supplies.
-
-## From prediction to causation
-
-Almost everything so far has treated estimation as learning a distribution that describes the data
-well. A causal question is different in kind. We do not want to know what a treated firm looks like;
-we want to know what that same firm would have looked like had it not been treated. That comparison
-is never observed for any single unit, which is why causal inference is often called a missing-data
-problem wearing econometric clothing. Once the causal effect is an unknown parameter, a posterior
-gives a whole distribution over it, conditional on the causal identification assumptions and the statistical model. Identification assumptions are additional restrictions; they are not established by a good likelihood fit.
-
-Two obstacles recur in applied work and this lecture takes them in turn. The first is
-**confounding**: units select into treatment on characteristics that also drive the outcome, so the
-raw treated-minus-control contrast mixes the policy effect with composition. Conditioning on those
-characteristics turns the causal problem into a regression problem, which makes the flexibility of
-that regression the binding constraint. The second is **endogeneity** of a continuous policy
-variable, determined jointly with the outcome, where conditioning cannot help and we need an
-instrument that shifts the policy without touching the outcome.
-
-The Bayesian answers share a shape. For endogeneity we write a small simultaneous system and sample
-its posterior with a Gibbs sampler, so the error correlation that breaks least squares becomes just
-another parameter with a posterior. For confounding we make the conditional mean flexible enough
-that no curvature is left to be blamed on the treatment, for which Bayesian additive regression
-trees after Chipman, George and McCulloch (2010) and Hill (2011) are the standard tool.
+The structural vector autoregression of Lecture 7 can already say that a shock to the
+federal funds rate is followed by lower output and equity prices, once the shock is
+identified. It is tempting to go one step further and ask the more pointed question a
+policy maker actually has: when the Federal Reserve raises rates, what happens to
+equity returns around that decision. The most direct way to ask it is an event study.
+Line up the months in which a tightening cycle began, average the market's return in
+the months around those dates, and see what the average path looks like.
 
 ```{python}
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import stats
 import matplotlib.pyplot as plt
 
+DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
 rng = np.random.default_rng(2026)
 plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
                      "grid.alpha": 0.3, "font.size": 11})
-```
 
-## Specify the comparison before writing a regression
+fred = pd.read_parquet(DATA / "fred_macro_monthly.parquet")
+ff = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
+mkt = ff["mkt_rf"].reindex(fred.index).dropna()
+abn = mkt - mkt.mean()                    # abnormal return: excess return minus its mean
 
-Consider a training subsidy and a firm's subsequent employment. For one particular firm,
-$Y_i(1)$ means employment if it receives the subsidy; $Y_i(0)$ means employment if the
-same firm does not. These are two possible outcomes for the same unit, not the observed
-outcomes of two different firms. Their difference defines the causal effect.
-
-Why write the observed outcome as $D_iY_i(1)+(1-D_i)Y_i(0)$? Substitute the two possible
-values of the treatment indicator. For $D_i=1$, the expression selects $Y_i(1)$; for
-$D_i=0$, it selects $Y_i(0)$. This equation records which potential outcome is observed.
-It does not yet tell us how to infer the missing one.
-
-Comparing a treated firm with an untreated firm fills in that missing comparison only
-under further assumptions. Suppose larger firms both seek subsidies and hire more people
-without them. Their higher employment cannot all be attributed to the subsidy.
-Conditioning on size compares firms with the same observed size, but is sufficient only
-if no remaining unmeasured factor confounds treatment and employment.
-
-The adjustment formula below therefore has three separate reasons: average within
-covariate groups; use conditional exchangeability to compare treatment arms within a
-group; use consistency to connect the potential outcome to the recorded outcome.
-Overlap ensures that the relevant comparisons exist in the data. A flexible BART
-regression helps estimate those within-group means. Bayes' theorem supplies uncertainty
-conditional on the assumptions; it cannot turn an unjustified comparison into an
-identified causal effect. We keep the causal assumptions separate from the distributional
-assumptions that make the posterior computable.
-
-## Potential outcomes and the treatment effect
-
-Fix a binary treatment $D_i \in \{0, 1\}$. For each unit there are two potential outcomes, $Y_i(1)$
-if treated and $Y_i(0)$ if not, with unit-level effect $\tau_i = Y_i(1) - Y_i(0)$. Only one arm is
-ever realised, $Y_i = D_i Y_i(1) + (1 - D_i) Y_i(0)$, so $\tau_i$ is unavailable for any single unit
-and we settle for the **average treatment effect** $\tau = \mathbb{E}[Y_i(1) - Y_i(0)]$.
-
-Comparing mean outcomes across arms is unbiased only under random assignment, and in observational
-data it is not: firms that adopt a policy and countries that liberalise differ from those that do
-not, so any variable $X$ driving both selection and outcome is a confounder. The assumption that
-restores identification is **unconfoundedness**, $(Y(0), Y(1)) \perp D \mid X$, together with the
-overlap condition $0 < \Pr(D = 1 \mid X) < 1$. The average effect then becomes the adjusted contrast
-$\tau = \mathbb{E}_X[\mathbb{E}[Y \mid D = 1, X] - \mathbb{E}[Y \mid D = 0, X]]$, as set out by Imbens
-and Rubin (2015). Estimation is now the problem of getting $\mathbb{E}[Y \mid D, X]$ right: whatever
-the model cannot represent is correlated with $D$ and is charged to the treatment.
-
-### Derive what the data identify
-
-Consistency means $Y=Y(D)$ for the treatment as specified, including the assumed
-absence of interference. For $d=0,1$, iterated expectation, unconfoundedness,
-and consistency give
-
-$$
-\mathbb E[Y(d)]=\mathbb E_X\{\mathbb E[Y(d)\mid X]\}
-=\mathbb E_X\{\mathbb E[Y(d)\mid D=d,X]\}
-=\mathbb E_X\{\mathbb E[Y\mid D=d,X]\}.
-$$
-
-Overlap ensures both treatment arms have support at the covariates over which
-we average. Subtract the two expressions to obtain the adjustment formula.
-A flexible regression estimates its ingredients; it cannot establish that
-important confounders were measured. Weak overlap can leave a narrow model-based
-interval driven largely by extrapolation and the prior.
-
-For a posterior surface draw $f^{(s)}$, compute
-$\tau^{(s)}=n^{-1}\sum_i[f^{(s)}(1,X_i)-f^{(s)}(0,X_i)]$.
-Both predictions must come from the **same surface draw** so their dependence is
-preserved. The quantity is an average conditional mean effect at the empirical
-covariate distribution, not a recovered individual missing potential outcome.
-
-::: {.callout-note collapse="true"}
-## Derivation: the estimand as missing data, and where its posterior comes from
-
-Collect for each unit the pair $(Y_i(0), Y_i(1))$ and define the finite-sample average effect
-$$
-\tau_{fs} \;=\; \frac{1}{n}\sum_{i=1}^{n}\big[Y_i(1) - Y_i(0)\big].
-$$
-Split the sum according to which arm was realised. For a treated unit the observed outcome is $Y_i(1)$
-and the missing one is $Y_i(0)$; for a control unit it is the other way round. Writing $Y_i^{mis}$ for
-whichever arm was not realised,
-$$
-\tau_{fs} \;=\; \frac{1}{n}\sum_{i=1}^{n}(2D_i - 1)\big(Y_i - Y_i^{mis}\big).
-$$
-Check the two cases: with $D_i = 1$ the factor $(2D_i-1)$ is $+1$ and the bracket is
-$Y_i(1) - Y_i(0)$; with $D_i = 0$ the factor is $-1$ and the bracket is $Y_i(0) - Y_i(1)$, whose
-negative is again $Y_i(1)-Y_i(0)$. So the estimand is a known linear function of data we have and data
-we do not have, and nothing else. This is the sense in which causal inference is a missing-data
-problem: there is no unknown parameter in that display at all.
-
-A Bayesian therefore needs the posterior predictive distribution of the missing arm,
-$$
-p\big(Y^{mis} \mid Y^{obs}, D, X\big) \;=\; \int p\big(Y^{mis} \mid \theta, D, X\big)\,
-p\big(\theta \mid Y^{obs}, D, X\big)\, d\theta .
-$$
-The first factor is where the identifying assumptions enter. Consistency says the observed outcome is
-the potential outcome for the arm actually taken, so the model fitted on the treated units describes
-$Y(1)$ and the model fitted on the controls describes $Y(0)$. Unconfoundedness,
-$(Y(0), Y(1)) \perp D \mid X$, says that the arm a unit happened to take carries no further
-information about its potential outcomes once $X$ is held fixed, so
-$p(Y_i^{mis} \mid \theta, D_i, X_i) = p\big(Y_i(1 - D_i) \mid \theta, X_i\big)$: the missing arm of
-unit $i$ is predicted by the *opposite* arm's fitted conditional distribution evaluated at unit $i$'s
-own covariates. Overlap guarantees that there were units in that opposite arm near $X_i$ from which
-to learn it.
-
-The algorithm follows immediately. For each posterior draw $\theta^{(s)}$, impute
-$Y_i^{mis,(s)}$ from the opposite-arm predictive at $X_i$, then compute
-$\tau_{fs}^{(s)} = n^{-1}\sum_i (2D_i-1)(Y_i - Y_i^{mis,(s)})$. Repeating over draws gives a posterior
-for $\tau_{fs}$ directly, with no estimator and no standard-error formula anywhere.
-
-Two estimands are easy to confuse here. If we replace each imputed $Y_i^{mis,(s)}$ by its conditional
-mean $f^{(s)}(1-D_i, x_i)$ rather than drawing it, we obtain
-$\tau^{(s)} = n^{-1}\sum_i[f^{(s)}(1,x_i) - f^{(s)}(0,x_i)]$, the average conditional mean contrast
-used in the rest of this chapter. The difference between the two is exactly the averaged residual
-noise: the imputation adds an independent $-(2D_i-1)\varepsilon_i^{mis}/n$ to each term, contributing
-variance $\sigma^2/n$ to the posterior. In the simulation below, with $\sigma^2 = 1$ and $n = 600$,
-that is a standard deviation of $1/\sqrt{600} = 0.041$, so the finite-sample estimand carries a
-posterior noticeably wider than the conditional mean estimand even though both are called "the average
-treatment effect". Report which one you computed.
-:::
-
-## A confounded policy experiment
-
-The chunk below simulates a confounder that drives selection through a non-linear propensity and
-also enters the outcome non-linearly, with a constant true effect of two.
-
-**Reading the computation.** Selection depends on the same nonlinear covariate that drives outcomes. The naive contrast therefore combines treatment and composition; the simulation lets us see both parts.
-
-```{python}
-n, tau_true = 600, 2.0
-X = rng.normal(0.0, 1.0, size=n)                       # confounder
-prop = 1.0 / (1.0 + np.exp(-(0.8 * X**2 - 1.0)))       # non-linear propensity
-D = rng.binomial(1, prop)
-f_X = 1.5 * np.sin(1.5 * X) + 0.7 * X**2               # non-linear confounding
-Y = 1.0 + tau_true * D + f_X + rng.normal(0.0, 1.0, size=n)
-print(f"share treated {D.mean():.3f}   true ATE {tau_true:.3f}   "
-      f"naive difference in means {Y[D == 1].mean() - Y[D == 0].mean():.3f}")
-```
-
-The naive contrast overstates the effect by roughly forty per cent. Both tails of $X$ are more
-likely to be treated and both carry large values of $f(X)$, so the treated group is drawn
-disproportionately from high-outcome regions of covariate space: treatment and outcome are linked
-through the *curvature* of $f$.
-
-Before adjusting anything, it is worth checking whether the comparison is even supportable, which
-is what the **overlap** condition asks. The figure below plots the estimated propensity score
-separately for treated and control units, reusing `prop` and `D` from the simulation above.
-
-**Reading the computation.** The two histograms describe the same non-linear propensity function evaluated at the treated and the control sub-samples. Overlap holds where both histograms put mass, and fails where one of them is empty.
-
-```{python}
-fig, ax = plt.subplots()
-bins = np.linspace(0, 1, 30)
-ax.hist(prop[D == 0], bins=bins, alpha=0.6, density=True, label="control (D=0)")
-ax.hist(prop[D == 1], bins=bins, alpha=0.6, density=True, label="treated (D=1)")
-ax.set_xlabel("estimated propensity  P(D=1 | X)"); ax.set_ylabel("density")
-ax.legend()
-ax.set_title("Overlap: propensity scores by treatment status")
-plt.tight_layout()
-plt.show()
-
-print(f"propensity range, control: [{prop[D == 0].min():.3f}, {prop[D == 0].max():.3f}]")
-print(f"propensity range, treated: [{prop[D == 1].min():.3f}, {prop[D == 1].max():.3f}]")
-```
-
-Both groups occupy roughly the same range of propensity scores, with neither histogram empty where
-the other has mass, so the overlap assumption is not obviously violated here, and a flexible model
-has genuine treated-and-control pairs to compare at every covariate value. Overlap this good is a
-property of the simulation; in applied work it is common to find regions with only treated or only
-control units, where no amount of modelling can substitute for the missing comparison.
-
-## Bayesian adjustment with a linear model
-
-The natural first response is to add $X$ to the regression. With design matrix $Z$ collecting an
-intercept, the treatment and the covariates, prior $\beta \sim \mathcal{N}(0, \tau_0^2 I)$ and
-likelihood $Y \mid \beta \sim \mathcal{N}(Z\beta, \sigma^2 I)$, the conjugate posterior of Lecture 2
-applies unchanged: $\beta \mid Y \sim \mathcal{N}(m, V)$ with $V = (\sigma^{-2} Z^\top Z +
-\tau_0^{-2} I)^{-1}$ and $m = \sigma^{-2} V Z^\top Y$, so the treatment coefficient has a univariate
-Gaussian marginal read straight off $m$ and $V$. We compute it twice, ignoring the confounder and
-then with a linear term in $X$.
-
-**Reading the computation.** The adjustment model is Gaussian conditional on an estimated residual variance. Adding only a linear covariate cannot remove nonlinear confounding, however precise the coefficient posterior appears.
-
-```{python}
-def bayes_linreg(Z, y, sigma2=1.0, tau0=10.0):
-    """Posterior mean and covariance of a conjugate Gaussian linear model."""
-    V = np.linalg.inv(Z.T @ Z / sigma2 + np.eye(Z.shape[1]) / tau0**2)
-    return V @ (Z.T @ y) / sigma2, V
-
-one, Z_lin = np.ones(n), np.column_stack([np.ones(n), D, X])
-s2_hat = np.var(Y - Z_lin @ np.linalg.lstsq(Z_lin, Y, rcond=None)[0], ddof=3)
-m_raw, V_raw = bayes_linreg(np.column_stack([one, D]), Y, s2_hat)
-m_lin, V_lin = bayes_linreg(Z_lin, Y, s2_hat)
-post_raw = stats.norm(m_raw[1], np.sqrt(V_raw[1, 1]))
-post_lin = stats.norm(m_lin[1], np.sqrt(V_lin[1, 1]))
-for name, p in [("no adjustment", post_raw), ("linear in X", post_lin)]:
-    print(f"{name:>14}: mean {p.mean():.3f}  95% CI "
-          f"[{p.ppf(0.025):.3f}, {p.ppf(0.975):.3f}]")
-```
-
-Adjustment helps a little and nowhere near enough; both credible intervals sit well above two. The
-reason is structural. The propensity depends on $X^2$ and is symmetric about zero, so treatment is
-almost uncorrelated with $X$ itself and a linear term removes almost none of the relevant
-confounding: a straight line cannot absorb curvature. The posterior is silent about this
-misspecification: a narrow credible interval speaks about noise, not about whether the model is
-right.
-
-Seeing the raw comparison next to the two adjusted posteriors on one axis makes the point at a
-glance. The figure below reuses `post_raw` and `post_lin` from the block above alongside the naive
-difference in means.
-
-**Reading the computation.** The dashed vertical line is a single number, the raw contrast; the two curves are full posteriors for the same quantity under two adjustment models. Distance from the dotted true-effect line is the remaining bias in each case.
-
-```{python}
-naive_diff = Y[D == 1].mean() - Y[D == 0].mean()
-tgrid_lin = np.linspace(0.5, 3.5, 400)
-
-fig, ax = plt.subplots()
-ax.axvline(naive_diff, color="grey", ls="--", label=f"naive difference = {naive_diff:.2f}")
-ax.plot(tgrid_lin, post_raw.pdf(tgrid_lin), label="no adjustment (posterior)")
-ax.plot(tgrid_lin, post_lin.pdf(tgrid_lin), label="linear in X (posterior)")
-ax.axvline(tau_true, color="black", ls=":", label=f"true ATE = {tau_true:.1f}")
-ax.set_xlabel(r"treatment effect $\tau$"); ax.set_ylabel("density")
-ax.legend(fontsize=9)
-ax.set_title("Confounded comparison versus adjusted posteriors")
-plt.tight_layout()
-plt.show()
-```
-
-The raw comparison and the two posteriors are all bunched together, well to the right of the true
-effect, and adding a linear term in $X$ shifts the density only slightly. None of these three numbers
-comes close to the truth, which is the visual version of the "helps a little and nowhere near enough"
-verdict above, and it motivates the flexible surface built later in the chapter.
-
-## Bayesian instrumental variables
-
-Confounding by observables is only one way a comparison fails. Suppose the policy variable is
-continuous and determined jointly with the outcome. Write the **triangular simultaneous system**, a
-first stage for the endogenous regressor $x_i$ and a structural equation for the outcome $y_i$,
-
-$$
-x_i = z_i^\top \gamma + v_i , \qquad
-y_i = \beta\, x_i + w_i^\top \delta + u_i , \qquad
-\begin{pmatrix} v_i \\ u_i \end{pmatrix} \sim \mathcal{N}\!\left( 0, \;
-\Sigma = \begin{pmatrix} \sigma_v^2 & \sigma_{vu} \\ \sigma_{vu} & \sigma_u^2 \end{pmatrix}
-\right) .
-$$
-
-The instruments $z_i$ enter the first stage but not the structural equation, which is the exclusion
-restriction, and they must actually move $x_i$, which is relevance. The system is triangular, so the
-map from $(v, u)$ to $(x, y)$ has unit Jacobian and the likelihood is just the bivariate normal
-density of the two residuals.
-
-Least squares fails as soon as $\sigma_{vu} \neq 0$. Since $x_i$ contains $v_i$, which is correlated
-with the structural error, regressor and error are correlated, and the estimator converges to
-$\beta + \operatorname{Cov}(x_i, u_i)/\operatorname{Var}(x_i)$, that is to
-$\beta + \sigma_{vu} / (\gamma^\top \operatorname{Var}(z) \gamma + \sigma_v^2)$. The bias carries the
-sign of $\sigma_{vu}$ and shrinks only as the instruments explain more of $x$. No prior repairs it,
-because it is a property of the wrong likelihood; the fix is to model both equations at once.
-
-To build a Gibbs sampler we factor the bivariate normal rather than stacking it. Conditional on
-$\Sigma$, the regression of $u$ on $v$ has slope $\sigma_{vu} / \sigma_v^2$ and residual variance
-$\sigma_u^2 (1 - \rho^2)$ with $\rho = \sigma_{vu} / (\sigma_v \sigma_u)$, which turns the
-structural equation into a **control-function** form,
-
-$$
-y_i - \frac{\sigma_{vu}}{\sigma_v^2}\, v_i \;=\; \beta\, x_i + w_i^\top \delta + \eta_i ,
-\qquad \eta_i \sim \mathcal{N}\!\big(0, \sigma_u^2 (1 - \rho^2)\big),
-$$
-
-in which the first-stage residual $v_i = x_i - z_i^\top \gamma$ is a known regressor and the
-remaining error is independent of $x_i$. That is why the endogeneity disappears: once the part of
-$u_i$ predictable from $v_i$ is subtracted, what is left is orthogonal to the regressor. Reversing
-the roles gives the first-stage conditional, regressing $x_i - (\sigma_{vu} / \sigma_u^2) u_i$ on
-$z_i$ with variance $\sigma_v^2 (1 - \rho^2)$. Both are ordinary Gaussian linear models, so with
-Gaussian priors both draws are Gaussian.
-
-The third block is the error covariance. With prior $\Sigma \sim \mathcal{IW}(\nu_0, S_0)$ and
-residual matrix $E = [\,v \;\; u\,]$ of dimension $n \times 2$, conjugacy gives
-$\Sigma \mid \gamma, \beta, \delta \sim \mathcal{IW}(\nu_0 + n, S_0 + E^\top E)$. We draw it
-ourselves. If $W \sim \mathcal{W}(\nu, S^{-1})$ then $W^{-1} \sim \mathcal{IW}(\nu, S)$, and a
-Wishart draw follows from the **Bartlett decomposition**: let $C$ be the Cholesky factor of $S^{-1}$
-and $A$ be lower triangular with $A_{ii} = \sqrt{\chi^2_{\nu - i + 1}}$ and standard normals below
-the diagonal, and set $W = (CA)(CA)^\top$. The chunk below implements both draws.
-
-**Reading the computation.** Conditional Gaussian errors turn the IV block into an adjusted regression. The helper receives the adjusted design, outcome, variance, and prior precision so each update can be compared with its formula.
-
-```{python}
-def draw_gaussian(Xd, yd, s2, prec0, rng):
-    """Draw from the Gaussian posterior of a linear model with known variance s2."""
-    V = np.linalg.inv(Xd.T @ Xd / s2 + prec0)
-    return V @ (Xd.T @ yd / s2) + np.linalg.cholesky(V) @ rng.standard_normal(Xd.shape[1])
-
-def draw_inv_wishart(nu, S, rng):
-    """Inverse-Wishart draw via a Bartlett-decomposed Wishart of the inverse."""
-    A = np.zeros(S.shape)
-    for i in range(S.shape[0]):
-        A[i, i] = np.sqrt(rng.chisquare(nu - i))
-        A[i, :i] = rng.standard_normal(i)
-    CA = np.linalg.cholesky(np.linalg.inv(S)) @ A
-    return np.linalg.inv(CA @ CA.T)
-
-n_iv, beta_iv, alpha_iv, rho_iv = 500, 1.0, 0.5, 0.7
-gamma_iv = np.array([0.3, 0.8])                    # first stage: intercept and slope
-Zi = np.column_stack([np.ones(n_iv), rng.normal(size=n_iv)])
-err = rng.standard_normal((n_iv, 2)) @ np.linalg.cholesky(
-    np.array([[1.0, rho_iv], [rho_iv, 1.0]])).T
-x_end = Zi @ gamma_iv + err[:, 0]
-y_iv = alpha_iv + beta_iv * x_end + err[:, 1]
-Xs = np.column_stack([x_end, np.ones(n_iv)])       # coefficients (beta, alpha)
-b_ols = np.linalg.solve(Xs.T @ Xs, Xs.T @ y_iv)
-res = y_iv - Xs @ b_ols
-se_ols = np.sqrt((res @ res / (n_iv - 2)) * np.linalg.inv(Xs.T @ Xs)[0, 0])
-print(f"true beta {beta_iv:.3f}   OLS beta {b_ols[0]:.3f}   95% interval "
-      f"[{b_ols[0] - 1.96 * se_ols:.3f}, {b_ols[0] + 1.96 * se_ols:.3f}]")
-```
-
-The least-squares interval is tight and wrong, missing the truth by many multiples of its own
-standard error, the signature of bias rather than imprecision. The sampler below cycles the three
-blocks derived above under diffuse priors.
-
-**Reading the computation.** After drawing the first-stage and structural coefficients, update their error covariance from current residuals. Correlation between the errors is the source of endogeneity, not a numerical defect to be removed by standardising.
-
-```{python}
-prec0, nu0, S0, n_draw, burn = np.eye(2) / 100.0, 4.0, np.eye(2), 6000, 2000
-gamma = np.linalg.solve(Zi.T @ Zi, Zi.T @ x_end)
-theta, Sigma = b_ols.copy(), np.eye(2)
-th_draws, rho_draws = np.empty((n_draw, 2)), np.empty(n_draw)
-for t in range(n_draw):
-    sv2, su2, svu = Sigma[0, 0], Sigma[1, 1], Sigma[0, 1]
-    rho = svu / np.sqrt(sv2 * su2)
-    u = y_iv - Xs @ theta                          # structural residual
-    gamma = draw_gaussian(Zi, x_end - (svu / su2) * u, sv2 * (1 - rho**2), prec0, rng)
-    v = x_end - Zi @ gamma                         # first-stage residual
-    theta = draw_gaussian(Xs, y_iv - (svu / sv2) * v, su2 * (1 - rho**2), prec0, rng)
-    E = np.column_stack([x_end - Zi @ gamma, y_iv - Xs @ theta])
-    Sigma = draw_inv_wishart(nu0 + n_iv, S0 + E.T @ E, rng)
-    th_draws[t] = theta
-    rho_draws[t] = Sigma[0, 1] / np.sqrt(Sigma[0, 0] * Sigma[1, 1])
-beta_post, rho_post = th_draws[burn:, 0], rho_draws[burn:]
-for nm, dr, tv in [("beta", beta_post, beta_iv), ("error corr", rho_post, rho_iv)]:
-    lo, hi = np.quantile(dr, [0.025, 0.975])
-    print(f"{nm:>11}: mean {dr.mean():.3f}   95% CI [{lo:.3f}, {hi:.3f}]   true {tv:.3f}")
-```
-
-The posterior for the structural coefficient is centred essentially on the truth and its credible
-interval covers it, while the least-squares interval lies entirely above it. The sampler also
-recovers the error correlation, the parameter that diagnoses the endogeneity in the first place: had
-its posterior concentrated near zero we would have concluded that least squares was fine. The wider
-Bayesian interval is the correct price of instrumenting, and it widens as the instrument weakens.
-
-Two pictures make this concrete: the corrected posterior against the biased OLS estimate, and the
-posterior of the correlation that caused the bias in the first place. Both reuse the `beta_post` and
-`rho_post` draws already retained from the sampler.
-
-**Reading the computation.** The dashed and dotted lines mark two single numbers, an estimate and the truth; the histogram is the full Bayesian IV posterior for the same coefficient.
-
-```{python}
-fig, ax = plt.subplots()
-ax.hist(beta_post, bins=50, density=True, alpha=0.75, label="Bayesian IV posterior")
-ax.axvline(b_ols[0], color="grey", ls="--", label=f"OLS = {b_ols[0]:.2f}")
-ax.axvline(beta_iv, color="black", ls=":", label=f"true beta = {beta_iv:.1f}")
-ax.set_xlabel(r"structural coefficient $\beta$"); ax.set_ylabel("posterior density")
-ax.legend()
-ax.set_title("Bayesian IV corrects the OLS endogeneity bias")
-plt.tight_layout()
-plt.show()
-```
-
-**Reading the computation.** This histogram is a diagnostic, not the target of the analysis: a posterior for $\rho$ concentrated away from zero is what tells us least squares needed correcting at all.
-
-```{python}
-fig, ax = plt.subplots()
-ax.hist(rho_post, bins=50, density=True, color="C2", alpha=0.8)
-ax.axvline(rho_iv, color="black", ls=":", label=f"true corr = {rho_iv:.1f}")
-ax.set_xlabel(r"error correlation $\rho$"); ax.set_ylabel("posterior density")
-ax.legend()
-ax.set_title("Posterior of the error correlation diagnoses the endogeneity")
-plt.tight_layout()
-plt.show()
-```
-
-The OLS line sits in the left tail of the Bayesian posterior, well outside where the corrected
-estimate puts most of its mass, while the true value sits comfortably inside it. The correlation
-posterior is concentrated well above zero and away from the true value of $\rho$ only by ordinary
-sampling variation, which is exactly the signature that would have been absent had least squares
-been valid to begin with.
-
-### Interpret the IV conditionals before programming them
-
-In the triangular system, conditional Normal algebra gives
-
-$$
-u_i\mid v_i,\Sigma\sim N\left(
-\frac{\sigma_{vu}}{\sigma_v^2}v_i,
-\sigma_u^2-\frac{\sigma_{vu}^2}{\sigma_v^2}\right).
-$$
-
-After subtracting the conditional error mean from $y_i$, the outcome equation
-is a Gaussian regression with the smaller conditional variance. This is the
-reason the Gibbs code constructs an adjusted outcome rather than simply
-regressing on fitted values and treating them as observed without error.
-The first-stage update uses the corresponding conditional distribution of $v_i$
-given $u_i$. Neither update guarantees identification: exclusion, instrument
-exogeneity, and relevance are substantive assumptions. With a weak instrument,
-prior sensitivity is part of the result, not merely a numerical nuisance.
-
-### The Normal update inside a tree
-
-Fix all trees except one, subtract their predictions, and consider partial
-residuals in a leaf: $r_i=\mu_\ell+\epsilon_i$, with
-$\mu_\ell\sim N(0,s_\mu^2)$ and $\epsilon_i\sim N(0,\sigma^2)$.
-Completing the scalar square gives
-
-$$
-V_\ell=(s_\mu^{-2}+n_\ell/\sigma^2)^{-1},\qquad
-m_\ell=V_\ell\sum_{i\in\ell}r_i/\sigma^2.
-$$
-
-The leaf conditional is $N(m_\ell,V_\ell)$. Small leaves receive stronger
-shrinkage. BART additionally learns tree structures; keeping a fixed dictionary
-of indicator functions gives a useful backfitting demonstration but a different
-model. The exercise uses the tree model for the prescribed policy-effect task.
-
-## A runnable stand-in for BART
-
-Return to the confounding problem, where the failure was the rigidity of the adjustment. Bayesian
-additive regression trees write the conditional mean as a sum of many shallow trees,
-$\mathbb{E}[Y \mid D, X] = \sum_{m=1}^{M} g(D, X; T_m, \mu_m)$, under regularising priors that keep
-every tree weak, with leaf values shrunk hard towards zero so that no single tree dominates.
-The posterior is explored by **Bayesian backfitting**, updating each learner against the residual
-left by all the others.
-
-Sampling over tree topologies is more machinery than we want from scratch, so we simplify: keep the
-logic, drop the search. It must be said plainly that what follows is a stand-in, not BART: the split
-points are fixed in advance rather than learned, and the learners are stumps in one variable rather
-than trees. What it shares with BART is the mechanism, many weak additive learners tied down by a
-shrinkage prior and fitted by backfitting. We fix $M = 40$ cut-points on a coarse grid across the
-confounder and make the $m$-th learner a constant stump,
-
-$$
-Y_i = \mu + \tau D_i + \sum_{m=1}^{M} a_m \mathbb{1}\{X_i > c_m\} + \varepsilon_i , \qquad
-a_m \sim \mathcal{N}\!\left(0, \; \frac{(0.8\, s_Y)^2}{M}\right), \qquad
-\varepsilon_i \sim \mathcal{N}(0, \sigma^2) .
-$$
-
-The prior variance of each amplitude is divided by $M$, exactly as in BART's leaf prior, so the sum
-keeps a sensible scale however many stumps we use while each is individually pulled towards doing
-nothing. Every full conditional is standard: $a_m$ given the rest is a one-dimensional Gaussian,
-$(\mu, \tau)$ given the ensemble is Gaussian, and $\sigma^2$ is inverse-Gamma.
-
-**Reading the computation.** Backfitting adds one learner’s old contribution back to the residual, draws its new amplitude, and subtracts the new contribution. The cut points are fixed, so this illustrates an additive basis model rather than learned BART trees.
-
-```{python}
-M = 40
-cuts = np.linspace(X.min(), X.max(), M + 2)[1:-1]
-B = (X[:, None] > cuts[None, :]).astype(float)     # n x M stump basis
-Bsq, Zc = (B * B).sum(0), np.column_stack([one, D])
-sa2 = (0.8 * Y.std()) ** 2 / M                     # shrinkage prior on amplitudes
-c0 = d0 = 0.01                                     # diffuse inverse-Gamma on sigma^2
-n_bf, burn_bf = 4000, 1000
-a, sigma2, g = np.zeros(M), Y.var(), np.zeros(n)
-tau_draws, fit_draws = np.empty(n_bf), np.empty((n_bf, n))
-for t in range(n_bf):
-    theta_c = draw_gaussian(Zc, Y - g, sigma2, np.eye(2) / 100.0, rng)
-    base = Y - Zc @ theta_c                        # Bayesian backfitting sweep
-    r = base - g
-    for m in range(M):
-        r = r + a[m] * B[:, m]                     # add stump m back in
-        prec = Bsq[m] / sigma2 + 1.0 / sa2
-        a[m] = (B[:, m] @ r / sigma2) / prec + rng.standard_normal() / np.sqrt(prec)
-        r = r - a[m] * B[:, m]                     # take the new stump out
-    g = base - r
-    e = Y - Zc @ theta_c - g
-    sigma2 = 1.0 / rng.gamma(c0 + n / 2, 1.0 / (d0 + 0.5 * e @ e))
-    tau_draws[t], fit_draws[t] = theta_c[1], theta_c[0] + g
-tau_bf, fit_draws = tau_draws[burn_bf:], fit_draws[burn_bf:]
-print(f"stump ensemble tau: mean {tau_bf.mean():.3f}   95% CI "
-      f"[{np.quantile(tau_bf, 0.025):.3f}, {np.quantile(tau_bf, 0.975):.3f}]")
-print(f"posterior sigma^2 {sigma2:.3f} (true 1.000)   true ATE {tau_true:.3f}")
-```
-
-The ensemble recovers the treatment effect. Where the linear adjustment left a bias of about three
-quarters of a unit, the additive stumps put the posterior mean within a few hundredths of two and
-the credible interval brackets it. The residual variance also lands near its true value of one,
-direct evidence that the curvature in $X$ was absorbed by the learners rather than charged to the
-treatment.
-
-**Reading the computation.** The fitted surface and treatment posterior answer related questions: whether observable curvature is represented and what average treatment effect remains. Neither plot verifies the absence of unobserved confounding.
-
-```{python}
-order, fit_mean, tgrid = np.argsort(X), fit_draws.mean(0), np.linspace(1.6, 3.2, 400)
-fit_lo, fit_hi = np.quantile(fit_draws, [0.025, 0.975], axis=0)
-fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-axes[0].plot(X[order], (1.0 + f_X)[order], "k", lw=1.8, label="true 1 + f(X)")
-axes[0].plot(X[order], fit_mean[order], color="steelblue", lw=1.6, label="stump ensemble")
-axes[0].fill_between(X[order], fit_lo[order], fit_hi[order], color="steelblue", alpha=0.3)
-axes[0].set(xlabel="confounder X", ylabel="response", title="Learned adjustment surface")
-axes[0].legend(fontsize=9)
-axes[1].hist(tau_bf, bins=50, density=True, color="steelblue", alpha=0.85, label="stumps")
-axes[1].plot(tgrid, post_lin.pdf(tgrid), color="darkorange", lw=1.8, label="linear in X")
-axes[1].axvline(tau_true, color="black", ls=":", lw=1.6, label="true ATE = 2")
-axes[1].set(xlabel=r"$\tau$", ylabel="posterior density", title="Bias removed by flexibility")
-axes[1].legend(fontsize=9)
-plt.tight_layout()
-plt.show()
-```
-
-The left panel explains the right one. The ensemble traces the sine-plus-quadratic shape closely in
-the middle of the covariate range and widens its band in the sparse tails, as a regularised fit
-should. Nothing curved is left for $D$ to explain, and the wider credible interval is the price of
-not assuming a functional form. Real BART learns where to split, handles many covariates and their
-interactions, and lets the treatment interact with them, so that averaging the posterior contrast
-$\hat{f}(1, X_i) - \hat{f}(0, X_i)$ over the sample gives an average effect even under heterogeneity.
-
-
-
-## What tree flexibility learns, and what identifies the policy effect
-
-The tree slides explain a prior for the outcome surface $f(d,x)$. To turn that
-surface into a causal estimand requires a separate argument. Under consistency,
-conditional exchangeability $(Y(0),Y(1))\perp D\mid X$, and overlap,
-
-$$
-E[Y(d)\mid X=x]=E[Y\mid D=d,X=x]=f(d,x).
-$$
-
-The first equality is justified by identification assumptions, not by a
-flexible regression algorithm. For the observed covariate population, a posterior
-draw of the average conditional treatment effect is therefore
-
-$$
-\tau^{(s)}=\frac1n\sum_i\{f^{(s)}(1,x_i)-f^{(s)}(0,x_i)\}.
-$$
-
-Stack both treatment assignments into one prediction matrix so that the same
-sampled ensemble supplies both potential-outcome means. Independent fits or
-independent prediction calls can lose their posterior dependence. Do not add
-independent observation noise when the estimand is this average of conditional
-means. Inferring a realised finite-sample average of individual potential-outcome
-differences is another target and requires additional assumptions about those outcomes.
-
-The exercise now fits actual BART trees. Compare the posterior effect plot with
-the overlap plot: a smooth fitted surface cannot reveal unmeasured confounding,
-and a narrow extrapolation interval does not establish overlap.
-
-*Source connection:* SGPE Lecture 3, Part II, PDF pp. 4–19, supplies tree modelling;
-Hill (2011) and Imbens and Rubin (2015) supply the causal interpretation.
-
-## What these data can and cannot identify
-
-Everything above ran on simulated data, and that was deliberate: a simulation is the only place where
-the true effect is known and a method can be checked against it. The honest counterpart to that
-convenience is to say plainly what happens when we turn to the data actually shipped with this course.
-The repository holds macroeconomic series from FRED and portfolio returns from the Kenneth French
-library. Neither contains a randomised experiment. Nobody assigned the federal funds rate at random,
-nobody assigned an industry to the 2020 pandemic, and there is no lottery, no discontinuity and no
-credible instrument sitting in these files waiting to be used. A chapter that produced a number and
-called it a causal effect of monetary policy on equity prices would be teaching the wrong lesson.
-
-What these data do support is two exercises that are worth doing carefully, provided their status is
-stated. The first is an event study: pick a rule that says when a tightening cycle began, line the
-market's return up in event time and ask what the posterior says about the average path around those
-dates. The second is a synthetic-control style comparison: take one industry hit hard by a shock, build
-a weighted combination of the other industries that tracked it before the shock, and look at the gap
-afterwards. Both produce a posterior distribution over a well-defined quantity. In both cases that
-quantity is a descriptive gap, not a treatment effect, and the rest of this section is about seeing
-precisely how far that is from the causal quantity a policy maker would want.
-
-The setup below loads the three files we need and reports what is in them.
-
-**Reading the computation.** The funds rate and the market return are aligned on the same monthly index so that event time is unambiguous. The industry file is checked for the date from which all forty-nine portfolios are complete, because a synthetic control cannot use a donor that is missing.
-
-```{python}
-from pathlib import Path
-
-DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
-rng_r = np.random.default_rng(2026)
-
-fred_r = pd.read_parquet(DATA / "fred_macro_monthly.parquet")
-ff_r = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
-ind_r = pd.read_parquet(DATA / "ff_industry49_monthly.parquet")
-
-mkt = ff_r["mkt_rf"].reindex(fred_r.index).dropna()
-print(f"funds rate: {fred_r.index[0]:%Y-%m} to {fred_r.index[-1]:%Y-%m}, "
-      f"{len(fred_r)} months")
-print(f"market excess return: {len(mkt)} matched months, mean {mkt.mean():.4f}, "
-      f"sd {mkt.std(ddof=1):.4f}")
-print(f"industry portfolios: {ind_r.shape[1]} series, complete from "
-      f"{ind_r.dropna().index[0]:%Y-%m}")
-```
-
-The funds rate covers $800$ months from January 1960 to August 2026 and the market excess return
-matches $799$ of them, averaging $0.0059$ per month with a standard deviation of $0.0445$. That ratio
-is the background fact against which everything below has to be read: a monthly mean of about six tenths
-of a percentage point sits inside a monthly standard deviation of four and a half percentage points, so
-a year of data contains roughly $0.0059 \times 12 = 0.071$ of signal against
-$0.0445\sqrt{12} = 0.154$ of noise. Any event-study effect we could hope to detect with a dozen episodes
-must be large indeed. The forty-nine industry portfolios are complete from July 1969 onwards, which
-fixes the earliest usable start for the second exercise.
-
-## A Bayesian event study around Federal Reserve tightening cycles
-
-### Writing the rule down in code
-
-There is no official list of tightening episodes in these files, so we have to manufacture one, and the
-manufacturing is the interesting part. A reasonable rule says that a tightening cycle has begun in month
-$t$ if the federal funds rate is at least $\theta$ percentage points higher than it was twelve months
-earlier, and if no episode has already been dated within the preceding $q$ months. The two numbers
-$\theta$ and $q$ are choices, not facts. A low $\theta$ catches mild adjustments alongside genuine
-cycles; a high $\theta$ keeps only the dramatic ones. A short $q$ splits a long tightening into several
-episodes; a long $q$ merges neighbouring ones and, because the rule keeps the first qualifying month, it
-also changes *which* month is called the start.
-
-**Reading the computation.** The function returns event dates, not a regression. Everything downstream conditions on this list, so the list is the first place to look when an event-study result seems fragile.
-
-```{python}
 def tightening_starts(rate, window=12, threshold=1.5, quiet=24):
-    """First month whose `window`-month rise in the policy rate reaches
-    `threshold`, ignoring any such month within `quiet` months of the last start."""
+    """First month whose `window`-month rise in the policy rate reaches `threshold`,
+    ignoring any such month within `quiet` months of the last dated start."""
     hot = rate.diff(window) >= threshold
     starts, last = [], None
     for date, is_hot in hot.items():
@@ -707,120 +88,7 @@ def tightening_starts(rate, window=12, threshold=1.5, quiet=24):
         last = date
     return pd.DatetimeIndex(starts)
 
-starts_base = tightening_starts(fred_r["fed_funds"], 12, 1.5, 24)
-starts_loose = tightening_starts(fred_r["fed_funds"], 12, 1.0, 18)
-print(f"baseline rule (12-month rise >= 1.5pp, 24-month gap): {len(starts_base)} episodes")
-print("  " + ", ".join(f"{d:%Y-%m}" for d in starts_base))
-print(f"looser rule (>= 1.0pp, 18-month gap): {len(starts_loose)} episodes")
-print("  " + ", ".join(f"{d:%Y-%m}" for d in starts_loose))
-```
-
-The baseline rule returns twelve episodes, and the list is recognisable as monetary history, among them
-November 1966, January 1973, November 1977, December 1979 at the start of the Volcker disinflation,
-November 1988, September 1994, May 2000, March 2005 and July 2022. The looser rule returns nineteen. Of
-those, seven are episodes the baseline rule never dates at all, namely November 1969, July 1974,
-November 1980, September 1987, July 2006, October 2018 and January 2024, and most of the remaining
-twelve are shifted a few months earlier because the lower threshold is crossed sooner, so that the
-2005 episode becomes December 2004 and the 2022 episode becomes June 2022. Seven extra episodes and a
-dozen moved dates from changing two numbers that nobody can pin down from theory is the whole
-methodological problem of this literature in one table.
-
-**Reading the computation.** The vertical lines mark the dates the two rules produced. Where a solid and a dotted line nearly coincide the two rules agree; where a dotted line stands alone the looser rule has added an episode.
-
-```{python}
-fig, ax = plt.subplots()
-ax.plot(fred_r.index, fred_r["fed_funds"], color="0.35", lw=1.0,
-        label="federal funds rate")
-for d in starts_base:
-    ax.axvline(d, color="firebrick", lw=1.0, alpha=0.8)
-for d in starts_loose:
-    ax.axvline(d, color="steelblue", lw=0.8, ls=":", alpha=0.9)
-ax.plot([], [], color="firebrick", lw=1.0, label="baseline rule start")
-ax.plot([], [], color="steelblue", lw=0.8, ls=":", label="looser rule start")
-ax.set_xlabel("date"); ax.set_ylabel("per cent")
-ax.set_title("Tightening episodes identified by two mechanical rules")
-ax.legend(fontsize=8)
-plt.tight_layout(); plt.show()
-```
-
-The plot makes the mechanics visible. Both rules fire densely through the volatile 1970s, when the
-funds rate moved by whole percentage points within a year routinely, and sparsely after 1995, when it
-moved more slowly and in pre-announced steps. That is itself a warning: an event study that pools these
-dates is averaging across two very different monetary regimes, and the pre-1985 episodes will dominate
-simply because there are more of them.
-
-### The event-time posterior
-
-Line each episode up at event month zero and collect the market's abnormal return, defined as the excess
-return minus its full-sample mean, for event months $-12$ to $+24$. Stacking the episodes gives a matrix
-with one row per episode and one column per event month, and the model is the simplest one that fits the
-question: in event month $h$ the abnormal return of episode $k$ is
-$$
-r_{k,h} \;=\; \mu_h + \varepsilon_{k,h}, \qquad \varepsilon_{k,h} \sim \mathcal{N}(0, \sigma^2),
-$$
-with the conjugate pair $\mu_h \mid \sigma^2 \sim \mathcal{N}(0, \sigma^2 B_0)$ independently across
-event months and $\sigma^2 \sim \mathcal{IG}(\alpha_0, \delta_0)$. This is a difference in means with
-the comparison group folded into the definition of the outcome, so the algebra of the next callout
-applies directly and there is nothing to sample: the posterior is available in closed form and we draw
-from it.
-
-::: {.callout-note collapse="true"}
-## Derivation: the posterior for a difference in means, and why the sharp null is a different object
-
-Take two arms, $n_1$ treated observations with mean $\bar y_1$ and $n_0$ controls with mean $\bar y_0$,
-and a Normal likelihood $y_i \mid D_i = d \sim \mathcal{N}(\mu_d, \sigma^2)$. Use the course's
-conjugate prior, $\mu_d \mid \sigma^2 \sim \mathcal{N}(0, \sigma^2 B_0)$ independently in each arm and
-$\sigma^2 \sim \mathcal{IG}(\alpha_0, \delta_0)$. Conditional on $\sigma^2$ the arms do not talk to each
-other, so work on one arm at a time. The exponent of the product of likelihood and prior is
-$$
--\frac{1}{2\sigma^2}\left[\sum_{i: D_i = d}(y_i - \mu_d)^2 + \frac{\mu_d^2}{B_0}\right] .
-$$
-Expand the sum of squares as $n_d\mu_d^2 - 2\mu_d S_d + \sum y_i^2$, with $S_d = \sum_{i:D_i=d} y_i$,
-and collect the terms in $\mu_d$:
-$$
--\frac{1}{2\sigma^2}\left[\Big(n_d + \tfrac{1}{B_0}\Big)\mu_d^2 - 2\mu_d S_d\right] + \text{const}
-= -\frac{n_d + 1/B_0}{2\sigma^2}\left[\mu_d - \frac{S_d}{n_d + 1/B_0}\right]^2 + \text{const} .
-$$
-Completing the square has done the whole job, so
-$$
-\mu_d \mid \sigma^2, y \sim \mathcal{N}\!\left(b_d, \; \sigma^2 V_d\right), \qquad
-V_d = \frac{1}{n_d + 1/B_0}, \qquad b_d = V_d S_d = \frac{n_d}{n_d + 1/B_0}\,\bar y_d .
-$$
-The posterior mean is the arm mean shrunk towards zero by a factor $n_d/(n_d + 1/B_0)$, which tends to
-one as $B_0$ grows or the arm fills up. Because the two arms are conditionally independent, the
-difference $\delta = \mu_1 - \mu_0$ has
-$$
-\delta \mid \sigma^2, y \sim \mathcal{N}\!\big(b_1 - b_0, \; \sigma^2 (V_1 + V_0)\big),
-$$
-and letting $B_0 \to \infty$ recovers the familiar $\bar y_1 - \bar y_0$ with variance
-$\sigma^2(1/n_1 + 1/n_0)$. Integrating $\sigma^2$ out against its inverse-Gamma posterior, whose
-parameters update to $\alpha_n = \alpha_0 + n/2$ and
-$\delta_n = \delta_0 + \tfrac12\big[\sum_d\sum_{i:D_i=d}(y_i - \bar y_d)^2 + \sum_d n_d \bar
-y_d^2/(n_d B_0 + 1)\big]$, turns the Normal into a Student $t$ with $2\alpha_n$ degrees of freedom. In
-code it is easier to draw $\sigma^{2(s)}$ first and then $\delta^{(s)}$ given it, which is what the
-chunk below does.
-
-Now the part that is easy to get wrong. The parameter $\delta$ is the difference between two population
-means. Fisher's sharp null is a different statement altogether: it says $Y_i(1) = Y_i(0)$ for every
-single unit $i$, so that treatment changed nothing for anybody. Three consequences follow. First, the
-sharp null is not a restriction on $\delta$; it implies $\delta = 0$, but $\delta = 0$ does not imply
-it, because individual effects of $+5$ and $-5$ average to zero. Second, under the sharp null every
-missing potential outcome is *known* exactly, since $Y_i^{mis} = Y_i$, so the randomisation
-distribution of any test statistic can be computed by permuting the treatment labels, with no
-likelihood, no prior and no parameter anywhere. Third, and as a result, the two objects answer to
-different evidence: a posterior interval for $\delta$ that excludes zero rejects "no average effect" and
-says nothing about whether some units were unaffected, while a randomisation test of the sharp null with
-a large $p$-value does not argue that the posterior for $\delta$ should be centred at zero. Quote
-whichever you computed, and do not translate one into the other.
-:::
-
-**Reading the computation.** The event matrix drops any episode too close to the start or end of the sample to supply a full window, so the number of usable episodes can be smaller than the number of dated ones. The posterior is drawn, not sampled by MCMC: the inverse-Gamma draw for the variance comes first and the event-month means are drawn conditional on it.
-
-```{python}
-H_LO, H_HI = -12, 24
-hs = np.arange(H_LO, H_HI + 1)
-
-def event_matrix(starts, series, h_lo=H_LO, h_hi=H_HI):
+def event_matrix(starts, series, h_lo=-12, h_hi=24):
     idx = series.index
     rows = []
     for d in starts:
@@ -832,49 +100,29 @@ def event_matrix(starts, series, h_lo=H_LO, h_hi=H_HI):
         rows.append(series.iloc[i + h_lo: i + h_hi + 1].to_numpy())
     return np.array(rows)
 
-abn = mkt - mkt.mean()                  # abnormal = excess return minus its own mean
-
 def event_posterior(E, B0=1.0, alpha_0=3.0, delta_0=3.0 * 0.0018, n_draw=8000, rng=None):
+    """Conjugate Normal-inverse-Gamma posterior for one mean per event month."""
     K, Hn = E.shape
     ybar = E.mean(axis=0)
     B_n = 1.0 / (K + 1.0 / B0)
-    m_n = B_n * E.sum(axis=0)
     SSE = ((E - ybar) ** 2).sum() + (K * ybar ** 2 / (K * B0 + 1.0)).sum()
     alpha_n, delta_n = alpha_0 + E.size / 2.0, delta_0 + 0.5 * SSE
     s2 = stats.invgamma(a=alpha_n, scale=delta_n).rvs(n_draw, random_state=rng)
-    mu = m_n[None, :] + np.sqrt(s2[:, None] * B_n) * rng.standard_normal((n_draw, Hn))
+    mu = B_n * E.sum(axis=0) + np.sqrt(s2[:, None] * B_n) * rng.standard_normal((n_draw, Hn))
     return mu, s2
 
-E_base = event_matrix(starts_base, abn)
-mu_base, s2_base = event_posterior(E_base, rng=rng_r)
+H_LO, H_HI = -12, 24
+hs = np.arange(H_LO, H_HI + 1)
+starts_base = tightening_starts(fred["fed_funds"], 12, 1.5, 24)
+E_base = event_matrix(starts_base, abn, H_LO, H_HI)
+mu_base, s2_base = event_posterior(E_base, rng=rng)
 car_base = mu_base[:, hs >= 0].cumsum(axis=1)
-print(f"{E_base.shape[0]} usable episodes, {E_base.shape[1]} event months each")
-print(f"posterior sd of a monthly abnormal return: {np.sqrt(s2_base.mean()):.4f}")
-for h in (0, 5, 11, 23):
-    lo, hi = np.quantile(car_base[:, h], [0.05, 0.95])
-    print(f"cumulative abnormal return through month {h:>2}: "
-          f"mean {car_base[:, h].mean():+.4f} "
-          f"90% [{lo:+.4f}, {hi:+.4f}]  P(<0) = {(car_base[:, h] < 0).mean():.3f}")
-```
 
-All twelve baseline episodes supply a full window, so the posterior is built on twelve observations per
-event month. The posterior standard deviation of a single monthly abnormal return is $0.0409$, close to
-the unconditional $0.0445$ of the raw series, which tells us straight away that lining returns up in
-event time has removed very little of their variance. The cumulative abnormal return in the announcement
-month itself is $-0.0062$ with a 90 per cent interval of $[-0.0249, +0.0125]$: about six tenths of a
-percentage point of underperformance, and an interval four times as wide as the point. By month eleven
-the cumulative figure is $-0.0082$ with interval $[-0.0726, +0.0565]$, and the posterior probability
-that it is negative is $0.591$, which is barely distinguishable from a coin toss. Only by month
-twenty-three does something emerge: $-0.0751$ with interval $[-0.1678, +0.0186]$ and a posterior
-probability of $0.908$ that the two-year cumulative abnormal return is negative. Even that is not a
-confident finding, and it is the horizon at which one should worry most about other things having
-happened in the meantime.
-
-**Reading the computation.** The left panel is the posterior for the mean abnormal return at each event month separately; the right panel accumulates the months from zero onward within each posterior draw, which is why its band widens with the horizon.
-
-```{python}
 mu_mean = mu_base.mean(axis=0)
 mu_lo, mu_hi = np.quantile(mu_base, [0.05, 0.95], axis=0)
+ch = np.arange(0, H_HI + 1)
+c_lo, c_hi = np.quantile(car_base, [0.05, 0.95], axis=0)
+
 fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
 axes[0].fill_between(hs, mu_lo, mu_hi, color="steelblue", alpha=0.3)
 axes[0].plot(hs, mu_mean, color="steelblue", lw=1.5)
@@ -882,39 +130,356 @@ axes[0].axhline(0.0, color="black", lw=0.8, ls=":")
 axes[0].axvline(0, color="firebrick", lw=1.0, ls="--")
 axes[0].set(xlabel="months from episode start", ylabel="abnormal monthly return",
             title="Posterior mean abnormal return by event month")
-ch = np.arange(0, H_HI + 1)
-c_lo, c_hi = np.quantile(car_base, [0.05, 0.95], axis=0)
 axes[1].fill_between(ch, c_lo, c_hi, color="darkorange", alpha=0.3)
 axes[1].plot(ch, car_base.mean(axis=0), color="darkorange", lw=1.5)
 axes[1].axhline(0.0, color="black", lw=0.8, ls=":")
 axes[1].set(xlabel="months from episode start", ylabel="cumulative abnormal return",
             title="Cumulative abnormal return with 90% band")
 plt.tight_layout(); plt.show()
+
+print(f"{len(starts_base)} tightening episodes dated, {E_base.shape[0]} usable, "
+      f"{E_base.shape[1]} event months each")
+for h in (0, 11, 23):
+    lo, hi = np.quantile(car_base[:, h], [0.05, 0.95])
+    print(f"cumulative abnormal return through month {h:>2}: "
+          f"mean {car_base[:, h].mean():+.4f}  90% [{lo:+.4f}, {hi:+.4f}]  "
+          f"P(<0) = {(car_base[:, h] < 0).mean():.3f}")
 ```
 
-The left panel is a reminder of what twelve observations per cell buy. The posterior means jump around
-between roughly $-0.03$ and $+0.03$ from one event month to the next, with bands that almost always
-straddle zero, and the months before the event look no calmer than the months after it. That last
-observation deserves emphasis: if the event genuinely marked a break, we would expect the pre-event
-months to be quiet and the post-event months to move, and they are not. The right panel accumulates
-those means and shows the slow drift downwards after month twelve, with a band that widens roughly as
-the square root of the horizon and never leaves zero behind.
+A rule that calls a tightening cycle started whenever the policy rate has risen at
+least a point and a half over the preceding year, and that will not call a second start
+within two years of the last one, dates twelve episodes since 1960. Lining the market's
+abnormal return up at those twelve dates and putting the conjugate Normal-inverse-Gamma
+posterior of Lecture 2 on each event month gives a picture that looks, at first glance,
+like an answer. The cumulative abnormal return drifts negative through the two years
+after a tightening begins, and by month twenty-three it sits at $-0.0751$ with a 90
+percent interval of $[-0.1678, +0.0186]$ and a posterior probability of $0.908$ that
+the two-year figure is negative. A number, an interval, and a probability attached to
+it: exactly the output a policy question wants.
 
-### Nine defensible rules, nine answers
+Everything in that paragraph is correctly computed. What has not yet been asked is
+whether it answers the question that was asked. The rule that produced twelve dates
+had two free numbers in it, a threshold and a minimum gap between episodes, and nothing
+in economic theory pins either one down. The next section asks what happens to this
+same computation when those two numbers are chosen differently, and the answer is the
+reason this chapter exists.
 
-The rule had two free numbers. The next chunk runs the entire exercise over a grid of three thresholds
-and three minimum gaps, reporting the posterior for the twelve-month cumulative abnormal return in
-each case.
+## The problem: an identifying choice masquerading as a data description {#sec-problem}
 
-**Reading the computation.** Nothing changes between rows except the two arguments of the dating rule. The model, the prior, the horizon and the data are identical throughout, so every difference across rows is attributable to the definition of the event.
+### Result R-10.1: the causal effect is a missing-data problem, and identifying it needs more than a model
+
+For unit $i$ with treatment $D_i \in \{0,1\}$ and potential outcomes $Y_i(1), Y_i(0)$,
+define the finite-sample effect
+$$
+\tau_{fs} = \frac{1}{n}\sum_{i=1}^n \big[Y_i(1) - Y_i(0)\big].
+$$
+Only one arm of each unit is ever observed, so $\tau_{fs}$ is a known linear function of
+data we have and data we do not have, and nothing else: writing $Y_i^{mis}$ for the arm
+not realised,
+$$
+\tau_{fs} = \frac{1}{n}\sum_{i=1}^n (2D_i - 1)\big(Y_i - Y_i^{mis}\big).
+$$
+There is no unknown parameter in this display, only a missing value for every unit. A
+posterior for $\tau_{fs}$ therefore requires a predictive distribution for the missing
+arm, $p(Y_i^{mis} \mid Y_i^{obs}, D_i, X_i)$, and that distribution is not determined by
+the data: it requires an assumption that says which units' observed outcomes may stand
+in for another unit's missing one, and an assumption that the event defining $D_i$ is
+not itself a consequence of the outcome path.
+
+::: {.callout-note collapse="true"}
+## Derivation
+
+Split the sum defining $\tau_{fs}$ according to which arm was realised. For a treated
+unit the observed outcome is $Y_i(1)$ and the missing one is $Y_i(0)$; for a control
+unit it is the reverse. Check the factor $(2D_i - 1)$: it is $+1$ when $D_i = 1$, giving
+$Y_i - Y_i^{mis} = Y_i(1) - Y_i(0)$, and $-1$ when $D_i = 0$, giving
+$Y_i - Y_i^{mis} = Y_i(0) - Y_i(1)$, whose negative is again $Y_i(1) - Y_i(0)$. Summing
+over units reproduces $\tau_{fs}$ exactly, which is the displayed identity.
+
+A Bayesian treats the missing arm as an unobserved quantity with a posterior predictive
+distribution,
+$$
+p(Y_i^{mis} \mid Y^{obs}, D, X) = \int p(Y_i^{mis} \mid \theta, D_i, X_i)\,
+p(\theta \mid Y^{obs}, D, X)\, d\theta.
+$$
+The first factor is where an identifying assumption has to enter, because the model
+fitted on the units that took one arm says nothing by itself about units that took the
+other. An assumption of the form "the arm taken carries no further information about
+potential outcomes once $X$ is held fixed" licenses using the opposite arm's fitted
+predictive at unit $i$'s own covariates to stand in for $Y_i^{mis}$. Without such an
+assumption the integral has no way to choose which fitted distribution applies to the
+missing arm, and the posterior for $\tau_{fs}$ is not identified: the likelihood is
+silent about it, and only the prior would speak.
+
+A second assumption is needed whenever the treatment is not something a controlled
+process assigned, but a date the analyst read off the outcome series itself. If the
+rule used to declare "treatment began here" depends on the same variable whose future
+path is then being measured for an effect, the comparison is no longer between treated
+and untreated units in the sense the first paragraph requires; it is a comparison
+between two windows of one series, chosen using information that is correlated with
+what comes next by construction. That is a different failure from ordinary
+confounding, and it is the one an event study is most exposed to.
+:::
+
+The consequence of R-10.1 is concrete rather than abstract here, because the treatment
+in this chapter's example is a dating rule applied to the very series whose future path
+is being measured. Two rules that both look defensible can date the same monetary
+history differently, and the chunk below runs a second, looser rule alongside the
+baseline one.
+
+```{python}
+starts_loose = tightening_starts(fred["fed_funds"], 12, 1.0, 18)
+print(f"baseline rule (>= 1.5pp over 12 months, 24-month gap): {len(starts_base)} episodes")
+print("  " + ", ".join(f"{d:%Y-%m}" for d in starts_base))
+print(f"looser rule (>= 1.0pp over 12 months, 18-month gap): {len(starts_loose)} episodes")
+print("  " + ", ".join(f"{d:%Y-%m}" for d in starts_loose))
+
+fig, ax = plt.subplots()
+ax.plot(fred.index, fred["fed_funds"], color="0.35", lw=1.0, label="federal funds rate")
+for d in starts_base:
+    ax.axvline(d, color="firebrick", lw=1.0, alpha=0.8)
+for d in starts_loose:
+    ax.axvline(d, color="steelblue", lw=0.8, ls=":", alpha=0.9)
+ax.plot([], [], color="firebrick", lw=1.0, label="baseline rule start")
+ax.plot([], [], color="steelblue", lw=0.8, ls=":", label="looser rule start")
+ax.set_xlabel("date"); ax.set_ylabel("per cent")
+ax.set_title("Two defensible rules date the same history differently")
+ax.legend(fontsize=8)
+plt.tight_layout(); plt.show()
+```
+
+The looser rule returns nineteen episodes against the baseline's twelve, seven of them
+dates the baseline rule never uses at all, and several of the shared ones shifted by a
+few months because a lower threshold is crossed sooner. Nobody derives $\theta = 1.5$
+or $q = 24$ months from theory; both are judgment calls about how to describe a policy
+rate series, made before any causal question is asked. R-10.1 says why that matters:
+the event date stands in for the treatment assignment, and a rule for choosing it that
+depends on the outcome series is exactly the case the derivation flags as needing an
+assumption the data cannot supply on their own.
+
+It is worth being precise about what kind of failure this is, because it is easy to
+mistake for ordinary measurement error and it is not. Measurement error in the date
+would average out with enough episodes, the way noise in any covariate averages out with
+enough observations. What is happening here is different in kind: the two rules are not
+two noisy estimates of one true date, they are two different definitions of what counts
+as the start of a tightening cycle, and there is no larger sample of tightening cycles
+that would let the analyst learn which definition is correct, because the definition is
+a modelling choice, not a fact about the world the data could in principle reveal. That
+is exactly the situation R-10.1's second paragraph describes as needing an assumption
+the likelihood cannot supply. The next section states that assumption plainly, together
+with the others a causal reading of this comparison would require, and Section 6 shows
+what happens to the headline number once the choice of rule is treated as part of the
+analysis rather than hidden inside it.
+
+## Methodology: stated assumptions in place of an unstated one {#sec-methodology}
+
+The repair this chapter offers is not a new sampler. It is to write down, before
+running any code, the conditions that would let an observed contrast stand for the
+causal effect of R-10.1, and then to check the sensitivity of the answer to each one
+that the data cannot verify.
+
+Three conditions do the work, and each is a separate way an observed contrast can fail
+to be a causal effect, so each needs its own defence rather than a single wave at "the
+model controls for confounders."
+
+Consistency says the observed outcome equals the potential outcome for the arm actually
+taken, $Y_i = Y_i(D_i)$, so that fitting a model to treated units estimates something
+about $Y(1)$ and fitting to controls estimates something about $Y(0)$. It fails under
+interference between units, sometimes written as the stable unit treatment value
+assumption, when one unit's treatment changes another's outcome. In a macroeconomic
+event study the natural interference channel is that the whole market is one unit
+observed at many dates, so the "control" period nearest an episode is not an untreated
+economy at all, it is the same economy anticipating or still absorbing the same policy
+regime; consistency is therefore the hardest of the three conditions to defend here, not
+the easiest.
+
+Unconfoundedness, or for a dated event rather than an explicitly assigned one, no
+anticipation, says the process that generates $D$ carries no information about
+potential outcomes beyond what is already in the observables conditioned on. For a
+randomised trial this is handed to the analyst by the coin flip; for an event study it
+has to be argued, and the argument is exactly the one the previous section's two-rule
+comparison put pressure on. If the dating rule is a function of the policy rate, and the
+policy rate itself responds to information the market has already priced, the date is
+not exogenous to the outcome being measured around it, and the direction of the
+resulting bias need not be small or predictable.
+
+Overlap says both arms have support wherever the comparison is drawn, so that the
+missing-arm predictive of R-10.1 is interpolating within observed variation rather than
+extrapolating beyond it. For a time-series comparison of one series against itself this
+condition is automatically satisfied in one sense, since every calendar month exists,
+but it hides a different problem: with only a handful of dated episodes there may be
+support in principle without there being enough of it in practice to pin the comparison
+down tightly, which is a statement about precision that Section 6 quantifies directly.
+
+None of the three conditions is estimated by the model that is about to be fitted. They
+are supplied by the analyst, and the empirical section is built to show, rather than
+assert, what changes when the supplied condition is not stable.
+
+### Result R-10.2: the adjusted contrast the assumptions license
+
+Under consistency and unconfoundedness given covariates $X$, together with overlap,
+$$
+\mathbb{E}[Y(d)] = \mathbb{E}_X\big\{\mathbb{E}[Y(d) \mid X]\big\}
+= \mathbb{E}_X\big\{\mathbb{E}[Y(d) \mid D=d, X]\big\}
+= \mathbb{E}_X\big\{\mathbb{E}[Y \mid D=d, X]\big\},
+$$
+for $d = 0, 1$, so that
+$$
+\tau = \mathbb{E}_X\Big[\mathbb{E}[Y \mid D=1, X] - \mathbb{E}[Y \mid D=0, X]\Big].
+$$
+When $X$ is empty, as in an event study that compares one window of a single series
+against another, this collapses to the ordinary difference between two conditional
+means, and the object being estimated is well defined only once the arms it compares
+have been fixed by an assumption, not read off the data being analysed.
+
+::: {.callout-note collapse="true"}
+## Derivation
+
+The first equality is iterated expectation and holds for any joint distribution. The
+second substitutes unconfoundedness, $(Y(0), Y(1)) \perp D \mid X$, which says the
+conditional distribution of $Y(d)$ given $X$ does not change once $D$ is further
+conditioned on, so $\mathbb{E}[Y(d) \mid X] = \mathbb{E}[Y(d) \mid D=d, X]$; overlap
+guarantees that the right-hand side is well defined, since it requires observations
+with $D=d$ at every value of $X$ the outer expectation ranges over. The third equality
+is consistency, $Y = Y(D)$, which lets $Y(d)$ be replaced by the observed $Y$ once
+$D = d$ has been conditioned on. Subtracting the two arms and taking the outer
+expectation over the observed distribution of $X$ gives the displayed $\tau$. Nothing
+in the derivation refers to a functional form for $\mathbb{E}[Y \mid D, X]$; that choice
+belongs to the empirical section, and getting it wrong is a modelling error, not a
+failure of this identity.
+:::
+
+### Result R-10.3: an unidentified direction is exactly the direction the prior fills
+
+Suppose the comparison depends on a choice $c$ that the assumptions above do not pin
+down, such as which of several dating rules defines $D$. Write the likelihood of the
+data as $L(\theta; c)$ for a parameter $\theta$ of interest. If $L(\theta; c)$ is
+constant in $c$ for every value the data could take, no volume of data updates a prior
+over $c$, and the posterior for $\theta$ marginal over $c$,
+$$
+p(\theta \mid y) = \int p(\theta \mid y, c)\, p(c)\, dc,
+$$
+is a mixture whose spread across $c$ never shrinks with the sample size, however
+precise $p(\theta \mid y, c)$ is for each fixed $c$.
+
+::: {.callout-note collapse="true"}
+## Derivation
+
+Take the simplest case in which $c$ indexes two disjoint models with no shared
+parameter, so $L(\theta; c)$ really is a family of separate likelihoods indexed by $c$,
+one for each candidate rule. Bayes' theorem updates $p(\theta \mid y, c)$ within each
+value of $c$ using only the data consistent with that value; it never updates $p(c)$
+itself using information the data do not carry about which $c$ generated them, because
+by construction every rule is applied to the same observed series and produces a
+well-defined, fully computable posterior of its own. The marginal posterior for
+$\theta$ is therefore an average of these within-rule posteriors weighted by whatever
+prior credibility is assigned to each rule, and averaging distinct, precise posteriors
+does not make the average precise: its variance is at least the between-rule variance
+of the posterior means, by the law of total variance,
+$$
+\operatorname{Var}(\theta \mid y) = \mathbb{E}_c\big[\operatorname{Var}(\theta \mid y,c)\big]
++ \operatorname{Var}_c\big(\mathbb{E}[\theta \mid y, c]\big),
+$$
+and the second term does not go to zero as the sample grows unless the rules'
+posterior means converge to one another, which is precisely what R-10.1 said an
+unstated assumption could not guarantee. This is the same arithmetic as the
+flat-likelihood case of a design with two identical columns, where the posterior for
+the difference between two coefficients is exactly the prior for it and no
+sample size changes that: here the roles are played by a modelling choice instead of a
+regressor, but the mechanism, a direction the likelihood does not move in, behaves
+identically. The practical instruction is the same in both cases: whenever a quantity
+of interest depends on a choice the likelihood cannot adjudicate, report how the answer
+moves as the choice moves, because refusing to move it is not the same as the choice
+not mattering.
+:::
+
+It is worth contrasting R-10.3 with the ordinary sense in which a Bayesian posterior is
+already "honest about uncertainty," because the two are easy to conflate and the
+difference is the whole content of this chapter. A wide credible interval reports
+uncertainty about a well-defined quantity, given a stated model and a stated set of
+identifying conditions; it shrinks as data accumulate because the likelihood, evaluated
+at the true conditions, concentrates. R-10.3 describes a different situation, in which
+the quantity is not well defined until the analyst supplies the missing condition, and
+no amount of data forces convergence, because the likelihood was never a function of
+that condition in the first place. Mistaking the second kind of uncertainty for the
+first is not a small error: it produces a narrow, confident interval exactly when the
+confidence is least earned, since a narrow within-rule interval says nothing about how
+far that interval would move if a different, equally defensible rule had been used.
+
+Sections 3 and this one together settle what the empirical section has to do
+differently from Section 2's opening computation. It is not enough to attach a
+posterior to one dating rule and read off an interval. The rule is the unidentified
+direction of R-10.3, and the honest report is the posterior's behaviour as the rule
+varies, set beside the assumptions of R-10.2 that would be needed to call any single
+row of that report a causal effect.
+
+## Data: the federal funds rate and the market excess return, 1960 to 2026 {#sec-data}
+
+The chapter's dataset is the monthly FRED macroeconomic snapshot,
+`data/fred_macro_monthly.parquet`, together with the market excess return from the
+Fama-French monthly file, `data/ff_factors_monthly.parquet`. The federal funds rate
+supplies the series a dating rule is applied to, and the market excess return, matched
+to the same monthly index, is the outcome whose abnormal path around each dated episode
+is measured. No other series enters this chapter, and no third variable is introduced
+to adjust the comparison, since the whole point of Sections 3 and 4 is that the
+difficulty here is not omitted covariates but the definition of the treatment itself.
+
+The two series are used at monthly frequency because that is the frequency at which
+the funds rate is set and reported; nothing is aggregated to quarterly or annual
+figures, both because a tightening cycle can begin and reverse within a single quarter
+and because coarsening the calendar would only compound the dating problem this chapter
+is about. The abnormal return used throughout is the market excess return net of its own
+full-sample mean, so that the event-time posterior of Section 6 is measuring a deviation
+from typical market performance rather than the level of the return itself.
+
+```{python}
+#| label: fig-data-panel
+#| fig-cap: "The federal funds rate and the market excess return over the sample, matched on the same monthly index."
+fig, axes = plt.subplots(2, 1, figsize=(7.5, 5.2), sharex=True)
+axes[0].plot(fred.index, fred["fed_funds"], color="0.35", lw=0.8)
+axes[0].set_ylabel("federal funds rate (%)")
+axes[1].plot(mkt.index, mkt.to_numpy(), color="steelblue", lw=0.5)
+axes[1].axhline(0.0, color="black", lw=0.6)
+axes[1].set_ylabel("market excess return")
+axes[1].set_xlabel("date")
+axes[0].set_title("Federal funds rate and market excess return, 1960-2026")
+plt.tight_layout(); plt.show()
+
+print(f"federal funds rate: {fred.index[0]:%Y-%m} to {fred.index[-1]:%Y-%m}, "
+      f"{len(fred)} months, mean {fred['fed_funds'].mean():.2f}, "
+      f"max {fred['fed_funds'].max():.2f}")
+print(f"market excess return: {len(mkt)} matched months, mean {mkt.mean():.4f}, "
+      f"sd {mkt.std(ddof=1):.4f}")
+```
+
+The funds rate covers $800$ months from January 1960 to August 2026, averaging $4.78$
+percent with a peak of $19.1$ at the height of the Volcker disinflation. The market
+excess return matches $799$ of those months, averaging $0.0059$ a month with a standard
+deviation of $0.0445$: a monthly signal of about six tenths of a percentage point sits
+inside noise nearly eight times as large, so a dozen episodes is not a generous sample
+to ask a precise question of, before the dating problem of Section 3 is even
+considered.
+
+## Empirical analysis: the answer as a function of the rule, not just the data {#sec-empirical}
+
+### The full grid of dating rules
+
+The rule of Section 2 had two free numbers, a threshold and a minimum gap. R-10.2 says
+that a causal reading of any one row requires the assumptions of Section 4 to hold for
+that row's rule, and R-10.3 says that if the rule is an unidentified direction, no
+single row can be trusted to represent the others. The way to find out which of those
+is closer to the truth is to compute every row rather than pick one. The chunk below
+reruns the whole computation, model and prior held fixed, over three thresholds and
+three minimum gaps, reporting the posterior for the twelve-month cumulative abnormal
+return in every case.
 
 ```{python}
 rule_rows = []
 for thr in (1.0, 1.5, 2.0):
     for quiet in (18, 24, 36):
-        st = tightening_starts(fred_r["fed_funds"], 12, thr, quiet)
-        Ee = event_matrix(st, abn)
-        mu_e, _ = event_posterior(Ee, rng=rng_r)
+        st = tightening_starts(fred["fed_funds"], 12, thr, quiet)
+        Ee = event_matrix(st, abn, H_LO, H_HI)
+        mu_e, _ = event_posterior(Ee, rng=rng)
         car12 = mu_e[:, hs >= 0].cumsum(axis=1)[:, 11]
         lo, hi = np.quantile(car12, [0.05, 0.95])
         rule_rows.append({"threshold": thr, "quiet": quiet, "episodes": Ee.shape[0],
@@ -922,21 +487,22 @@ for thr in (1.0, 1.5, 2.0):
                           "P(<0)": (car12 < 0).mean()})
 rules = pd.DataFrame(rule_rows)
 print(rules.round(4).to_string(index=False))
-print(f"\nspread of posterior means across the nine rules: "
+print(f"\nrange of posterior means across the nine rules: "
       f"{rules['CAR12_mean'].min():+.4f} to {rules['CAR12_mean'].max():+.4f}")
+print(f"rules whose 90% interval excludes zero: "
+      f"{int(((rules['lo']>0)|(rules['hi']<0)).sum())} of {len(rules)}")
 ```
 
-The posterior mean twelve-month cumulative abnormal return runs from $-0.1185$ under the loosest
-threshold with the longest gap to $+0.0064$ under the strictest threshold with a twenty-four month gap.
-That is a swing of twelve and a half percentage points, and it includes a change of sign. Three of the
-nine rules, all of them at the $1.0$ percentage point threshold, produce 90 per cent intervals that
-exclude zero, with posterior probabilities of a negative effect of $0.9736$, $0.9695$ and $0.9986$. The
-other six do not, and one of them, the $2.0$ point threshold with a twenty-four month gap, puts the
-posterior probability of a negative effect at $0.4398$, which is to say slightly below even.
-
-**Reading the computation.** Each row is a complete posterior summary for the same economic question under a different definition of the event. The dotted line is zero.
+The posterior mean twelve-month cumulative abnormal return runs from $-0.1185$ under
+the loosest threshold with the longest gap to $+0.0064$ under the strictest threshold
+with a twenty-four month gap, a swing of twelve and a half percentage points that
+includes a change of sign. Three of the nine rules produce 90 percent intervals that
+exclude zero; the other six do not, and one of them puts the posterior probability of a
+negative effect at $0.4398$, essentially a coin toss.
 
 ```{python}
+#| label: fig-rule-grid
+#| fig-cap: "Posterior mean and 90 percent interval for the twelve-month cumulative abnormal return, one row per dating rule. The dotted line is zero."
 fig, ax = plt.subplots()
 lab = [f"{r.threshold:.1f}pp / {int(r.quiet)}m" for r in rules.itertuples()]
 ypos = np.arange(len(rules))
@@ -951,371 +517,263 @@ ax.set_title("Nine defensible rules, nine different answers")
 plt.tight_layout(); plt.show()
 ```
 
-The figure is the argument. A researcher who reported only the bottom three rows would write that
-monetary tightening costs equity investors between six and twelve percentage points over the following
-year with high posterior probability. A researcher who reported only the top three would write that the
-effect is small and indistinguishable from zero. Both would have used the same data, the same model and
-the same prior, and both would have been able to defend their dating rule in a seminar. The posterior
-intervals in each row are correct conditional on the rule, and none of them contains any allowance for
-the fact that the rule was chosen. This is the reason event studies in macroeconomics are usually
-reported over a grid of specifications rather than as a single number, and the reason a Bayesian
-treatment of the parameters does not by itself buy any protection: the uncertainty that matters here
-lives in a choice the model never sees.
+The episode counts also move with the rule, from nine at the strictest settings to
+nineteen at the loosest, and that is not incidental to the swing in the posterior mean:
+fewer episodes means each one contributes more weight to the average, so an unusual
+year has more room to dominate the whole estimate. The three rows with intervals
+excluding zero all sit at the loosest threshold, the setting that both admits the most
+episodes and, per the earlier vertical-line figure, tends to merge several policy moves
+into fewer, longer, more sharply negative-looking windows.
 
-## A synthetic control for restaurants and hotels in 2020
+Every row in the figure is a correctly computed posterior conditional on its rule. A
+referee who received only the bottom three rows would be told monetary tightening
+costs equity investors six to twelve percentage points over the following year with
+high probability; a referee who received only the top three would be told the effect is
+small and indistinguishable from zero. Both readers would have seen the same model,
+the same prior and the same underlying data.
 
-### Estimating the donor weights on the pre-event window
+### Where in the grid does the swing come from?
 
-The second exercise has a sharper event. In March 2020 the pandemic closed restaurants and hotels in a
-way it did not close software firms or utilities, and the French industry file contains a portfolio,
-labelled `meals`, holding exactly those businesses. The synthetic control idea is to build a portfolio
-of the other forty-eight industries that tracked `meals` closely before the shock, and then to read the
-post-shock difference between the two as the gap left by the event.
-
-Concretely, regress the treated industry's monthly return on the returns of the forty-eight donors over
-a pre-event window running from January 2010 to January 2020, with no intercept so that the synthetic
-control is a portfolio rather than a portfolio plus a constant. Use the course's conjugate prior,
-$w \mid \sigma^2 \sim \mathcal{N}(0, \sigma^2 g I_{48})$ and
-$\sigma^2 \sim \mathcal{IG}(\alpha_0, \delta_0)$, and note straight away that the classical synthetic
-control's restriction to non-negative weights summing to one has been replaced by a Normal prior
-centred at zero. That is a substantive change and we shall pay for it in the sensitivity analysis
-below. With $121$ pre-event months and $48$ donors the posterior is proper but the design is
-uncomfortably close to saturated, which is precisely the situation the derivation after this block is
-about.
-
-**Reading the computation.** The posterior is the standard conjugate Normal-inverse-Gamma update with $b_0 = 0$ and $B_0 = gI$. Draws of the weights are taken jointly with the variance so that the gap below inherits the full posterior dependence rather than being evaluated at a point estimate.
+The rule has two dimensions, a threshold and a minimum gap, and the table of Section 6
+does not by itself say which one is doing the work. The chunk below marginalises each
+out in turn and draws the grid as a surface.
 
 ```{python}
-TREATED = "meals"
-pre = ind_r.loc["2010-01":"2020-01"]
-post = ind_r.loc["2020-02":"2020-12"]
-y_pre, y_post = pre[TREATED].to_numpy(), post[TREATED].to_numpy()
-X_pre = pre.drop(columns=[TREATED]).to_numpy()
-X_post = post.drop(columns=[TREATED]).to_numpy()
-donors = list(pre.drop(columns=[TREATED]).columns)
-
-def donor_posterior(X, y, B0_scale, alpha_0=3.0, delta_0=0.02):
-    p_d = X.shape[1]
-    B_1 = np.linalg.inv(np.eye(p_d) / B0_scale + X.T @ X)
-    b_1 = B_1 @ (X.T @ y)
-    alpha_1 = alpha_0 + X.shape[0] / 2.0
-    delta_1 = delta_0 + 0.5 * (y @ y - b_1 @ np.linalg.solve(B_1, b_1))
-    return b_1, B_1, alpha_1, delta_1
-
-def donor_draws(b_1, B_1, alpha_1, delta_1, n_draw, rng):
-    s2 = stats.invgamma(a=alpha_1, scale=delta_1).rvs(n_draw, random_state=rng)
-    L = np.linalg.cholesky(B_1)
-    return (b_1[None, :] + np.sqrt(s2)[:, None]
-            * (rng.standard_normal((n_draw, len(b_1))) @ L.T)), s2
-
-G0 = 4.0
-b_1, B_1, a_1, d_1 = donor_posterior(X_pre, y_pre, G0)
-w_draws, s2_w = donor_draws(b_1, B_1, a_1, d_1, 8000, rng_r)
-fit_pre = X_pre @ b_1
-print(f"pre-event window {pre.index[0]:%Y-%m} to {pre.index[-1]:%Y-%m}, "
-      f"{X_pre.shape[0]} months, {X_pre.shape[1]} donor industries")
-print(f"pre-event fit: R^2 {1 - np.var(y_pre - fit_pre) / np.var(y_pre):.3f}, "
-      f"RMSE {np.sqrt(np.mean((y_pre - fit_pre) ** 2)):.4f}, "
-      f"residual sd {np.sqrt(s2_w.mean()):.4f}")
-print(f"posterior mean weights: sum {b_1.sum():.3f}, "
-      f"sum of absolute values {np.abs(b_1).sum():.3f}")
-top = np.argsort(-np.abs(b_1))[:8]
-print("largest weights: " + ", ".join(f"{donors[j]} {b_1[j]:+.3f}" for j in top))
-ev = np.linalg.eigvalsh(X_pre.T @ X_pre)
-print(f"donor cross-product matrix: smallest eigenvalue {ev.min():.5f}, "
-      f"largest {ev.max():.3f}, condition number {ev.max() / ev.min():.0f}")
-print(f"prior share of posterior precision at g = {G0}: "
-      f"{1 / (1 + G0 * ev.min()):.3f} in the flattest direction, "
-      f"{1 / (1 + G0 * ev.max()):.4f} in the stiffest")
-
-synth_post = w_draws @ X_post.T
-gap = y_post[None, :] - synth_post
-cum_gap = gap.cumsum(axis=1)
-for k in range(3):
-    print(f"{post.index[k]:%Y-%m}: treated {y_post[k]:+.4f}, "
-          f"synthetic control mean {synth_post[:, k].mean():+.4f}")
-for k, lbl in [(1, "March 2020"), (2, "February to April 2020"),
-               (gap.shape[1] - 1, "February to December 2020")]:
-    obj = gap[:, k] if lbl == "March 2020" else cum_gap[:, k]
-    lo, hi = np.quantile(obj, [0.05, 0.95])
-    print(f"{lbl:<26}: mean {obj.mean():+.4f}  90% [{lo:+.4f}, {hi:+.4f}]  "
-          f"P(<0) = {(obj < 0).mean():.3f}")
-```
-
-The pre-event fit is decent without being suspiciously good: an $R^2$ of $0.648$ and a root mean squared
-error of $0.0207$ per month, against a residual standard deviation of $0.0284$ from the posterior. The
-posterior mean weights sum to $0.715$ and their absolute values sum to $1.047$, so the synthetic control
-is close to a fully invested long portfolio with a little short exposure, which is what one hopes for
-even though nothing in the prior imposed it. The eight largest weights are on soft drinks, rubber and
-plastics, clothing, retail, entertainment, transport, beer and toys, a list of consumer-facing and
-discretionary industries that is economically sensible for a restaurant and hotel portfolio; the prior
-did not know that, and the fact that the data produced it is mild reassurance that the exercise is not
-pure numerology.
-
-Now the numbers that matter. In March 2020 the treated industry returned $-0.2212$ while its synthetic
-control was expected to return about $-0.094$, leaving a gap with posterior mean $-0.1264$ and a 90 per
-cent interval of $[-0.1678, -0.0843]$. The posterior probability that the March gap is negative is
-$1.000$ to three decimals, which for a single month of returns is a striking result. Cumulated over
-February to April the gap is $-0.0514$ with interval $[-0.1050, +0.0019]$, so already by April most of
-the March shortfall had been recovered. Cumulated over the whole eleven months to December 2020 the gap
-is $-0.0131$ with interval $[-0.1219, +0.0967]$ and a posterior probability of only $0.578$ that it is
-negative. The economics of that sequence is worth stating: restaurants and hotels were hit far harder
-than comparable consumer industries in the month the closures began, and then recovered essentially all
-of the relative loss over the rest of the year, which is what one would expect of a market pricing a
-temporary shock in an industry whose long-run cash flows were largely intact.
-
-**Reading the computation.** The left panel shows monthly returns for the two years around the event so that the March collapse is visible rather than buried in a cumulative level. The right panel is the cumulative gap, and its band comes from the same posterior weight draws.
-
-```{python}
-win_idx = pre.index[-13:].append(post.index)
-X_win = np.vstack([X_pre[-13:], X_post])
-y_win = np.concatenate([y_pre[-13:], y_post])
-synth_win = w_draws @ X_win.T
-lo_s, hi_s = np.quantile(synth_win, [0.05, 0.95], axis=0)
-fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
-axes[0].plot(win_idx, y_win, color="firebrick", lw=1.5, label="restaurants and hotels")
-axes[0].plot(win_idx, synth_win.mean(axis=0), color="steelblue", lw=1.5,
-             label="synthetic control")
-axes[0].fill_between(win_idx, lo_s, hi_s, color="steelblue", alpha=0.25)
-axes[0].axvline(pd.Timestamp("2020-02-01"), color="black", lw=1.0, ls="--")
-axes[0].axhline(0.0, color="black", lw=0.6, ls=":")
-axes[0].set(xlabel="date", ylabel="monthly return",
-            title="Treated industry and its synthetic control")
-axes[0].tick_params(axis="x", labelrotation=30, labelsize=8)
-axes[0].legend(fontsize=8)
-g_lo, g_hi = np.quantile(cum_gap, [0.05, 0.95], axis=0)
-axes[1].fill_between(post.index, g_lo, g_hi, color="0.5", alpha=0.35)
-axes[1].plot(post.index, cum_gap.mean(axis=0), color="black", lw=1.5)
-axes[1].axhline(0.0, color="black", lw=0.8, ls=":")
-axes[1].set(xlabel="date", ylabel="cumulative gap",
-            title="Cumulative gap with 90% band")
-axes[1].tick_params(axis="x", labelrotation=30, labelsize=8)
+#| label: fig-rule-heatmap
+#| fig-cap: "Posterior mean twelve-month cumulative abnormal return across the full grid of thresholds and minimum gaps."
+grid_wide = rules.pivot(index="threshold", columns="quiet", values="CAR12_mean")
+fig, ax = plt.subplots()
+im = ax.imshow(grid_wide.to_numpy(), cmap="RdBu", vmin=-0.12, vmax=0.12, aspect="auto")
+ax.set_xticks(range(len(grid_wide.columns))); ax.set_xticklabels(grid_wide.columns)
+ax.set_yticks(range(len(grid_wide.index))); ax.set_yticklabels(grid_wide.index)
+ax.set_xlabel("minimum gap (months)"); ax.set_ylabel("threshold (percentage points)")
+ax.set_title("The dated effect as a function of two free numbers")
+fig.colorbar(im, ax=ax, label="12-month cumulative abnormal return")
 plt.tight_layout(); plt.show()
+
+print(rules.groupby("threshold")["CAR12_mean"].mean().round(4).to_string())
+print()
+print(rules.groupby("quiet")["CAR12_mean"].mean().round(4).to_string())
 ```
 
-In the left panel the two lines are almost indistinguishable through 2019, which is what the pre-event
-$R^2$ of $0.648$ looks like when the common factor is as strong as it is among equity industries. In
-February and March 2020 they separate sharply, the treated line falling to $-0.22$ while the synthetic
-control falls to about $-0.09$, and then in April the treated line overshoots upward to $+0.19$ against
-a synthetic control near $+0.08$. The right panel turns that sequence into the cumulative gap: a sharp
-dive to about $-0.16$ by March, a fast partial recovery through April, a second soft patch in the summer
-and a return to roughly zero by December, with a band that starts narrow and fans out to about twenty
-percentage points wide.
+This is the picture R-10.3 predicted rather than merely asserted: the map from the two
+free numbers of the rule to the reported effect is not flat, and it is not simple
+either, which is itself informative. A flat surface would say the choice of rule does
+not matter and the earlier table's swing was some other artefact; a simple monotone
+surface would say there is at least a defensible direction, tighter rules mean smaller
+effects, say, that a reader could apply their own judgement to. Neither is what the data
+show.
 
-### Why the donor weights are partly a prior statement
+Both dimensions move the answer, and neither moves it monotonically by itself.
+Averaging over the three gaps, the mean posterior figure runs from $-0.0855$ at the
+loosest threshold to $-0.0185$ at the strictest, a clear ordering; averaging over the
+three thresholds, the shortest gap gives $-0.0398$, the middle gap $-0.0257$, and the
+longest gap the most negative figure of all at $-0.0601$, so gap length does not simply
+push the answer in one direction. The two dimensions interact: the single most negative
+cell in the heatmap, $-0.1185$, belongs to the loosest threshold combined with the
+longest gap, where a permissive rule merges many mild rate rises into a handful of
+long, sharply dated episodes. There is no reading of the surface that isolates one
+"correct" cell.
 
-The pre-event window has $121$ months and the donor pool has $48$ industries, all of them driven by the
-same aggregate equity factor. That combination produces a likelihood that is sharply informative about
-a few combinations of the weights and almost silent about many others. The printed diagnostics say how
-extreme this is: the donor cross-product matrix has a largest eigenvalue of about $11.5$ and a smallest
-of about $0.0089$, a condition number of $1293$. Along the flattest direction the prior supplies $0.966$
-of the posterior precision at $g = 4$, and along the stiffest it supplies $0.0213$. The posterior for
-the weights is therefore roughly nine hundred and sixty-six parts prior and thirty-four parts data in
-one direction, and almost the reverse in another. The derivation below works out the limiting case
-exactly, because the limiting case is the clearest way to see what is happening in the approximate one.
+### Is this sampling noise or something else?
 
-::: {.callout-note collapse="true"}
-## Derivation: an identification problem as a flat likelihood, and what the prior does there
-
-Take the linear model $y = X\beta + \varepsilon$, $\varepsilon \sim \mathcal{N}(0, \sigma^2 I_n)$, and
-suppose two columns are identical, $x_1 = x_2 = x$. Then
-$$
-X\beta \;=\; \beta_1 x_1 + \beta_2 x_2 + (\text{other terms}) \;=\; (\beta_1 + \beta_2)\,x +
-(\text{other terms}),
-$$
-so the fitted values, and therefore the likelihood, depend on $(\beta_1, \beta_2)$ only through the sum.
-Change coordinates to $s = \beta_1 + \beta_2$ and $d = \beta_1 - \beta_2$. The log likelihood is
-$$
-\log L \;=\; -\frac{1}{2\sigma^2}\big\|y - s\,x - \cdots\big\|^2 + \text{const},
-$$
-which contains no $d$ at all, so $\partial \log L / \partial d = 0$ everywhere. The likelihood is not
-merely weakly informative about $d$; it is exactly constant in that direction, and no amount of data
-changes that, because every extra observation adds the same flat term.
-
-Now put the course's prior on it, $\beta \mid \sigma^2 \sim \mathcal{N}(0, \sigma^2 g I_2)$ for the two
-columns in question. The change of coordinates is linear, $(s,d)^\top = A\beta$ with
-$A = \begin{pmatrix} 1 & 1 \\ 1 & -1\end{pmatrix}$, and $AA^\top = 2I_2$, so the induced prior is
-$(s, d)^\top \sim \mathcal{N}(0, 2 g \sigma^2 I_2)$: independent, with $s$ and $d$ each having prior
-variance $2g\sigma^2$. Because the prior factorises and the likelihood does not involve $d$, the joint
-posterior factorises too,
-$$
-p(s, d \mid y, \sigma^2) \;\propto\; L(s)\, p(s)\, p(d) \quad \Longrightarrow \quad
-p(d \mid y, \sigma^2) \;=\; p(d \mid \sigma^2) \;=\; \mathcal{N}(0, 2g\sigma^2).
-$$
-The posterior for $d$ is the prior for $d$, exactly and for every sample size. Any credible interval
-reported for $\beta_1$ or $\beta_2$ separately is then half a data statement and half a prior statement,
-even though the interval for $\beta_1 + \beta_2$ is entirely a data statement. Notice what has and has
-not been rescued: the posterior is proper, the sampler converges, the diagnostics are clean, and the
-output is still uninformative about the thing that was not identified. A proper prior guarantees a
-proper posterior; it guarantees nothing about identification.
-
-The near-collinear case is the same statement with the zero replaced by a small number. Suppose the two
-columns are standardised with sample correlation $\rho < 1$, so the two eigenvalues of their
-cross-product block are $n(1+\rho)$ and $n(1-\rho)$, the second belonging to the difference direction.
-The posterior precision in that direction is $n(1-\rho)/\sigma^2 + 1/(g\sigma^2)$, of which the prior
-contributes a share
-$$
-\frac{1/g}{n(1-\rho) + 1/g} \;=\; \frac{1}{1 + g\,n(1-\rho)} .
-$$
-With $\rho = 1$ this is one, the exactly flat case. With $n = 121$, $g = 4$ and $\rho = 0.99$ it is
-$1/(1 + 4 \times 121 \times 0.01) = 0.171$, so seventeen per cent of what the posterior claims to know
-about the difference comes from the prior. Replacing $n(1-\rho)$ by the smallest eigenvalue of the full
-$X^\top X$ gives the general version used on the donor pool above, $1/(1 + g\lambda_{\min})$, which the
-chunk printed as $0.966$. The practical rule follows: whenever the design has directions the data barely
-see, report how the answer moves as $g$ moves, because in those directions moving $g$ is the same thing
-as moving the answer.
-:::
-
-### Prior sensitivity: how much of the gap is the prior?
-
-The derivation says the prior is doing most of the work in the poorly identified directions of the donor
-design. The next chunk makes that concrete by re-running the whole exercise across a grid of prior
-scales from $g = 0.01$, which forces the weights almost to zero, up to $g = 20$, which is close to
-letting least squares have its way.
-
-**Reading the computation.** Only the prior scale changes across rows. The event, the donors, the window and the treated series are fixed, so any movement in the last three columns is movement caused by the prior alone.
+R-10.3 predicted that between-rule spread does not behave like ordinary posterior
+uncertainty. The next chunk checks that directly, comparing the spread of posterior
+means across rules with the typical width of a single rule's own posterior.
 
 ```{python}
-g_grid = np.geomspace(0.01, 20.0, 12)
-sens = []
+within_width = (rules["hi"] - rules["lo"]).mean()
+between_spread = rules["CAR12_mean"].max() - rules["CAR12_mean"].min()
+print(f"average within-rule 90% interval width: {within_width:.4f}")
+print(f"spread of posterior means across rules: {between_spread:.4f}")
+print(f"ratio, between-rule spread to within-rule width: "
+      f"{between_spread / within_width:.2f}")
+```
+
+The average single-rule 90 percent interval is $0.1309$ wide, and the rule-to-rule
+spread of posterior means, $0.1249$, is almost exactly the same size. At a glance that
+invites the wrong reading, that the disagreement across rows is just the model's
+ordinary sampling uncertainty restated nine times over. The next check rules that out.
+It holds the dating rule fixed at the baseline and instead varies the prior scale of
+the event-time model, which is the source of within-rule uncertainty the posterior
+actually reports.
+
+```{python}
+#| label: fig-prior-sensitivity
+#| fig-cap: "Posterior mean twelve-month cumulative abnormal return under the baseline dating rule, as the event-month prior scale varies, against the range the rule sweep produced."
+g_grid = np.geomspace(0.1, 10.0, 12)
+b_sens = []
 for g in g_grid:
-    bg, Bg, ag, dg = donor_posterior(X_pre, y_pre, g)
-    wd, _ = donor_draws(bg, Bg, ag, dg, 4000, rng_r)
-    gp = y_post[None, :] - wd @ X_post.T
-    cg = gp.cumsum(axis=1)
-    sens.append({"g": g, "sum_abs_w": np.abs(bg).sum(),
-                 "pre_RMSE": np.sqrt(np.mean((y_pre - X_pre @ bg) ** 2)),
-                 "mar_mean": gp[:, 1].mean(),
-                 "mar_lo": np.quantile(gp[:, 1], 0.05),
-                 "mar_hi": np.quantile(gp[:, 1], 0.95),
-                 "cum_mean": cg[:, -1].mean(),
-                 "cum_lo": np.quantile(cg[:, -1], 0.05),
-                 "cum_hi": np.quantile(cg[:, -1], 0.95)})
-sens = pd.DataFrame(sens)
-print(sens.round(4).to_string(index=False))
+    mu_g, _ = event_posterior(E_base, B0=g, rng=rng)
+    car12_g = mu_g[:, hs >= 0].cumsum(axis=1)[:, 11]
+    b_sens.append(car12_g.mean())
+
+fig, ax = plt.subplots()
+ax.plot(g_grid, b_sens, "o-", color="steelblue", label="baseline rule, prior scale varied")
+ax.axhspan(rules["CAR12_mean"].min(), rules["CAR12_mean"].max(), color="firebrick",
+           alpha=0.15, label="range across the nine dating rules")
+ax.set_xscale("log")
+ax.set_xlabel(r"event-month prior scale $B_0$"); ax.set_ylabel("12-month CAR, posterior mean")
+ax.set_title("Widening the prior barely moves the answer; changing the rule does")
+ax.legend(fontsize=8)
+plt.tight_layout(); plt.show()
+
+print(f"baseline-rule CAR12 posterior mean as the prior scale moves "
+      f"from {g_grid[0]:.2g} to {g_grid[-1]:.2g}: "
+      f"{min(b_sens):+.4f} to {max(b_sens):+.4f}")
 ```
 
-Read the table from the top. At $g = 0.01$ the absolute weights sum to $0.0592$: the synthetic control
-is essentially the zero portfolio, so the "gap" is just the treated industry's own return, and the March
-figure is $-0.2104$ with a 90 per cent interval only $0.0169$ wide. That interval is narrow for the
-worst possible reason, namely that the prior has fixed the comparison rather than the data. At the other
-end, $g = 20$ gives absolute weights summing to $1.8912$, a pre-event root mean squared error of
-$0.0189$, and a March gap of $-0.1390$ with an interval $0.1167$ wide, nearly seven times the width at the tight
-end. The one-month gap is
-reassuringly stable in the middle of the range, moving only between $-0.1259$ and $-0.1407$ for $g$
-between $0.3166$ and $20$, so the headline March result is not a prior artefact.
+Sweeping the prior scale over two orders of magnitude, holding the rule fixed at the
+baseline, moves the twelve-month posterior mean from $-0.0100$ to $-0.0052$, a range of
+about $0.005$, one twenty-fifth of the $0.1249$ that changing the rule produced with the
+prior held fixed. If the between-rule spread really were ordinary posterior uncertainty
+wearing nine different disguises, moving the prior over a comparably wide range should
+have moved the answer by a comparable amount, and it did not come close. The posterior
+is doing its job correctly at every value of the prior. The uncertainty this question
+needs is not the kind a wider or narrower prior on the event-month means can supply,
+because it lives in a choice upstream of the likelihood altogether, exactly as R-10.3
+said it would.
 
-The eleven-month cumulative gap behaves quite differently. It is $+0.1589$ at $g = 0.01$, falls through
-$+0.0710$ at $g \approx 0.16$ and $+0.0100$ at $g \approx 1.26$, and turns negative at about
-$g \approx 2.5$, reaching $-0.0361$ at $g = 20$. The sign of the answer is a function of the prior. That
-is not a bug to be fixed by choosing a prior; it is the correct report, and it says that these data
-cannot tell us whether the treated industry ended 2020 above or below its synthetic control.
+## Discussion: no, these data do not identify the effect {#sec-discussion}
 
-**Reading the computation.** Both panels plot the same posterior summaries against the prior scale on a log axis, with the dashed vertical line marking the value used for the headline numbers above.
+The question this chapter opened with was what happens to equity returns when the
+Federal Reserve tightens. The honest answer is that these data do not say. Section 2
+produced a specific, correctly computed number, and Section 6 showed that the same
+model, the same prior and the same data produce eight other equally correct numbers
+once the dating rule is allowed to vary over a range no economist would rule out on
+theoretical grounds. The spread across those nine rows is at least as large as the
+uncertainty any single row reports on its own, and unlike that within-row uncertainty
+it barely responds to the prior at all: moving the event-time prior scale over two
+orders of magnitude moved the headline number by about a twentieth of what moving the
+rule did. R-10.1 explains why this is not a sample-size problem: an event study
+substitutes a mechanical rule for a treatment assignment, and unless that rule is
+uninformative about the outcome path being measured, no volume of additional months
+repairs it. R-10.3 explains why widening the prior does not help either: the
+disagreement lives in a direction, the choice of rule, that the likelihood does not
+move in at all.
+
+The check against something already known is the shape of the disagreement itself. If
+the market were pricing a genuine, persistent effect of tightening, the months before a
+dated episode should look calmer than the months after it, since nothing dated has
+happened yet; if instead the two look equally noisy, that is what a rule with no real
+predictive content over the market looks like.
 
 ```{python}
-fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
-axes[0].fill_between(sens["g"], sens["mar_lo"], sens["mar_hi"],
-                     color="firebrick", alpha=0.25)
-axes[0].plot(sens["g"], sens["mar_mean"], color="firebrick", lw=1.5)
-axes[0].axhline(0.0, color="black", lw=0.8, ls=":")
-axes[0].axvline(G0, color="0.4", lw=1.0, ls="--")
-axes[0].set_xscale("log")
-axes[0].set(xlabel=r"prior scale $g$ on the donor weights", ylabel="March 2020 gap",
-            title="One-month gap against the prior")
-axes[1].fill_between(sens["g"], sens["cum_lo"], sens["cum_hi"],
-                     color="steelblue", alpha=0.25)
-axes[1].plot(sens["g"], sens["cum_mean"], color="steelblue", lw=1.5)
-axes[1].axhline(0.0, color="black", lw=0.8, ls=":")
-axes[1].axvline(G0, color="0.4", lw=1.0, ls="--")
-axes[1].set_xscale("log")
-axes[1].set(xlabel=r"prior scale $g$ on the donor weights",
-            ylabel="eleven-month cumulative gap",
-            title="Cumulative gap against the prior")
+#| label: fig-pre-post-check
+#| fig-cap: "Standard deviation of the posterior mean abnormal return across event months, split into the twelve months before a dated episode and the twenty-four after it."
+pre_sd = mu_mean[hs < 0].std()
+post_sd = mu_mean[hs >= 0].std()
+fig, ax = plt.subplots(figsize=(4.5, 4))
+ax.bar(["pre-event\n(months -12 to -1)", "post-event\n(months 0 to 24)"],
+       [pre_sd, post_sd], color=["0.6", "firebrick"])
+ax.set_ylabel("sd of posterior mean abnormal return across event months")
+ax.set_title("Are the months after the event calmer than before it?")
 plt.tight_layout(); plt.show()
+
+print(f"sd of the posterior mean abnormal return, pre-event months: {pre_sd:.4f}")
+print(f"sd of the posterior mean abnormal return, post-event months: {post_sd:.4f}")
 ```
 
-The two panels are the honest summary of this exercise. On the left the March gap curve is flat over
-the entire upper half of the prior range and its band never comes close to zero, so the statement
-"restaurants and hotels fell about twelve and a half percentage points more than comparable industries
-in March 2020" survives everything we can do to it. On the right the cumulative curve slopes steadily downward
-through zero, and its band contains zero over the whole right half of the range, so the statement "the
-industry ended the year below its synthetic control" survives nothing. A single reported number from
-this exercise would have hidden that difference completely, which is the argument for drawing this
-figure every time a shrinkage prior sits on a near-singular design.
+The two bars are close, $0.0119$ before a dated episode against $0.0130$ after one, with
+the post-event months, if anything, marginally the noisier of the two rather than
+calmer. A rule that were genuinely dating a break in market behaviour should show calm
+before and movement after; this rule shows essentially the same amount of movement on
+both sides of the date, which is consistent with, rather than contradicting, the
+conclusion that the swing across rules in Section 6 is picking up sensitivity in the
+dating rule rather than a stable effect of policy.
 
-## What it would take to call either number causal
+None of this means causal inference is impossible in general, only that this
+particular comparison, a rule applied after the fact to the very series being studied,
+cannot deliver it. A design with an assignment mechanism the analyst does not construct
+from the outcome series, a natural experiment, a policy discontinuity, a genuinely
+unanticipated shock, would let R-10.2's conditions be argued for rather than assumed
+away by construction, and that argument, not a different prior or a larger sample, is
+what identification actually requires.
 
-Both exercises produced a posterior for a well-defined quantity, and in both cases that quantity is a
-gap between an observed path and a constructed comparison. Turning a gap into a causal effect requires
-assumptions that the data cannot supply, and it is worth naming them against the numbers we have.
+It is worth being explicit about what "answering no" does and does not license. It does
+not mean the event-study computation of Section 6 was pointless, or that the exercise
+should not have been run. Running it, and running it across the whole grid rather than
+one row, is exactly how the non-identification was discovered rather than merely
+suspected: a chapter that stopped at Section 2 would have published a specific, wrong
+answer with a clean-looking interval around it. It also does not mean every causal
+question about monetary policy is unanswerable with these tools; it means this
+particular way of asking it, dating an event from the very series whose response is
+then measured, is the wrong instrument for the question, however carefully the
+posterior around it is computed. The distinction between a method that is wrong and a
+question that is unanswerable matters, because the second conclusion invites giving up
+and the first invites finding a better design.
 
-Parallel trends is the first. For the synthetic control the assumption needed is that, absent the
-pandemic, the treated industry's return would have continued to equal the synthetic control's return up
-to mean-zero noise. The pre-event fit gives some evidence about this, and an $R^2$ of $0.648$ with a
-monthly residual standard deviation of $0.0284$ is the relevant number: the comparison was good to about
-two point eight percentage points a month before the event, which is already more than a fifth of the
-March gap of $0.1264$ in a single month, and it is more than the entire eleven-month cumulative gap of $0.0131$.
-So the March number survives a parallel-trends worry comfortably and the annual number does not survive
-it at all. For the event study the corresponding assumption is that the abnormal return would have been
-zero in the absence of tightening, and the left panel of the event-time figure argued against exactly
-that, because the pre-event months are as noisy as the post-event ones.
+There is a second, unrelated limitation worth naming before moving on, because it
+returns as the very next chapter's problem. Everything in this chapter conditioned on a
+small, hand-picked set of variables, the funds rate and the market return, chosen
+because we already knew they belonged together. A realistic empirical question rarely
+comes with its relevant variables pre-selected: a finance application might offer forty
+or fifty candidate predictors with no theory saying which few, if any, belong in the
+model at all. Enumerating every subset of forty-eight candidates means checking more
+models than Lecture 9 ever considered by many orders of magnitude, and Lecture 11 takes
+up exactly that problem.
 
-No anticipation is the second, and it is where the event study is weakest. The federal funds rate is set
-by a committee whose intentions are discussed publicly for months in advance, and the rule we used dates
-the episode from the moment a twelve-month change crossed a threshold, which is by construction long
-after the first move. If markets priced the cycle before our date, the effect has already happened
-before event month zero and the posterior we computed is looking in the wrong place. The synthetic
-control does better here, since the closures of March 2020 were not anticipated a year in advance,
-though the market clearly began repricing in late February, which is why we started the post window at
-February rather than March.
+## Exercises
 
-No interference, or the stable unit treatment value assumption, is the third and in both exercises it is
-the most obviously violated. The synthetic control's donors are other equity portfolios in the same
-economy during the same pandemic: airlines, clothing retailers and entertainment firms were all hit by
-the closures, so the control group is treated too. The direction of that bias is towards zero, meaning
-that a true effect of the pandemic on restaurants and hotels relative to a genuinely untreated
-comparison would be larger than the $-0.1264$ we report. In the event study, interference is worse
-still, since the whole market is a single unit and a tightening cycle affects the comparison implicit
-in the sample mean we subtracted.
+These are the chapter's practice questions; the [Week 10 exercise
+session](../exercise-sessions/10-causal-inference.qmd) works through them and adds the
+lab.
 
-Add to all of this the fact that neither the treatment nor the event date was assigned by anyone, and
-the conclusion is the one this section began with. What we have computed are posteriors for descriptive
-gaps that are correctly propagated through the model and the prior. They are not estimates of causal
-effects, and the way to make them into estimates of causal effects is not a better sampler or a wider
-prior but a research design these files do not contain.
+1. By hand. Starting from the identity in R-10.1, show that if a second, independent
+   assumption held, namely that $D_i$ is assigned independently of $(Y_i(0), Y_i(1))$
+   unconditionally rather than only given $X$, the adjustment formula of R-10.2
+   simplifies to the unconditional difference in means $\mathbb{E}[Y\mid D=1] -
+   \mathbb{E}[Y \mid D=0]$. Then show, using the law of total variance argument of
+   R-10.3, that a mixture posterior over two point-mass-weighted rules has variance
+   equal to the weighted average of the two within-rule variances only when the two
+   within-rule posterior means coincide, and say what that implies about a table like
+   the one in Section 6 whenever readers disagree about which rule to weight more
+   heavily.
 
-## Takeaways
+2. Computational. The confounded policy simulation and the BART-style adjustment moved
+   to this week's exercise session build the case, on data with a known answer, that a
+   sufficiently flexible conditional mean can repair confounding when the confounder is
+   observed and overlap holds. Reproduce that simulation, then break overlap by
+   discarding every unit with an estimated propensity score below 0.1 or above 0.9 and
+   report what happens to the adjusted posterior.
 
-A causal question is a missing-data question, and writing the finite-sample estimand as
-$n^{-1}\sum_i(2D_i-1)(Y_i - Y_i^{mis})$ makes that explicit: the Bayesian answer imputes the missing arm
-from the fitted opposite-arm predictive, so consistency, unconfoundedness and overlap are the things
-doing the identifying and the posterior is doing the accounting. The difference-in-means posterior
-follows from completing one square and shrinks each arm mean by $n_d/(n_d + 1/B_0)$, but it is a
-statement about $\delta = \mu_1 - \mu_0$ and not about Fisher's sharp null, which is a claim about every
-unit and is tested by permutation rather than by a prior. When the design has a direction the likelihood
-cannot see, the posterior in that direction is the prior, exactly, however clean the diagnostics look,
-and the near-collinear version of that statement puts the prior's share of the posterior precision at
-$1/(1 + g\lambda_{\min})$, which on the donor design of this chapter is $0.966$. The two real-data
-exercises then show what that costs in practice: a mechanical dating rule for Federal Reserve tightening
-moves the twelve-month cumulative abnormal return from $-0.1185$ to $+0.0064$ across nine equally
-defensible specifications, and a synthetic control for restaurants and hotels gives a March 2020 gap of
-$-0.1264$ that is stable across the upper half of the prior range alongside an eleven-month
-cumulative gap of $-0.0131$ whose very sign is chosen by the prior. Report the specification grid and
-the prior sweep, and call the result a descriptive gap until parallel trends, no anticipation and no
-interference have been argued rather than assumed.
+3. On real data. The synthetic-control exercise moved to the session asks you to
+   reconstruct the donor-weighted comparison for a shock of your choosing among the
+   Kenneth French industry portfolios, and to run the same kind of sensitivity check as
+   Section 6, but against the donor-selection prior rather than an event-dating rule.
+   Report whether the sign of the estimated gap survives the sweep.
 
+The Bayesian instrumental-variables Gibbs sampler, also moved to the exercise session,
+is worth working through on your own time even though it is not assigned: it is the
+example that shows a genuinely different repair, modelling the endogeneity rather than
+adjusting it away, and it reappears implicitly whenever an instrument is available in
+later applied work.
 
-## Reading guide and sources
+## Reading and references
 
-Greenberg (2008), Sections 11.1–11.2, for treatment models and endogenous covariates. Hill (2011) and Chipman et al. (2010) supply the BART application; UPM supplies the conditional-update mechanics, not a BART implementation.
+Imbens and Rubin (2015), chapters 1 to 3, for the potential-outcomes framework and the
+identifying conditions of R-10.2, and chapters 23 to 24 for the conditional-mean
+adjustment methods, BART among them, that this chapter's exercise session takes up on
+simulated data with a known answer. The missing-data derivation of R-10.1 follows the
+same source, chapter 1. The identification-as-unidentified-direction argument of R-10.3
+generalises the near-collinear-design result used elsewhere in this course for
+regression designs; here the unidentified direction is a modelling choice rather than a
+regressor, and the same mechanism reappears in the exercise session's synthetic-control
+material, where it takes the form of a genuine flat likelihood direction in the donor
+design. The event-study material and the sensitivity of dating rules to threshold and
+gap choices is a standard caution in the applied monetary literature; Greenberg (2008)
+supplies the treatment-effect and simultaneous-equations material behind the moved
+instrumental-variables exercise, in which the same identification problem appears in
+its classical guise, an endogenous regressor rather than an endogenous event date.
 
 The explanations and exercises are adapted to this course's notation and weekly
 structure; consult the cited originals for the full treatments.
 
-## References
+### References
 
-Imbens and Rubin, *Causal Inference for Statistics, Social, and Biomedical Sciences* (2015), ch. 1-3
-and 23-24. Hill, *Bayesian Nonparametric Modeling for Causal Inference*, JCGS (2011). Chipman,
-George and McCulloch, *BART: Bayesian Additive Regression Trees*, Ann. Appl. Stat. (2010). Rossi,
-Allenby and McCulloch, *Bayesian Statistics and Marketing* (2005), ch. 4.
+Imbens and Rubin, *Causal Inference for Statistics, Social, and Biomedical Sciences*
+(2015), ch. 1-3. Hill, *Bayesian Nonparametric Modeling for Causal Inference*, JCGS
+(2011). Chipman, George and McCulloch, *BART: Bayesian Additive Regression Trees*, Ann.
+Appl. Stat. (2010). Greenberg, *Introduction to Bayesian Econometrics* (2008), sections
+11.1-11.2. Rossi, Allenby and McCulloch, *Bayesian Statistics and Marketing* (2005), ch.
+4.

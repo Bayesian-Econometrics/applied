@@ -3,700 +3,471 @@ title: "Bayesian machine learning"
 subtitle: "Lecture 14"
 ---
 
-::: {.callout-note}
-## Lecture and exercise
-Read the model and work through the derivations before running the examples.
-The [Week 14 exercise session](../exercise-sessions/14-bayesian-machine-learning.qmd) contains the practical lab and the
-chapter's practice questions.
+## Overview
+
+By the end of this lecture you can place a prior directly on a regression function rather
+than on a finite coefficient vector, and say how much of that function's shape the data
+chose rather than the prior.
+
+::: {.callout-important}
+## The result of this chapter
+
+For inputs $x$, let $k(x,x')$ be a kernel that is positive semidefinite for every finite
+collection of inputs, and let $f \sim \mathcal{GP}(0,k)$. Given training data $y = f(X) +
+\varepsilon$ with $\varepsilon \sim \mathcal{N}(0,\sigma_n^2 I)$ and new inputs $X_*$, the
+posterior over $f_* = f(X_*)$ is exactly Gaussian,
+
+$$
+f_* \mid y \sim \mathcal{N}(\bar m, \bar V), \qquad
+\bar m = K_*^\top(K + \sigma_n^2 I)^{-1} y, \qquad
+\bar V = K_{**} - K_*^\top(K+\sigma_n^2 I)^{-1}K_*,
+$$
+
+for any number of training points, any number of new inputs, and any positive semidefinite
+$k$. It replaces a point estimate of the function by a full distribution over it, at no
+cost beyond a Cholesky factorisation, and the difficulty moves from choosing a coefficient
+vector to choosing the kernel and its hyperparameters.
 :::
 
-## Start with a forecasting question: can a nonlinear signal survive return noise?
+After working through this chapter you can
 
-A strategist claims that small market falls and large market falls have
-different implications for next month's sector return. **Does a nonlinear model
-learn a repeatable relationship, or simply fit yesterday's noise?**
+1. diagnose why a model linear in the predictors is one particular choice of kernel;
+2. derive the Gaussian process posterior mean and variance from a joint Normal identity;
+3. derive the marginal likelihood of a Gaussian process as fit minus complexity;
+4. implement squared-exponential Gaussian process regression in Python with no
+   optimisation loop;
+5. compare a Gaussian process against a Bayesian linear model out of sample by root mean
+   squared error and by log predictive score;
+6. interpret a flaring credible band as an honest admission of extrapolation, not a defect
+   of the method.
 
-Let $x_t$ contain information available at the forecast date and write
-$r_{t+1}=f(x_t)+\varepsilon_{t+1}$. This first equation separates a conditional
-mean from unpredictable news. OLS restricts $f$ to a plane; BART and Gaussian
-processes place priors on more flexible functions. They do not remove the news term.
+Week 14 of 15, paired with the [Week 14 exercise
+session](../exercise-sessions/14-bayesian-machine-learning.qmd). The chapter assumes the
+Normal linear regression posterior of Lecture 2 and the completing-the-square argument used
+throughout the course; no sampler is needed, because conditioning a Gaussian process is
+closed form.
 
-Understand one BART leaf before an entire ensemble. After subtracting other
-trees' contributions, suppose a leaf contains four partial residuals averaging
-0.6 percentage points. Let residual variance be 1 and the leaf prior be
-$\mu_\ell\sim N(0,0.25^2)$. Multiplying likelihood and prior yields precision
-$4+16=20$ and posterior mean
+## Motivation: a relationship no coefficient can bend {#sec-motivation}
 
-$$E[\mu_\ell\mid\text{rest}]=\frac{4(0.6)+16(0)}{20}=0.12.$$
+Every model this course has built, from the single regression of Lecture 2 to the
+portfolio weights of Lecture 13, wrote the conditional mean as a linear function of the
+predictors, $E[y \mid x] = x^\top\beta$. Shrinkage changed how $\beta$ was estimated, the
+state-space model let it move over time, and stochastic volatility let the variance move,
+but in every case a fixed vector of coefficients decided how the outcome responds to each
+predictor, and that response was a straight line. Nothing in the machinery so far ever
+asked whether a straight line was the right shape.
 
-The posterior variance is $1/20$. A small group with an apparently high return
-does not get its sample mean reproduced without restraint. The prior shrinks
-each tree's adjustment, while the ensemble can build a flexible overall curve.
-The algorithm must also learn split locations and tree sizes; fitting fixed
-groups alone is not BART.
-
-A GP expresses a related intuition differently: inputs judged similar by the
-kernel should have related function values. Its posterior updates those beliefs
-using observed returns. Both approaches distinguish uncertainty about $f(x)$
-from the larger uncertainty about a realised return.
-
-The empirical comparison must use lagged predictors and held-out dates. Using
-this month's realised market factor to explain this month's sector return is
-an exposure regression, not an implementable forecast of that return. The
-scheduled BART-versus-OLS exercise repeats the comparison at weaker signals so
-students can see when flexibility contributes little.
-
-## Priors over functions
-
-Our early models were parametric. We wrote down a likelihood indexed by a finite vector, put a
-prior on that vector and reported its posterior. The parameters carried the economics: an
-autoregressive coefficient, a persistence in volatility, a treatment effect. The functional form was
-assumed known and the uncertainty lived in the coefficients. That is reasonable when theory pins the
-shape down and poor when it does not, and finance is full of shapes nobody can write down in
-advance: how expected returns respond to a valuation ratio, how a risk premium reacts to liquidity.
-
-The Bayesian machinery does not require the unknown to be a vector. Nothing stops us placing a prior
-directly on the **function** and asking for its posterior. That sounds abstract but is not: a
-Gaussian process is no more than the statement that any finite collection of function values is
-jointly Gaussian, with covariance determined by how close the inputs are. Conditioning on observed
-values is then the Gaussian conditioning formula of Lecture 2, and the result is a posterior over
-whole curves, with credible bands that widen where data are sparse.
-
-This lecture builds that object from scratch, shows how its hyperparameters control smoothness and
-how the marginal likelihood chooses them, sketches the neural-network version, and then asks what a
-financial economist should ask of any flexible method: does it predict better out of sample at the
-signal-to-noise ratios of return data? We import the usual libraries and fix a seed.
+The question this section puts to the machinery is a standard one for a macroeconomist:
+how much will industrial production grow over the coming twelve months, given the shape of
+the yield curve today? The term spread, the ten-year Treasury yield minus the federal
+funds rate, is the classic leading indicator, and the theory behind it is not a straight
+line. An inverted curve, spread below zero, is a recession signal and recessions cut
+output hard. A curve that is already steep says policy is loose and recovery is under way,
+but a curve twice as steep does not mean twice the recovery, because output cannot expand
+without limit. The relationship should climb steeply out of inversion and then flatten,
+which is a shape no coefficient can produce.
 
 ```{python}
-import numpy as np
-import pandas as pd
-from scipy import stats
-import matplotlib.pyplot as plt
-
-rng = np.random.default_rng(2026)
-plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
-                     "grid.alpha": 0.3, "font.size": 11})
-```
-
-## From one split to a Bayesian prior over functions
-
-A regression tree starts with a question such as “is the predictor below zero?”
-Each terminal region receives a constant mean. A tree therefore defines a
-piecewise-constant function $g(x;T,\mu)$, where $T$ records the splits and $\mu$
-the terminal means. BART writes
-
-$$
-y_i=\sum_{j=1}^m g(x_i;T_j,\mu_j)+\varepsilon_i,
-\qquad \varepsilon_i\sim N(0,\sigma^2).
-$$
-
-This first equation says that several small adjustments add up to the conditional
-mean. It does not say that each tree must independently fit the outcome well.
-If independent leaf means have variance $\tau^2/m$, the sum at a fixed input has
-prior variance $\tau^2$. Increasing the number of trees need not increase the
-prior scale of the function. A depth-dependent split probability, commonly
-$\alpha(1+d)^{-\beta}$, also favours small trees.
-
-The plot constructs three illustrative trees explicitly. It is a picture of
-the additive representation, not a fitted BART posterior.
-
-```{python}
-#| label: fig-additive-tree-construction
-#| fig-cap: "Several small step functions add to a more flexible regression function. The chosen split locations and leaf values are illustrative."
-import numpy as np
-import matplotlib.pyplot as plt
-
-tree_grid = np.linspace(-2, 2, 401)
-tree_components = np.array([np.where(tree_grid < -0.6, -0.3, 0.2),
-                            np.where(tree_grid < 0.4, 0.1, -0.25),
-                            np.where(tree_grid < 1.1, -0.1, 0.3)])
-fig, axes = plt.subplots(1, 2, figsize=(9, 3.5), sharey=True)
-for tree_index, tree_color in enumerate(['#527a99', '#aa8066', '#829779']):
-    axes[0].plot(tree_grid, tree_components[tree_index], color=tree_color,
-                 label=f'Tree {tree_index + 1}')
-axes[1].plot(tree_grid, tree_components.sum(axis=0), color='#345b75')
-for ax in axes:
-    ax.set(xlabel='Predictor', ylabel='Contribution to conditional mean')
-    ax.grid(axis='y', alpha=0.3)
-    ax.spines[['top', 'right']].set_visible(False)
-axes[0].set_title('Individual weak trees')
-axes[1].set_title('Sum of the trees')
-axes[0].legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=3)
-plt.tight_layout()
-plt.show()
-```
-
-To update tree $j$, subtract the other trees from $y_i$ to form partial residuals
-$r_{ij}$. Conditional on a proposed tree, a leaf containing $n_\ell$ observations
-has Normal likelihood for its common mean. With leaf prior $N(0,v_\mu)$,
-completion of the square gives
-
-$$
-V_\ell=(n_\ell/\sigma^2+1/v_\mu)^{-1},\qquad
-m_\ell=V_\ell\sum_{i\in\ell}r_{ij}/\sigma^2.
-$$
-
-The familiar Normal update is only one part of BART: the tree structures must
-also be explored, with moves accounting for likelihood, tree prior and proposal
-probabilities. Fitting fixed stumps or bootstrapping boosted trees does not
-perform that posterior calculation. In the week 14 comparison, distinguish such
-demonstrations from BART draws and evaluate BART and OLS on the same held-out data.
-In week 10, posterior outcome functions must additionally be combined with
-causal identification assumptions before interpreting treatment contrasts.
-
-*Source connection:* SGPE Lecture 3, Part II, PDF pp. 4–19, and Chipman et al.
-(2010). Its later GP discussion connects tree priors to the function priors below.
-
-## A prior over two unknown function values
-
-Suppose $x$ is a valuation measure and $f(x)$ is the expected return at that valuation.
-We observe noisy returns, not $f$ itself. Before introducing a whole random function,
-consider only two unknown values, $f(x_1)$ and $f(x_2)$. If nearby valuations should
-have similar expected returns, learning about one value should inform the other.
-One way to express this is a joint Normal prior:
-
-$$\begin{pmatrix}f(x_1)\\f(x_2)\end{pmatrix}
-\sim N\left(\begin{pmatrix}0\\0\end{pmatrix},
-\sigma_f^2\begin{pmatrix}1&\rho\\\rho&1\end{pmatrix}\right).$$
-
-The zero means refer to deviations around the chosen baseline. The variance
-$\sigma_f^2$ measures plausible deviations; $\rho$ says how strongly the two values
-move together in our prior. If we observed $f(x_1)=a$ without noise, Normal conditioning
-would give $E[f(x_2)\mid f(x_1)=a]=\rho a$ and variance $\sigma_f^2(1-\rho^2)$.
-At $\rho=0$ the observation teaches us nothing about the second point. At $\rho=0.9$
-it teaches us a great deal. Observation noise reduces that information transfer.
-
-A **kernel** generalises this covariance assignment to any pair of inputs.
-It must produce a positive semidefinite covariance matrix for every finite set of
-inputs; an arbitrary similarity score is not enough. A Gaussian process asks that all
-these finite collections be jointly Gaussian with those covariances. Prediction then
-uses the same finite-dimensional Normal conditioning rule, even though we describe
-the unknown object as a function.
-
-The basis calculation below shows another route to this prior. A random intercept
-and slope already produce a random line: $f(x)=w_0+w_1x$. If independent prior
-variances are $v_0,v_1$, then $\operatorname{Cov}(f(x),f(x'))=v_0+v_1xx'$.
-The general formula is this same multiplication with more features. Gaussianity and
-the chosen covariance structure are prior assumptions, not properties guaranteed by
-financial data.
-
-## From basis expansions to Gaussian processes
-
-Start from something familiar. Take a Bayesian linear model in a **basis expansion**, so that the
-regression function is a weighted sum of $M$ fixed features, $f(x) = \phi(x)^\top w$ with $\phi(x) =
-(\phi_1(x), \dots, \phi_M(x))^\top$ and $w \sim \mathcal{N}(0, \Sigma_w)$. Because $f$ is a linear
-function of a Gaussian vector it is itself Gaussian, with mean zero and covariance
-
-$$
-\operatorname{Cov}\big( f(x), f(x') \big)
-= \phi(x)^\top \Sigma_w\, \phi(x') \;\equiv\; k(x, x') .
-$$
-
-The weights have vanished. Whatever the basis was, all that survives into the distribution of the
-function is the **kernel** $k$, a function of two inputs, and prediction never needs $w$ at all.
-
-A useful smooth kernel can be derived from overlapping Gaussian bumps. Let
-$\phi_c(x)=\exp[-(x-c)^2/(2h^2)]$ and define
-$k(x,x')=C\int_{-\infty}^{\infty}\phi_c(x)\phi_c(x')\,dc$ for $C>0$.
-This is a covariance construction: any finite quadratic form in $k$ is the integral
-of a square and is nonnegative. Completing the square gives
-
-$$\begin{aligned}
-(x-c)^2+(x'-c)^2&=2\left(c-\frac{x+x'}2\right)^2+\frac{(x-x')^2}{2},\\
-k(x,x')&=Ch\sqrt{\pi}\exp\left[-\frac{(x-x')^2}{4h^2}\right].
-\end{aligned}$$
-
-Choose $C=\sigma_f^2/(h\sqrt{\pi})$ and write $\ell=\sqrt2h$. Then
-$k(x,x')=\sigma_f^2\exp[-(x-x')^2/(2\ell^2)]$, the **squared-exponential kernel**.
-Its amplitude controls marginal function variance, and its length scale controls
-how quickly covariance decays with input distance. Integrating bumps only over a
-bounded range generally introduces boundary effects; simply adding more features
-on a fixed finite interval does not yield this exact translation-invariant kernel.
-
-Writing $f\sim\mathcal{GP}(0,k)$ specifies the associated prior over function values.
-We compute with covariance matrices at the observed and requested inputs, not with
-an explicit infinite list of coefficients. Its computational cost still grows with
-the number of observations, as the implementation below makes clear.
-
-### Derive a posterior over functions using a familiar Gaussian identity
-
-Let $f$ be latent function values at the training inputs and $f_*$ those at
-new inputs. A Gaussian-process prior specifies their joint distribution,
-
-$$
-\begin{pmatrix}y\\f_*\end{pmatrix}\sim N\left(0,
-\begin{pmatrix}K+\sigma^2I&K_*\\K_*^\top&K_{**}\end{pmatrix}\right).
-$$
-
-Conditioning a partitioned Normal vector gives
-
-$$
-\mathbb E[f_*\mid y]=K_*^\top(K+\sigma^2I)^{-1}y,\qquad
-\operatorname{Var}(f_*\mid y)=K_{**}-K_*^\top(K+\sigma^2I)^{-1}K_*.
-$$
-
-One way to see the formula is to subtract
-$K_*^\top(K+\sigma^2I)^{-1}y$ from $f_*$. The resulting residual is uncorrelated
-with $y$ and hence independent of it under joint Normality. Computing its
-covariance gives the second expression. Prediction for an observed return adds
-$\sigma^2I$; a band for the latent function does not.
-
-The kernel is a prior covariance, so its length scale states how quickly the
-response may change across nearby inputs. At an input unrelated to the training
-points, $K_*$ is small and the posterior returns toward its prior. A flexible
-curve between observations should not be read as direct evidence from data
-where none were observed.
-
-## Gaussian process regression from scratch
-
-We observe $y_i = f(x_i) + \varepsilon_i$ with $\varepsilon_i \sim \mathcal{N}(0, \sigma_n^2)$ and
-want the function at new inputs $x_*$. Writing $K$ for $k(x_i, x_j)$, $K_*$ for $k(x_i, x_{*j})$ and
-$K_{**}$ for $k(x_{*i}, x_{*j})$, the prior makes data and unknowns jointly Gaussian,
-
-$$
-\begin{pmatrix} y \\ f_* \end{pmatrix} \sim \mathcal{N}\!\left( 0,
-\begin{pmatrix} K + \sigma_n^2 I & K_* \\ K_*^\top & K_{**} \end{pmatrix} \right),
-$$
-
-and Gaussian conditioning then gives the whole of Gaussian process regression in one line,
-
-$$
-f_* \mid y \sim \mathcal{N}\big( \bar{m}, \bar{V} \big), \quad
-\bar{m} = K_*^\top \big( K + \sigma_n^2 I \big)^{-1} y , \quad
-\bar{V} = K_{**} - K_*^\top \big( K + \sigma_n^2 I \big)^{-1} K_* .
-$$
-
-Never form that inverse. Factor $K + \sigma_n^2 I = L L^\top$ by Cholesky, obtain $\alpha =
-L^{-\top} L^{-1} y$ by two triangular solves and read off $\bar{m} = K_*^\top \alpha$; with $V =
-L^{-1} K_*$ the covariance is $\bar{V} = K_{**} - V^\top V$. The same factorisation delivers the
-**log marginal likelihood** almost for free,
-
-$$
-\log p(y \mid X, \ell, \sigma_n^2)
-= -\tfrac{1}{2} y^\top \alpha - \sum_{i} \log L_{ii} - \tfrac{n}{2} \log 2\pi .
-$$
-
-The chunk implements the kernel, the fit and the prediction, then simulates non-linear data. We
-standardise the outcome so that unit signal variance is sensible and only $\ell$, $\sigma_n^2$ vary.
-
-**Reading the computation.** The kernel creates covariance from distances between inputs. Cholesky solves implement the conditional Normal formulas without explicitly inverting the large training covariance.
-
-```{python}
-def sq_exp(xa, xb, ell):
-    """Squared-exponential kernel matrix with unit signal variance."""
-    return np.exp(-0.5 * ((xa[:, None] - xb[None, :]) / ell) ** 2)
-
-def gp_fit(x, y, ell, sn2):
-    """Cholesky factor, weight vector alpha and log marginal likelihood."""
-    L = np.linalg.cholesky(sq_exp(x, x, ell) + sn2 * np.eye(len(x)))
-    alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
-    lml = -0.5 * y @ alpha - np.log(np.diag(L)).sum() - 0.5 * len(x) * np.log(2 * np.pi)
-    return L, alpha, lml
-
-def gp_predict(x, L, alpha, xs, ell):
-    """Posterior mean and marginal variance of the latent function at xs."""
-    Ks = sq_exp(x, xs, ell)
-    V = np.linalg.solve(L, Ks)
-    return Ks.T @ alpha, np.maximum(1.0 - (V ** 2).sum(0), 0.0)
-
-n = 70
-x = np.sort(rng.uniform(-3.0, 3.0, n))
-f_true = lambda z: np.sin(1.6 * z) + 0.25 * z ** 2
-y_raw = f_true(x) + rng.normal(0.0, 0.35, n)
-ymu, ysd = y_raw.mean(), y_raw.std()
-y = (y_raw - ymu) / ysd
-print(f"n = {n}   outcome sd {ysd:.3f}   noise sd in standardised units {0.35 / ysd:.3f}")
-```
-
-Those three functions are the entire algorithm: one kernel evaluation, one Cholesky factorisation
-and two triangular solves. There is no optimisation loop, because conditioning a Gaussian on a
-Gaussian is closed form. The cubic cost suits a monthly panel, not tick data.
-
-## Choosing the length scale and the noise level
-
-The hyperparameters cannot be chosen by fitting the data as well as possible: shrinking the length
-scale towards zero and the noise with it drives in-sample residuals to zero and produces nonsense
-out of sample. The marginal likelihood solves this without a validation set, because it integrates
-over the function rather than maximising over it and so penalises a prior spread over far more
-functions than the data support. A short length scale lets the prior fit anything, forcing low
-density on the data we saw; a very long one cannot reach the data at all.
-
-**Reading the computation.** The grid compares marginal likelihoods of hyperparameter settings. Selecting the best setting is empirical Bayes; the subsequent bands condition on it and do not integrate hyperparameter uncertainty.
-
-```{python}
-ells = np.array([0.15, 0.3, 0.6, 1.0, 2.0, 4.0])
-sn2s = np.array([0.01, 0.03, 0.1, 0.3])
-lml_tab = pd.DataFrame([[gp_fit(x, y, e, s)[2] for s in sn2s] for e in ells],
-                       index=[f"ell={e:.2f}" for e in ells],
-                       columns=[f"sn2={s:.2f}" for s in sn2s])
-print("log marginal likelihood over the hyperparameter grid")
-print(lml_tab.round(1))
-
-flat = lml_tab.to_numpy()
-i_best, j_best = np.unravel_index(np.argmax(flat), flat.shape)
-ell_hat, sn2_hat = ells[i_best], sn2s[j_best]
-print(f"\nselected length scale {ell_hat:.2f} and noise variance {sn2_hat:.2f}: implied "
-      f"noise sd {np.sqrt(sn2_hat) * ysd:.3f} against a true 0.350")
-```
-
-The surface has a clear interior maximum. Reading down a column the likelihood rises as the length
-scale grows to about one and then collapses; across a row it rises with the noise variance to about
-a tenth and then falls. The selected noise level recovers the simulation's standard deviation to
-within a couple of hundredths, separating signal from noise unaided.
-
-**Reading the computation.** Predictive mean and latent-function variance come from the joint Gaussian conditioning formula. Add observation noise only when predicting a realised return.
-
-```{python}
-L, alpha, _ = gp_fit(x, y, ell_hat, sn2_hat)
-xs = np.linspace(-3.6, 3.6, 300)
-mu, var = gp_predict(x, L, alpha, xs, ell_hat)
-mu_o, sd_o = mu * ysd + ymu, np.sqrt(var) * ysd
-
-fig, ax = plt.subplots()
-ax.scatter(x, y_raw, s=18, color="grey", alpha=0.7, label="observations")
-ax.plot(xs, f_true(xs), "k--", lw=1.4, label="true function")
-ax.plot(xs, mu_o, color="steelblue", lw=1.8, label="posterior mean")
-ax.fill_between(xs, mu_o - 1.96 * sd_o, mu_o + 1.96 * sd_o, alpha=0.25, label="95% band")
-ax.set(xlabel="input x", ylabel="y", title="Gaussian process regression")
-ax.legend(fontsize=9)
-plt.tight_layout()
-plt.show()
-```
-
-The posterior mean tracks the true curve wherever data are available, and the band is narrow there
-because neighbouring observations constrain the function. Beyond the sampled range the band flares
-and the mean flattens towards the prior mean, which after undoing the standardisation is the sample
-average of $y$. That flaring is the honest answer to an extrapolation question, and it is what a
-fitted polynomial refuses to give: a cubic extrapolates with total confidence and enormous error.
-
-It is worth putting a straight line on the same axes, since a straight line is the comparison a referee will always
-ask for.
-
-**Reading the computation.** The OLS line reuses the same observed $x$ and raw $y$ already simulated; only its two coefficients are new.
-
-```{python}
-Xd_ols = np.column_stack([np.ones(n), x])
-b_ols = np.linalg.solve(Xd_ols.T @ Xd_ols, Xd_ols.T @ y_raw)
-ols_line = np.column_stack([np.ones(len(xs)), xs]) @ b_ols
-
-fig, ax = plt.subplots()
-ax.scatter(x, y_raw, s=18, color="grey", alpha=0.7, label="observations")
-ax.plot(xs, f_true(xs), "k--", lw=1.4, label="true function")
-ax.plot(xs, mu_o, color="steelblue", lw=1.8, label="GP posterior mean")
-ax.fill_between(xs, mu_o - 1.96 * sd_o, mu_o + 1.96 * sd_o, color="steelblue", alpha=0.2,
-                label="95% band")
-ax.plot(xs, ols_line, color="firebrick", lw=1.6, label="OLS line")
-ax.set(xlabel="input x", ylabel="y",
-       title="A straight line cannot see the curvature the GP recovers")
-ax.legend(fontsize=8)
-plt.tight_layout(); plt.show()
-```
-
-The OLS line is the best a linear model can do and it is not close: it misses the curvature entirely, understating
-the function where it bends up and overstating it where it bends down. The comparison matters because a linear
-benchmark is exactly what the predictive horse race further below pits the Gaussian process against.
-
-## What the hyperparameters do
-
-The length scale is the distance over which the function is expected to change, so it controls how
-much structure the model will see, and getting it wrong fails in two opposite ways. The figure holds
-the noise variance at its selected value and refits with a length scale six times too short and four
-times too long, reporting the in-sample residual standard deviation and the distance of the mean
-from the truth, with the well-chosen model's distance in brackets.
-
-**Reading the computation.** Changing the length scale changes smoothness, while changing noise changes how closely the function follows observations. The two can compensate for each other, which motivates sensitivity checks.
-
-```{python}
-rms_ref = np.sqrt(np.mean((mu_o - f_true(xs)) ** 2))
-fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-for ax_, ell_try, name in zip(axes, [0.15, 4.0], ["short", "long"]):
-    Lt, at, _ = gp_fit(x, y, ell_try, sn2_hat)
-    m_grid, _ = gp_predict(x, Lt, at, xs, ell_try)
-    m_in, _ = gp_predict(x, Lt, at, x, ell_try)
-    rms_in = np.std(y - m_in) * ysd
-    rms_fn = np.sqrt(np.mean((m_grid * ysd + ymu - f_true(xs)) ** 2))
-    ax_.scatter(x, y_raw, s=16, color="grey", alpha=0.7)
-    ax_.plot(xs, f_true(xs), "k--", lw=1.3, label="true function")
-    ax_.plot(xs, m_grid * ysd + ymu, color="firebrick", lw=1.7, label="posterior mean")
-    ax_.set(xlabel="input x", ylabel="y", title=f"{name} length scale {ell_try}\nresid sd "
-            f"{rms_in:.2f}, error vs truth {rms_fn:.2f} (best {rms_ref:.2f})")
-    ax_.legend(fontsize=9)
-plt.tight_layout()
-plt.show()
-```
-
-The two panels are the classic pair. With the short length scale the posterior mean threads between
-individual observations; its in-sample residual standard deviation falls below the true noise level
-of $0.35$, which is the definition of fitting noise, and it sits over twice as far from the truth as
-the well-chosen model. With the long length scale the mean is nearly a straight line that cannot
-follow the oscillation, leaving residuals far above the noise and missing the truth by underfitting.
-The marginal likelihood ranked both below the intermediate value, which is why we let it choose.
-
-## Real data: industrial production and the shape of the yield curve
-
-Simulated sine waves are a good way to check that code is right and a bad way to find out
-whether a method is useful. We now put the same Gaussian process on a question
-macroeconomists actually ask, and one where a non-linearity is not a hypothetical.
-
-The question is how much industrial production will grow over the coming twelve months
-given the shape of the yield curve today. The predictors are the term spread, the ten-year
-Treasury yield minus the federal funds rate, and the change in the federal funds rate over
-the preceding twelve months, both from the FRED monthly file and both observable at the
-forecast date. The outcome is $100\,[\log IP_{t+12} - \log IP_t]$, growth over the next
-year in per cent. A twelve-month horizon rather than a one-month horizon is a deliberate
-choice: at one month, industrial production growth is almost entirely short-run
-noise and the linear regression's $R^2$ on these two predictors is 0.031, as the code below
-reports, so there is no shape to find. At twelve months the yield curve is the classic leading indicator and there
-is something to model. The cost is that consecutive observations overlap by eleven months
-and are therefore strongly serially correlated, which matters for the honesty of the
-uncertainty bands and which we return to below rather than hide.
-
-The economics predicts a non-linearity rather than a slope. An inverted curve is a
-recession signal and recessions cut industrial production hard. A curve that is already
-steep is a sign that policy is loose and recovery is under way, but a curve that is twice
-as steep does not mean twice as much growth, because output cannot expand without limit.
-The relationship should therefore rise sharply out of inversion and then flatten, which is
-exactly the saturating shape a straight line cannot represent and a Gaussian process can.
-
-```{python}
+#| label: fig-binned-means
+#| fig-cap: "Industrial production growth over the next 12 months, averaged within six bins of the term spread. Growth climbs out of inversion and then flattens."
 from pathlib import Path
 
-DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-fred_mac = pd.read_parquet(DATA / "fred_macro_monthly.parquet").dropna()
-ip_log = np.log(fred_mac["industrial_prod"])
+DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
+plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
+                     "grid.alpha": 0.3, "font.size": 11})
+
+fred = pd.read_parquet(DATA / "fred_macro_monthly.parquet").dropna()
+ip_log = np.log(fred["industrial_prod"])
 mac = pd.DataFrame({
-    "spread": fred_mac["yield_10y"] - fred_mac["fed_funds"],
-    "dff": fred_mac["fed_funds"].diff(12),
+    "spread": fred["yield_10y"] - fred["fed_funds"],
+    "dff": fred["fed_funds"].diff(12),
     "ipg": 100.0 * (ip_log.shift(-12) - ip_log),
 }).dropna()
 
-print(f"{len(mac)} months, {mac.index[0]:%Y-%m} to {mac.index[-1]:%Y-%m}")
-print(mac.describe().loc[["mean", "std", "min", "max"]].round(3))
 spread_bins = pd.qcut(mac["spread"], 6)
-print(mac.groupby(spread_bins, observed=True)["ipg"]
-         .agg(["mean", "std", "count"]).round(2))
+binned = mac.groupby(spread_bins, observed=True)["ipg"].agg(["mean", "count"])
+
+mac_tr = mac.loc[:"1999-12"]
+Xd_tr = np.column_stack([np.ones(len(mac_tr)), mac_tr["spread"], mac_tr["dff"]])
+b_tr = np.linalg.solve(Xd_tr.T @ Xd_tr, Xd_tr.T @ mac_tr["ipg"].to_numpy())
+r2_tr = 1 - np.var(mac_tr["ipg"].to_numpy() - Xd_tr @ b_tr) / np.var(mac_tr["ipg"].to_numpy())
+
+fig, ax = plt.subplots(figsize=(7.4, 4.2))
+ax.bar(range(6), binned["mean"], color="steelblue", alpha=0.85)
+ax.set_xticks(range(6))
+ax.set_xticklabels([f"{iv.left:.1f} to {iv.right:.1f}" for iv in binned.index],
+                   fontsize=8, rotation=20)
+ax.axhline(0, color="black", lw=0.8)
+ax.set_xlabel("term spread, sixth of the sample")
+ax.set_ylabel("IP growth over next 12 months, %")
+ax.set_title("Growth climbs out of inversion, then stops climbing")
+plt.tight_layout(); plt.show()
+
+print(f"{len(mac)} months, {mac.index[0]:%Y-%m} to {mac.index[-1]:%Y-%m}")
+print(binned.round(2))
+print(f"linear fit R2, 1961-1999 training window: {r2_tr:.3f}")
 ```
 
-The binned means are the shape, before any model. In the lowest sixth of term spreads,
-below $-0.42$ percentage points, industrial production over the following year fell by
-1.92 per cent on average. In the next sixth it grew by 1.36 per cent, in the third by 4.12
-and in the fourth by 4.03, and then the pattern stops climbing: 2.44 in the fifth sixth and
-3.68 in the top sixth, where spreads exceed 2.51 points. Moving from an inverted curve to a
-moderately steep one buys six percentage points of growth; moving from moderately steep to
-very steep buys nothing. A straight line fitted through these six points has to compromise
-between the steep left-hand part and the flat right-hand part, and it will misstate both.
+The binned averages are the shape before any model is fitted. In the lowest sixth of term
+spreads, below $-0.42$ points, production over the following year fell by $1.92$ percent
+on average. In the next sixth it already grew by $1.36$ percent, and it keeps climbing
+through the third and fourth sixths, to $4.12$ and $4.03$. Then it stops: the fifth sixth
+gives $2.44$ and the sixth, where spreads exceed $2.51$ points, gives $3.68$. Moving out of
+inversion buys six points of growth. Moving from moderately steep to very steep buys
+nothing. A straight line fitted through these six points, which is exactly what the linear
+regression printed above does, achieves an in-sample $R^2$ of only $0.373$ on the 1961 to
+1999 window, and it has to compromise between the steep left-hand part of the picture and
+the flat right-hand part, misstating both.
 
-### Three derivations before the code
+That is the breakdown, and it is the same one Lecture 13 could not see: a model whose
+conditional mean is $x^\top\beta$ can only ever draw a straight line through those six
+bars, however carefully $\beta$ was estimated or its uncertainty propagated into a
+portfolio weight. No earlier chapter assumed the function was straight and got it wrong;
+every earlier chapter simply never asked the question, because the question was never
+about the functional form. The Minnesota prior of Lecture 6 disciplined a vector of one
+hundred and eleven linear coefficients; spike and slab in Lecture 11 disciplined which
+linear coefficients were included at all; stochastic volatility in Lecture 12 let a
+variance move over time while the conditional mean stayed exactly $x^\top\beta$. Each
+repair made the linear model more disciplined without ever asking whether linearity itself
+was the constraint that mattered here.
 
-The Gaussian process prediction formula was quoted earlier in this lecture. It is worth
-deriving once, because the derivation takes four lines and explains why no optimisation is
-needed anywhere.
+It is worth being precise about what would and would not count as an answer. Adding a
+squared term or an interaction to the regression would relax the constraint a little, but
+only in the direction chosen in advance, and a macroeconomist rarely knows in advance
+whether the true bend is quadratic, logistic, or piecewise flat. What is wanted is a model
+that can discover the shape from the data without being told its functional form first,
+while still reporting, as every model in this course has, a posterior distribution rather
+than a single fitted curve. This chapter asks what happens once a prior is placed on the
+function itself rather than on a finite vector of coefficients that presuppose its shape.
 
-::: {.callout-note collapse="true"}
-## Derivation: the Gaussian process predictive distribution from the joint Normal
+## The problem: a linear model is a Gaussian process with one particular kernel {#sec-problem}
 
-Let $X$ be the $n \times d$ matrix of training inputs, $y$ the $n$-vector of observed
-outcomes, and $X_*$ a set of $n_*$ new inputs at which we want the latent function $f_*$.
-Write the three kernel blocks
-$$
-K = k(X, X) \; (n \times n), \qquad
-K_* = k(X, X_*) \; (n \times n_*), \qquad
-K_{**} = k(X_*, X_*) \; (n_* \times n_*),
-$$
-and set $A = K + \sigma_n^2 I_n$, which is the covariance of the observed $y$ because
-$y = f + \varepsilon$ with independent noise. The Gaussian process prior together with
-Gaussian noise makes the stacked vector jointly Normal,
-$$
-\begin{pmatrix} y \\ f_* \end{pmatrix} \sim
-\mathcal{N}\!\left( \begin{pmatrix} 0 \\ 0 \end{pmatrix},\;
-\begin{pmatrix} A & K_* \\ K_*^\top & K_{**} \end{pmatrix} \right).
-$$
-
-Step 1, construct a residual that is independent of the data. Define
-$$
-u \;=\; f_* - K_*^\top A^{-1} y .
-$$
-Its covariance with $y$ is
-$$
-\operatorname{Cov}(u, y)
-= \operatorname{Cov}(f_*, y) - K_*^\top A^{-1}\operatorname{Cov}(y, y)
-= K_*^\top - K_*^\top A^{-1} A
-= K_*^\top - K_*^\top = 0 .
-$$
-For jointly Normal vectors zero covariance is independence, so $u$ is independent of $y$,
-not merely uncorrelated with it. This is the only place Normality is used, and it is used
-twice: once to turn zero covariance into independence, and once to conclude that $u$ is
-itself Normal.
-
-Step 2, read off the conditional mean. Since $f_* = K_*^\top A^{-1} y + u$ and $u$ is
-independent of $y$ with mean zero,
-$$
-E[f_* \mid y] = K_*^\top A^{-1} y + E[u \mid y] = K_*^\top A^{-1} y + E[u]
-= K_*^\top A^{-1} y .
-$$
-Writing $\alpha = A^{-1} y$ this is $\bar m = K_*^\top \alpha$: the posterior mean at a new
-input is a weighted sum of kernel similarities to the training inputs, with weights
-$\alpha$ that do not depend on the new input at all. Compute $\alpha$ once and prediction
-anywhere costs one kernel evaluation.
-
-Step 3, read off the conditional variance. Conditioning on $y$ leaves only the randomness
-in $u$, so
-$$
-\operatorname{Var}(f_* \mid y) = \operatorname{Var}(u)
-= \operatorname{Var}(f_*) - 2 K_*^\top A^{-1}\operatorname{Cov}(y, f_*)
-  + K_*^\top A^{-1}\operatorname{Var}(y) A^{-1} K_* .
-$$
-Substituting $\operatorname{Var}(f_*) = K_{**}$, $\operatorname{Cov}(y, f_*) = K_*$ and
-$\operatorname{Var}(y) = A$, the last term collapses to $K_*^\top A^{-1} K_*$ because
-$A^{-1} A A^{-1} = A^{-1}$, and the middle term is $2 K_*^\top A^{-1} K_*$. Hence
-$$
-\bar V = \operatorname{Var}(f_* \mid y) = K_{**} - 2K_*^\top A^{-1}K_* + K_*^\top A^{-1}K_*
-= K_{**} - K_*^\top A^{-1} K_* .
-$$
-Notice that $y$ does not appear. The posterior variance depends on where the training
-inputs are, not on what was observed there, which is a peculiarity of the Gaussian model
-and the reason a Gaussian process cannot tell you that the data were surprising by widening
-its own bands.
-
-Step 4, the practical form. Never invert $A$. Factor $A = LL^\top$ by Cholesky, solve
-$L z = y$ then $L^\top \alpha = z$ by two triangular solves, and set $V = L^{-1}K_*$ by one
-more. Then $\bar m = K_*^\top \alpha$ and $\bar V = K_{**} - V^\top V$. Predicting a
-realised observation rather than the latent function adds $\sigma_n^2$ to the diagonal of
-$\bar V$, because the new observation carries its own fresh shock.
-:::
-
-The second derivation connects this apparatus to something already familiar, which is the
-best way to stop a Gaussian process looking exotic.
-
-::: {.callout-note collapse="true"}
-## Derivation: ridge regression is a Gaussian process with a linear kernel
+### Result R-14.1: linear regression is a Gaussian process, and its kernel is the restriction
 
 Take the Bayesian linear model $y = Xw + \varepsilon$ with $\varepsilon \sim
-\mathcal{N}(0, \sigma_n^2 I_n)$ and prior $w \sim \mathcal{N}(0, \sigma_w^2 I_p)$.
+\mathcal{N}(0,\sigma_n^2 I_n)$ and prior $w \sim \mathcal{N}(0, \sigma_w^2 I_p)$. The
+function $f(x) = x^\top w$ is a linear map of a Gaussian vector, hence itself Gaussian,
+with mean zero and covariance
 
-Route one, in weight space. The posterior of $w$ follows from completing the square exactly
-as in Lecture 2,
 $$
-w \mid y \sim \mathcal{N}\big( \bar w, \; \bar\Sigma \big), \qquad
-\bar\Sigma = \Big( \frac{X^\top X}{\sigma_n^2} + \frac{I_p}{\sigma_w^2} \Big)^{-1},
-\qquad
-\bar w = \frac{\bar\Sigma X^\top y}{\sigma_n^2}
-= \Big( X^\top X + \lambda I_p \Big)^{-1} X^\top y,
-\qquad \lambda = \frac{\sigma_n^2}{\sigma_w^2},
-$$
-where the last equality follows by multiplying numerator and denominator by $\sigma_n^2$.
-That is the ridge estimator, with penalty $\lambda$ equal to the noise-to-prior variance
-ratio: a tight prior on the coefficients is a heavy penalty, a vague prior no penalty at
-all. Prediction at a new $x_*$ is $x_*^\top \bar w$.
-
-Route two, in function space. The function is $f(x) = x^\top w$, a linear function of a
-Normal vector, hence Normal with mean zero and covariance
-$$
-\operatorname{Cov}\big(f(x), f(x')\big)
-= x^\top \operatorname{Var}(w)\, x' = \sigma_w^2\, x^\top x' \;\equiv\; k_{\mathrm{lin}}(x,x'),
-$$
-the linear kernel. So $K = \sigma_w^2 X X^\top$ and $K_* = \sigma_w^2 X x_*$, and the
-Gaussian process posterior mean of the previous derivation is
-$$
-\bar m = K_*^\top A^{-1} y
-= \sigma_w^2 x_*^\top X^\top \big( \sigma_w^2 X X^\top + \sigma_n^2 I_n \big)^{-1} y .
+\operatorname{Cov}\big(f(x), f(x')\big) = \sigma_w^2\, x^\top x' \equiv k_{\text{lin}}(x,x'),
 $$
 
-The two routes must agree, and the identity that shows it is the push-through identity
-$$
-X^\top \big( X X^\top + \lambda I_n \big)^{-1}
-= \big( X^\top X + \lambda I_p \big)^{-1} X^\top .
-$$
-It is proved in one line. Start from the obvious equality
-$X^\top X X^\top + \lambda X^\top = X^\top X X^\top + \lambda X^\top$, and group the two
-sides differently:
-$$
-X^\top \big( X X^\top + \lambda I_n \big) = \big( X^\top X + \lambda I_p \big) X^\top .
-$$
-Multiply on the left by $(X^\top X + \lambda I_p)^{-1}$ and on the right by
-$(X X^\top + \lambda I_n)^{-1}$, both of which exist for $\lambda > 0$, and the identity
-drops out.
-
-Apply it with $\lambda = \sigma_n^2/\sigma_w^2$ after pulling $\sigma_w^2$ out of the
-inverse,
-$$
-\bar m = x_*^\top\, X^\top \Big( X X^\top + \frac{\sigma_n^2}{\sigma_w^2} I_n \Big)^{-1} y
-= x_*^\top \Big( X^\top X + \lambda I_p \Big)^{-1} X^\top y
-= x_*^\top \bar w .
-$$
-Identical. The two descriptions are the same model seen from two sides, and the practical
-difference is only computational: weight space inverts a $p \times p$ matrix, function
-space an $n \times n$ one, so one uses weight space when $p \ll n$ and function space when
-$n \ll p$. Replacing $x^\top x'$ by the squared-exponential kernel corresponds to a
-$p = \infty$ basis, which is precisely the case where only the function-space route is
-available. A Gaussian process is not a departure from Bayesian regression; it is Bayesian
-regression written so that the number of basis functions never has to be named.
-:::
-
-The third derivation explains the object that chooses the hyperparameters, and in
-particular why it does not simply reward fit.
+the linear kernel. Predicting through this covariance, in function space, gives exactly
+the ridge or Bayesian linear regression posterior mean computed in weight space; the two
+routes describe one model. What the covariance reveals is a restriction rather than an
+assumption stated separately: any two inputs that are scalar multiples of one another are
+perfectly correlated under $k_{\text{lin}}$, so the posterior mean is confined for every
+$n$, $k$ and prior variance to a single hyperplane, $f(x) = x^\top \bar w$ for one fixed
+$\bar w$. Nothing in that function class can rise, flatten and stay flat, because a
+hyperplane has the same slope everywhere it is evaluated. Linear regression does not merely
+happen to draw a straight line here; its assumed covariance permits nothing else.
 
 ::: {.callout-note collapse="true"}
-## Derivation: the marginal likelihood as fit minus complexity
+## Derivation
 
-Under the Gaussian process prior with hyperparameters $\theta = (\ell, \sigma_n^2)$ the
-observations are marginally Normal, $y \sim \mathcal{N}(0, A)$ with $A = K_\theta +
-\sigma_n^2 I$, because $y$ is a sum of the Gaussian $f$ and Gaussian noise and the function
-values have been integrated out rather than estimated. Its log density is
-$$
-\log p(y \mid X, \theta)
-= \underbrace{-\tfrac{1}{2}\, y^\top A^{-1} y}_{\text{data fit}}
-\;\underbrace{-\; \tfrac{1}{2}\log |A|}_{\text{complexity penalty}}
-\;\underbrace{-\; \tfrac{n}{2}\log 2\pi}_{\text{constant}} .
-$$
-With the Cholesky factor $A = LL^\top$ the two non-constant terms cost nothing extra:
-$y^\top A^{-1} y = y^\top \alpha$ and $\log|A| = 2\sum_i \log L_{ii}$.
+In weight space, completing the square exactly as in Lecture 2 gives
 
-To see that these two terms genuinely pull against each other, diagonalise. Let
-$A = \sum_{i=1}^n \lambda_i u_i u_i^\top$ with orthonormal eigenvectors $u_i$ and
-eigenvalues $\lambda_i > 0$, and write $c_i = u_i^\top y$ for the projection of the data on
-the $i$-th eigenvector. Then $A^{-1} = \sum_i \lambda_i^{-1} u_i u_i^\top$ and
-$|A| = \prod_i \lambda_i$, so
 $$
-\log p(y \mid X, \theta)
-= -\frac{1}{2}\sum_{i=1}^n \left[ \frac{c_i^2}{\lambda_i} + \log \lambda_i \right]
-- \frac{n}{2}\log 2\pi .
+w \mid y \sim \mathcal{N}(\bar w, \bar\Sigma), \qquad
+\bar\Sigma = \Big(\frac{X^\top X}{\sigma_n^2} + \frac{I_p}{\sigma_w^2}\Big)^{-1}, \qquad
+\bar w = \big(X^\top X + \lambda I_p\big)^{-1} X^\top y, \qquad \lambda = \frac{\sigma_n^2}{\sigma_w^2},
 $$
-The sum decouples into $n$ independent one-dimensional problems. Differentiating the
-$i$-th bracket with respect to $\lambda_i$ gives $-c_i^2/\lambda_i^2 + 1/\lambda_i$, which
-is zero at $\lambda_i = c_i^2$ and is a minimum of the bracket, hence a maximum of the log
-density. In words: the marginal likelihood is largest when the model's variance along each
-direction matches the squared amount of data actually observed along that direction. Too
-small a $\lambda_i$ makes $c_i^2/\lambda_i$ explode, which is the model being surprised by
-data it declared impossible. Too large a $\lambda_i$ makes $\log \lambda_i$ large, which is
-the model having spread its probability over outcomes that did not occur. That second term
-is the Occam factor, and it is why the marginal likelihood does not need a validation set.
 
-Now map this back to the length scale. A very short $\ell$ makes $K$ nearly diagonal, so
-$A \approx (1 + \sigma_n^2) I$ and all eigenvalues are small and equal: the complexity
-penalty $-\tfrac12 \sum \log \lambda_i$ is comfortable, but the prior has assigned no
-correlation between neighbouring inputs, so the smooth component of $y$ lies in directions
-with small $\lambda_i$ and the fit term suffers. A very long $\ell$ makes $K$ nearly a
-matrix of ones, whose leading eigenvalue is of order $n$: one direction is granted enormous
-variance and the rest almost none, so the model fits any level shift beautifully and is
-astonished by everything else. The interior maximum is the length scale at which the
-eigenvalue spectrum of $A$ resembles the spectrum of the data, which is what the grid below
-finds. Two warnings follow directly from the algebra. First, the maximum is over a
-non-convex surface and can have several local optima, which is why we use a grid rather
-than a gradient step. Second, the whole calculation assumes the $n$ observations are
-conditionally independent given $f$; when they are not, as with overlapping forecast
-windows, $\log|A|$ counts more independent information than the data contain and the
-selected $\sigma_n^2$ is too small.
+the ridge estimator with penalty equal to the noise-to-prior variance ratio. In function
+space, $K = \sigma_w^2 X X^\top$ and $K_* = \sigma_w^2 X x_*$, and the Gaussian process
+posterior mean is $\bar m = K_*^\top(K + \sigma_n^2 I)^{-1} y = \sigma_w^2 x_*^\top
+X^\top(\sigma_w^2 XX^\top + \sigma_n^2 I_n)^{-1} y$. The two expressions agree by the
+push-through identity $X^\top(XX^\top + \lambda I_n)^{-1} = (X^\top X + \lambda I_p)^{-1}
+X^\top$, proved in one line by grouping $X^\top(XX^\top + \lambda I_n) = (X^\top X +
+\lambda I_p)X^\top$ two ways and multiplying by the two inverses, both of which exist for
+$\lambda > 0$. Substituting $\lambda = \sigma_n^2/\sigma_w^2$ after pulling $\sigma_w^2$ out
+of the inverse gives $\bar m = x_*^\top \bar w$ exactly. Replacing $x^\top x'$ by a
+different kernel is therefore not a departure from Bayesian regression, it is the same
+machine with the covariance term generalised, and the linear kernel is the special case in
+which the basis expansion never left the original $p$ coordinates.
 :::
 
-### Fitting the process to the macro data
+The restriction is not only algebra; it can be drawn. A function drawn from a Gaussian
+process prior with kernel $k$ is a random curve whose only structure is the one $k$
+supplies, so sampling from the prior shows what the model can express before any data are
+seen.
 
-We split at the end of 1999, fit on 1961 to 1999 and keep 2000 onwards untouched. Inputs
-and outcome are standardised on the training sample so that a unit signal variance is the
-right prior scale and only the two length scales and the noise variance have to be chosen.
-The kernel now has one length scale per input, which lets the process decide separately how
-fast the response varies in the term spread and in the funds-rate change.
+```{python}
+#| label: fig-kernel-draws
+#| fig-cap: "Four draws from the Gaussian process prior over the observed range of the term spread, under a linear kernel and under a squared-exponential kernel."
+def sq_exp(xa, xb, ell):
+    return np.exp(-0.5 * ((xa[:, None] - xb[None, :]) / ell) ** 2)
+
+def lin_kernel(xa, xb, sw2):
+    return sw2 * np.outer(xa, xb)
+
+rng = np.random.default_rng(2026)
+grid = np.linspace(mac["spread"].min(), mac["spread"].max(), 200)
+K_lin = lin_kernel(grid, grid, 1.0) + 1e-8 * np.eye(len(grid))
+K_se = sq_exp(grid, grid, 1.0) + 1e-8 * np.eye(len(grid))
+draws_lin = rng.multivariate_normal(np.zeros(len(grid)), K_lin, size=4)
+draws_se = rng.multivariate_normal(np.zeros(len(grid)), K_se, size=4)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.8), sharey=True)
+for d in draws_lin:
+    axes[0].plot(grid, d, lw=1.2)
+for d in draws_se:
+    axes[1].plot(grid, d, lw=1.2)
+axes[0].set_title("Prior draws, linear kernel"); axes[1].set_title("Prior draws, squared-exponential kernel")
+for ax in axes:
+    ax.set_xlabel("term spread"); ax.axhline(0, color="black", lw=0.6)
+axes[0].set_ylabel("f(x)")
+plt.tight_layout(); plt.show()
+```
+
+Every draw in the left panel is, and can only be, a straight line through the origin; the
+four curves differ only in slope, because $k_{\text{lin}}$ ties $f(x)$ and $f(x')$ together
+in exact proportion to $xx'$ and nothing else is available to vary. The right panel, with
+the same number of draws from a kernel that measures similarity by distance rather than by
+product, produces curves that bend, flatten and reverse direction, because nearby inputs
+are tied together without any global straight-line constraint. R-14.1 is the reason for the
+difference: a linear model is a Gaussian process, but with the one kernel that rules out
+everything the binned means in @sec-motivation showed. The repair is not a different
+algorithm, it is a different kernel.
+
+Notice what did not have to change. Nothing about the likelihood, $y = f(x) + \varepsilon$
+with Gaussian noise, was touched, and nothing about the logic of conditioning a joint
+Normal on observed data was touched either; that machinery is exactly the one used for the
+Normal linear model since Lecture 2. What changed is the covariance assigned to the unknown
+before any data arrive, from $\sigma_w^2 xx'$ to a function of $\|x - x'\|$ alone. That is
+a small edit to write down and a large one in consequence, because it is the covariance,
+not the estimation method, that decided in advance that the answer would be a straight
+line. The next section states what any such covariance buys once it is allowed to be more
+than $k_{\text{lin}}$, and how its own free parameters, the length scale and the noise
+variance, get chosen without a validation sample.
+
+## Methodology: a prior over the function, and the evidence that chooses it {#sec-methodology}
+
+A kernel generalises the covariance assignment of R-14.1 to any pair of inputs, subject to
+one requirement: it must be positive semidefinite for every finite collection of inputs, so
+that any finite set of function values has a valid joint Normal distribution. A Gaussian
+process is the statement that all such finite collections are jointly Gaussian under a
+chosen $k$. The squared-exponential kernel, $k(x,x') = \sigma_f^2\exp[-\|x - x'\|^2/(2
+\ell^2)]$, is the workhorse choice used below: its amplitude $\sigma_f^2$ sets the marginal
+variance of the function and its length scale $\ell$ sets the distance over which the
+covariance decays, so nearby inputs are treated as similar and distant ones as
+uninformative about each other. Writing $f \sim \mathcal{GP}(0,k)$ specifies this prior;
+nothing about it names a fixed set of basis functions, and the object being conditioned on
+data is a covariance matrix evaluated at the observed and requested inputs, not an explicit
+list of coefficients.
+
+### Result R-14.2: the Gaussian process posterior, from one Normal identity
+
+Let $f$ be the latent function at the training inputs $X$ and $f_*$ the latent function at
+new inputs $X_*$, with $K = k(X,X)$, $K_* = k(X,X_*)$ and $K_{**} = k(X_*,X_*)$. Under
+$f \sim \mathcal{GP}(0,k)$ and $y = f + \varepsilon$, $\varepsilon \sim \mathcal{N}(0,
+\sigma_n^2 I_n)$, the joint distribution of data and unknowns is Normal,
+
+$$
+\begin{pmatrix} y \\ f_* \end{pmatrix} \sim
+\mathcal{N}\!\left(0, \begin{pmatrix} A & K_* \\ K_*^\top & K_{**} \end{pmatrix}\right),
+\qquad A = K + \sigma_n^2 I_n,
+$$
+
+and conditioning this partitioned Normal on $y$ gives, for any $n$, any number of new
+inputs $n_*$ and any positive semidefinite $k$,
+
+$$
+f_* \mid y \sim \mathcal{N}(\bar m, \bar V), \qquad
+\bar m = K_*^\top A^{-1} y, \qquad
+\bar V = K_{**} - K_*^\top A^{-1} K_*.
+$$
+
+The posterior mean at a new input is a weighted sum of kernel similarities to the training
+inputs with weights $\alpha = A^{-1}y$ that do not depend on the new input at all, so
+$\alpha$ is computed once and prediction anywhere costs one further kernel evaluation.
+Predicting a realised observation rather than the latent function adds $\sigma_n^2$ to the
+diagonal of $\bar V$, because the new observation carries its own fresh shock.
+
+::: {.callout-note collapse="true"}
+## Derivation
+
+Define the residual $u = f_* - K_*^\top A^{-1} y$. Its covariance with $y$ is
+$\operatorname{Cov}(f_*,y) - K_*^\top A^{-1}\operatorname{Cov}(y,y) = K_*^\top -
+K_*^\top A^{-1}A = 0$, and for jointly Normal vectors zero covariance is independence, so
+$u \perp y$. Since $f_* = K_*^\top A^{-1}y + u$ and $E[u] = 0$,
+
+$$
+E[f_* \mid y] = K_*^\top A^{-1} y + E[u \mid y] = K_*^\top A^{-1} y,
+$$
+
+which is $\bar m$. Conditioning on $y$ leaves only the randomness in $u$, so
+$\operatorname{Var}(f_* \mid y) = \operatorname{Var}(u) = K_{**} - 2K_*^\top A^{-1}K_* +
+K_*^\top A^{-1}AA^{-1}K_* = K_{**} - K_*^\top A^{-1}K_*$, which is $\bar V$; notice that $y$
+never enters this expression, so the posterior variance depends on where the training
+inputs are, not on what was observed there. In practice $A^{-1}$ is never formed. Factor
+$A = LL^\top$ by Cholesky, solve $Lz = y$ then $L^\top\alpha = z$ by two triangular solves,
+and set $V = L^{-1}K_*$ by one more; then $\bar m = K_*^\top\alpha$ and $\bar V = K_{**} -
+V^\top V$.
+:::
+
+### Result R-14.3: the marginal likelihood trades fit against complexity
+
+Integrating the latent function out of the model rather than estimating it, the
+observations are marginally Normal, $y \sim \mathcal{N}(0,A)$ with $A = K + \sigma_n^2 I$,
+and its log density decomposes as
+
+$$
+\log p(y \mid X,\theta) = \underbrace{-\tfrac12 y^\top A^{-1}y}_{\text{data fit}}
+\;\underbrace{-\;\tfrac12\log|A|}_{\text{complexity penalty}}
+\;\underbrace{-\;\tfrac{n}{2}\log 2\pi}_{\text{constant}},
+$$
+
+for hyperparameters $\theta$ such as the length scale and noise variance. This quantity, and
+not the in-sample fit alone, is what chooses $\theta$: it rewards a covariance that
+explains the data and penalises a covariance that could have explained too much else.
+
+::: {.callout-note collapse="true"}
+## Derivation
+
+Diagonalise $A = \sum_i \lambda_i u_i u_i^\top$ with orthonormal $u_i$, and write $c_i =
+u_i^\top y$. Then $A^{-1} = \sum_i \lambda_i^{-1}u_iu_i^\top$, $|A| = \prod_i\lambda_i$, and
+the log density decouples into $n$ one-dimensional problems,
+$\log p(y\mid X,\theta) = -\tfrac12\sum_i[c_i^2/\lambda_i + \log\lambda_i] -
+\tfrac{n}{2}\log2\pi$. Differentiating the $i$-th term with respect to $\lambda_i$ gives
+$-c_i^2/\lambda_i^2 + 1/\lambda_i$, zero and a maximum of the log density at $\lambda_i =
+c_i^2$: the marginal likelihood is largest when the model's variance along each direction
+matches the squared amount of data observed along it. Too small a $\lambda_i$ makes
+$c_i^2/\lambda_i$ explode, the model surprised by data it declared nearly impossible; too
+large a $\lambda_i$ makes $\log\lambda_i$ large, the model having spread probability over
+outcomes that did not occur, the Occam factor that a fit criterion alone does not have. A
+very short length scale makes $K$ nearly diagonal and all eigenvalues small and equal, so
+the complexity term is cheap but the smooth component of $y$ falls in the small-eigenvalue
+directions and the fit term suffers; a very long length scale makes one eigenvalue of order
+$n$ and the rest nearly zero, so one direction is fit beautifully and the model is
+astonished by everything else. The interior maximum is the length scale at which the
+eigenvalue spectrum of $A$ resembles the spectrum actually present in the data. Two
+qualifications matter downstream. The maximisation is over a non-convex surface and can
+have several local optima, which is why a grid rather than a gradient step is used below.
+And the whole calculation assumes the $n$ observations are conditionally independent given
+$f$; when consecutive observations overlap, as a twelve-month-ahead forecast built on
+monthly data does, $\log|A|$ counts more independent information than is really there and
+the selected $\sigma_n^2$ comes out too small.
+:::
+
+R-14.1 fits inside this frame rather than beside it: taking $k = k_{\text{lin}}$ recovers
+ridge regression exactly, so the methodology of this section did not abandon the earlier
+course, it generalised the one piece, the covariance, that a linear model had fixed in
+advance. Everything that follows uses the squared-exponential kernel, one length scale per
+predictor, chosen by R-14.3 rather than asserted.
+
+Three practical points follow from R-14.2 and R-14.3 together and are worth stating before
+any number appears. First, prediction never requires an explicit basis or an explicit
+parameter vector, only the Cholesky factor of an $n \times n$ matrix, so the computational
+cost is cubic in the number of training observations regardless of how many predictors
+enter the kernel; that is a very different cost profile from a linear model, whose cost is
+cubic in the number of predictors and linear in the number of observations, and it is why
+a Gaussian process suits a monthly macro panel with a handful of predictors and would not
+suit a daily panel with millions of ticks. Second, the same factor $L$ used for the
+posterior mean and variance is reused, at no extra cost, to compute the marginal likelihood
+of R-14.3, so choosing hyperparameters and predicting from them share almost all of their
+arithmetic. Third, R-14.2's posterior variance $\bar V$ does not involve $y$: it depends
+only on the kernel evaluated at the training and new inputs. That is a strong and slightly
+strange property. It means the width of a Gaussian process's uncertainty band is decided
+entirely by where the observations were taken, never by how surprising they turned out to
+be, a point the empirical section returns to directly.
+
+With one predictor a single length scale suffices; with several, as in the macro data
+below, the natural extension keeps a separate length scale for each coordinate inside the
+squared-exponential exponent, $k(x,x') = \sigma_f^2\exp[-\sum_j (x_j - x_j')^2/(2\ell_j^2)]$,
+a construction sometimes called automatic relevance determination because a coordinate
+whose length scale the evidence pushes very long is, in effect, being told it barely
+matters: the kernel becomes nearly constant in that direction and the posterior mean
+varies little along it. This is the multivariate counterpart of what the Minnesota prior of
+Lecture 6 did with two numbers, $\lambda_1$ and $\lambda_2$, deciding how much of the data's
+apparent signal to believe in each direction; there the directions were own lags against
+cross lags, here they are the individual predictors, and in both cases the deciding
+quantity is chosen by evidence rather than fixed by the modeller.
+
+It is worth being explicit about what R-14.3 does not do. Maximising the marginal
+likelihood over $\theta$ is empirical Bayes: a point estimate of the hyperparameters
+plugged into R-14.2, not a full posterior over $\theta$ averaged out of the predictive
+distribution the way $\sigma^2$ was integrated out of the Normal-Inverse-Gamma regression
+of Lecture 2. That approximation is standard practice for Gaussian processes because a
+fully Bayesian treatment of the length scale has no closed form and would need the very
+sampling machinery Lectures 3 to 5 built; empirical Bayes keeps this chapter's calculation
+in closed form at the cost of understating hyperparameter uncertainty, a trade this course
+has made before, in the Minnesota prior's own choice of $\lambda_1$ by an out-of-sample
+sweep rather than a hierarchical prior over it.
+
+One more comparison is worth making explicit before any data appear, because it sets what
+counts as success in @sec-empirical. A Bayesian linear model on the same predictors, of the
+kind derived in Lecture 2 and used throughout the middle of this course, is itself the
+special case $k = k_{\text{lin}}$ with the noise variance and the prior variance chosen by
+the same marginal-likelihood logic; it is not a separate family of methods competing with
+Gaussian processes from outside the Bayesian framework, it is the same posterior machinery
+evaluated at a covariance R-14.1 already named. That means the empirical comparison below
+is not asking whether a Bayesian method beats a non-Bayesian one. It is asking whether
+letting the covariance be squared-exponential rather than linear buys anything once both
+answers are honestly stated as full predictive distributions, scored the same way, on data
+neither model has seen. Framed that way, a negative result is still informative: it says
+the extra flexibility purchased nothing once its own uncertainty was accounted for, not
+that the Bayesian calculation failed.
+
+## Data: the term spread and industrial production, 1961 to 2025 {#sec-data}
+
+The chapter's dataset is the same monthly FRED macroeconomic snapshot used in
+@sec-motivation, `data/fred_macro_monthly.parquet`, restricted to the two predictors and
+one outcome already built there: the term spread, the change in the federal funds rate over
+the trailing twelve months, and industrial production growth over the following twelve
+months. All three are observable at the forecast date except the outcome itself, which is
+the object being predicted. No other series is used anywhere in this chapter.
+
+```{python}
+#| label: fig-macro-panel-14
+#| fig-cap: "The term spread, the funds-rate change and industrial production growth over the next twelve months, monthly."
+fig, axes = plt.subplots(3, 1, figsize=(7.4, 6.2), sharex=True)
+for ax, col, lab in zip(axes, ["spread", "dff", "ipg"],
+                        ["term spread (pts)", "funds-rate change, 12m (pts)",
+                         "IP growth, next 12m (%)"]):
+    ax.plot(mac.index, mac[col], lw=0.7, color="steelblue")
+    ax.axhline(0, color="black", lw=0.6)
+    ax.set_ylabel(lab, fontsize=9)
+axes[0].set_title("The yield curve, the policy stance, and industrial production growth")
+axes[-1].set_xlabel("date")
+plt.tight_layout(); plt.show()
+
+print(f"{len(mac)} months, {mac.index[0]:%Y-%m} to {mac.index[-1]:%Y-%m}")
+print(mac.describe().loc[["mean", "std", "min", "max"]].round(3))
+```
+
+The panel runs from January 1961 to June 2025, $774$ months. The term spread averages
+$0.986$ points with a standard deviation of $1.618$ and ranges from $-6.51$, the deep
+inversion of the early 1980s, to $3.85$. The funds-rate change over a year averages close to
+zero, $0.022$, with a standard deviation of $2.108$, and industrial production growth over
+the following year averages $2.281$ percent with a standard deviation of $4.705$, its worst
+outcome $-19.0$ percent being the year that began in 2020. Every twelve-month window
+overlaps the next by eleven months, so consecutive observations are strongly serially
+correlated, which the marginal likelihood does not know about and R-14.3's last paragraph
+already warned would matter.
+
+The estimation window matters for a Gaussian process in the same way it mattered for the
+Minnesota prior of Lecture 6: fitting a single kernel across a sample that runs from the
+Volcker disinflation to the post-2020 recovery asks one covariance structure to describe
+several different monetary regimes at once. The split used below, training on 1961 to 1999
+and testing on 2000 onward, keeps the hyperparameter selection and the honest evaluation on
+non-overlapping halves of the sample, and both halves are long enough, $468$ and $306$
+months respectively, that the process sees the full range of inversions and expansions in
+training before it is asked to forecast any of them.
+
+## Empirical analysis: fitting and testing the process on the yield curve {#sec-empirical}
+
+The kernel is squared-exponential with one length scale per predictor, so the process can
+decide separately how quickly the response varies in the spread and in the funds-rate
+change. We split at the end of 1999, fit on 1961 to 1999 and keep 2000 onward untouched;
+inputs and outcome are standardised on the training sample, and the length scales and noise
+variance are chosen by the marginal likelihood of R-14.3 on a grid rather than by
+optimisation.
 
 ```{python}
 def sq_exp_ard(A, B, ell):
@@ -713,11 +484,20 @@ def gp_fit_ard(Z, w, ell, sn2):
     return L, a, fit + complexity - 0.5 * len(Z) * np.log(2 * np.pi), fit, complexity
 
 def gp_pred_ard(Z, L, a, Zs, ell):
+    """Posterior mean and marginal variance of the latent function, R-14.2 in code."""
     Ks = sq_exp_ard(Z, Zs, ell)
     V = np.linalg.solve(L, Ks)
     return Ks.T @ a, np.maximum(1.0 - (V ** 2).sum(axis=0), 0.0)
+```
 
-mac_tr, mac_te = mac.loc[:"1999-12"], mac.loc["2000-01":]
+Three functions are the entire algorithm: one kernel evaluation, one Cholesky
+factorisation, and two triangular solves, exactly as R-14.2's derivation ends. There is no
+optimisation loop inside `gp_fit_ard` itself; choosing the length scales and the noise
+variance is a separate step, done next by evaluating the third return value, the marginal
+likelihood of R-14.3, over a grid.
+
+```{python}
+mac_te = mac.loc["2000-01":]
 X_tr = mac_tr[["spread", "dff"]].to_numpy(); y_tr = mac_tr["ipg"].to_numpy()
 X_te = mac_te[["spread", "dff"]].to_numpy(); y_te = mac_te["ipg"].to_numpy()
 mx, sx = X_tr.mean(axis=0), X_tr.std(axis=0)
@@ -728,53 +508,50 @@ Z_te = (X_te - mx) / sx
 cand = [0.25, 0.5, 1.0, 2.0, 4.0]
 best = max(((gp_fit_ard(Z_tr, w_tr, np.array([e1, e2]), s)[2], e1, e2, s)
             for e1 in cand for e2 in cand for s in [0.2, 0.4, 0.6, 0.8]))
-lml_best, ell1_mac, ell2_mac, sn2_mac = best
+_, ell1_mac, ell2_mac, sn2_mac = best
 ell_mac = np.array([ell1_mac, ell2_mac])
 L_mac, a_mac, lml_mac, fit_mac, comp_mac = gp_fit_ard(Z_tr, w_tr, ell_mac, sn2_mac)
 
 print(f"training months {len(mac_tr)}, test months {len(mac_te)}")
 print(f"selected length scales: spread {ell1_mac}, funds-rate change {ell2_mac}; "
       f"noise variance {sn2_mac}")
-print(f"log marginal likelihood {lml_mac:.2f} = fit {fit_mac:.2f} "
-      f"+ complexity {comp_mac:.2f} + constant {-0.5 * len(Z_tr) * np.log(2 * np.pi):.2f}")
+print(f"log marginal likelihood {lml_mac:.2f} = fit {fit_mac:.2f} + "
+      f"complexity {comp_mac:.2f} + constant {-0.5*len(Z_tr)*np.log(2*np.pi):.2f}")
 ```
 
-The marginal likelihood picks a length scale of 0.5 standard deviations in the term spread
-and 1.0 in the funds-rate change, with a noise variance of 0.4 in standardised units. The
-first number is the interesting one: half a standard deviation of the term spread is about
-0.8 percentage points, so the process expects the relationship to bend appreciably over
-roughly one point of curve slope, which is the scale at which the binned means turned. The
-second says the response to the funds-rate change is twice as smooth, closer to linear. The
-decomposition prints as a fit term of $-220.35$ against a complexity term of $+169.81$: the
-complexity term is positive here only because the covariance has many eigenvalues below
-one in standardised units, and what matters is that shortening the length scale raises the
-fit term and lowers the complexity term, which the table in the next subsection shows
-directly.
+The marginal likelihood selects a length scale of $0.5$ standardised units in the term
+spread and $1.0$ in the funds-rate change, with a noise variance of $0.4$. Half a standard
+deviation of the spread is about $0.8$ points, so the process expects the relationship to
+bend appreciably over roughly one point of curve slope, close to the scale at which the
+binned means of @sec-motivation turned; the funds-rate change is judged twice as smooth,
+closer to linear. The decomposition of R-14.3 prints as a fit term of $-220.35$ against a
+complexity term of $169.81$, and shortening the length scale moves both, which the next
+figure makes explicit before showing what the chosen setting predicts.
 
 ```{python}
+#| label: fig-gp-curve
+#| fig-cap: "The posterior mean and 95% band for industrial production growth against the term spread, at two levels of the funds-rate change, against a linear fit at the mean funds-rate change."
 spread_grid = np.linspace(-8.0, 6.0, 200)
 q25_dff, q75_dff = np.percentile(X_tr[:, 1], [25, 75])
 
 fig, ax = plt.subplots(figsize=(7.6, 4.6))
 ax.scatter(X_tr[:, 0], y_tr, s=10, color="grey", alpha=0.45, label="1961-1999 months")
-for lev, colour, lbl in [(q25_dff, "C0", f"funds rate {q25_dff:+.1f} pts (easing)"),
-                         (q75_dff, "C3", f"funds rate {q75_dff:+.1f} pts (tightening)")]:
+for lev, colour, lbl in [(q25_dff, "C0", f"easing, funds rate {q25_dff:+.1f} pts"),
+                         (q75_dff, "C3", f"tightening, funds rate {q75_dff:+.1f} pts")]:
     Zs = np.column_stack([(spread_grid - mx[0]) / sx[0],
                           np.full(200, (lev - mx[1]) / sx[1])])
     m_s, v_s = gp_pred_ard(Z_tr, L_mac, a_mac, Zs, ell_mac)
     m_s, sd_s = m_s * sy + my, np.sqrt(v_s) * sy
     ax.plot(spread_grid, m_s, color=colour, lw=1.9, label=lbl)
-    ax.fill_between(spread_grid, m_s - 1.96 * sd_s, m_s + 1.96 * sd_s,
-                    color=colour, alpha=0.18)
+    ax.fill_between(spread_grid, m_s - 1.96 * sd_s, m_s + 1.96 * sd_s, color=colour, alpha=0.18)
 b_lin_mac = np.linalg.solve(np.column_stack([np.ones(len(X_tr)), X_tr]).T
                             @ np.column_stack([np.ones(len(X_tr)), X_tr]),
                             np.column_stack([np.ones(len(X_tr)), X_tr]).T @ y_tr)
 ax.plot(spread_grid, b_lin_mac[0] + b_lin_mac[1] * spread_grid,
-        color="black", ls="--", lw=1.4, label="linear fit (at mean funds-rate change)")
+        color="black", ls="--", lw=1.4, label="linear fit, mean funds-rate change")
 ax.axvspan(X_tr[:, 0].min(), X_tr[:, 0].max(), color="C2", alpha=0.05)
-ax.set_xlabel("term spread, 10-year yield minus funds rate, percentage points")
-ax.set_ylabel("industrial production growth over next 12 months, %")
-ax.set_title("The yield curve signal bends, and the bands flare where no data lie")
+ax.set_xlabel("term spread, points"); ax.set_ylabel("IP growth over next 12 months, %")
+ax.set_title("The yield curve signal bends, and the band flares where no data lie")
 ax.legend(fontsize=8, loc="lower right")
 plt.tight_layout(); plt.show()
 
@@ -785,118 +562,92 @@ for lev, lbl in [(q25_dff, "easing"), (q75_dff, "tightening")]:
     m_s, sd_s = m_s * sy + my, np.sqrt(v_s) * sy
     picks = {q: (round(float(m_s[np.argmin(abs(spread_grid - q))]), 2),
                  round(float(sd_s[np.argmin(abs(spread_grid - q))]), 2))
-             for q in [-7, -2, 0, 1, 2, 5]}
+             for q in [-7, -4, -2, 0, 1, 2, 3, 5]}
     print(lbl, "mean and sd at selected spreads:", picks)
-print(f"observed spread range in training data: "
-      f"{X_tr[:, 0].min():.2f} to {X_tr[:, 0].max():.2f}")
-Xd_mac = np.column_stack([np.ones(len(X_tr)), X_tr])
-r2_lin_mac = 1 - np.var(y_tr - Xd_mac @ b_lin_mac) / np.var(y_tr)
-print(f"linear fit: intercept {b_lin_mac[0]:.3f}, spread {b_lin_mac[1]:.3f}, "
-      f"funds-rate change {b_lin_mac[2]:.3f}, in-sample R2 {r2_lin_mac:.3f}")
-ipg_1m = 100.0 * (np.log(fred_mac["industrial_prod"]).shift(-1)
-                  - np.log(fred_mac["industrial_prod"]))
-one_m = pd.concat([mac[["spread", "dff"]], ipg_1m.rename("g1")], axis=1).dropna()
-Xd_1m = np.column_stack([np.ones(len(one_m)), one_m[["spread", "dff"]].to_numpy()])
-b_1m = np.linalg.solve(Xd_1m.T @ Xd_1m, Xd_1m.T @ one_m["g1"].to_numpy())
-print("same regression at a one-month horizon, in-sample R2: "
-      f"{1 - np.var(one_m['g1'].to_numpy() - Xd_1m @ b_1m) / np.var(one_m['g1']):.3f}")
+print(f"training spread range: {X_tr[:, 0].min():.2f} to {X_tr[:, 0].max():.2f}")
 ```
 
-This figure is the chapter's main picture and it carries three separate messages.
+The figure carries two messages. The first is the shape itself: along the tightening curve
+a spread of $-2$ implies growth of $-6.11$ percent, climbing steeply to $4.96$ at a spread
+of one and then flattening, $2.56$ at two and $4.16$ at three, while the dashed linear fit
+runs through the middle of both the steep part and the flat part and misstates each. The
+second is the interaction the two predictors carry together: deep in inversion the
+tightening curve sits far below the easing one, $-8.80$ against $-2.57$ at a spread of
+$-4$, so a curve inverted because policy has been raised hard is a worse signal than a
+curve inverted with policy unchanged, and the two curves converge once the spread turns
+positive. That is a genuine two-dimensional non-linearity invisible to any model that adds
+the two predictors rather than lets them interact through a shared kernel.
 
-The first is the shape. Along the tightening curve, the red line, a term spread of $-2$
-points implies industrial production growth of $-6.11$ per cent over the following year,
-and the curve climbs steeply to $+4.96$ per cent at a spread of one point, then goes flat:
-$2.56$ at a spread of two and $4.16$ at three. The steep part and the flat part are both
-real, and the dashed straight line runs through the middle of both, overstating growth
-during inversions and understating it around a spread of one. A slope of $1.33$ percentage
-points of growth per point of spread is the best single number available to a linear model,
-and the honest summary is that no single number is right.
+Notice too what the shaded region in the figure is doing. Inside it, where the training
+spreads actually lie, the bands for both scenarios are visibly narrow; the picture does not
+show it directly, but the numbers behind it do, a posterior standard deviation under half a
+percent near the middle of the training range against several points once the grid runs
+past $-6.5$ or $3.85$, the observed extremes. That flaring is not a modelling choice, it is
+what R-14.2 requires: the posterior variance depends only on distance to the training
+inputs, so a region with no training data anywhere near it must inherit variance close to
+the prior's, regardless of how confidently the curve is drawn where data are dense. A
+polynomial regression fitted to the same points would extrapolate past $-6.5$ with the same
+confidence it has at the centre of the sample, which is precisely the failure mode R-14.1
+already diagnosed: a fixed functional form carries its assumptions into regions no
+observation has tested.
 
-The second is the interaction between the two predictors. The blue easing curve and the red
-tightening curve are not parallel. Deep in inversion the tightening curve is far below the
-easing one, $-8.80$ against $-2.57$ at a spread of $-4$: a curve inverted because the Fed
-has been raising rates hard is a much worse signal than a curve inverted with the funds
-rate unchanged. At the right-hand end they converge. This is a genuine non-linearity in two
-dimensions, and it is invisible to an additive model of any kind, which is what makes a
-kernel with a product structure the natural device.
-
-The third is the honesty of the bands. Inside the shaded region, where the training spreads
-lie between $-6.51$ and $3.85$ points, the ninety-five per cent band is narrow, with a
-posterior standard deviation of $0.44$ per cent at a spread of one where hundreds of months
-cluster. Outside it the band flares: at a spread of $-7$ the standard deviation is $4.49$
-and the mean has already begun drifting back towards the prior mean of zero, which after
-undoing the standardisation is the sample average growth rate. The process is saying that
-it has no idea what happens at a curve inversion deeper than anything in the record, which
-is correct, and it says so without being told. A cubic polynomial fitted to the same data
-would extrapolate to that region with complete confidence and a large error.
-
-### What the length scale does, and what the marginal likelihood picks
+The choice of length scale is not free of consequence, and the next check is whether the
+value R-14.3 picked is also the value that forecasts best, which are two different
+questions answered by two different criteria.
 
 ```{python}
+#| label: fig-length-scale-sweep
+#| fig-cap: "Log marginal likelihood and out-of-sample RMSE as the length scale on the term spread varies, holding the funds-rate length scale and noise variance fixed at their selected values."
 ell1_try = [0.15, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
 sweep_rows = []
 for e1 in ell1_try:
     ell_t = np.array([e1, ell2_mac])
     Lt, at, lml_t, fit_t, comp_t = gp_fit_ard(Z_tr, w_tr, ell_t, sn2_mac)
-    m_in, _ = gp_pred_ard(Z_tr, Lt, at, Z_tr, ell_t)
     m_out, _ = gp_pred_ard(Z_tr, Lt, at, Z_te, ell_t)
-    sweep_rows.append({"length scale": e1,
-                       "log marg lik": lml_t, "fit term": fit_t,
+    sweep_rows.append({"length scale": e1, "log marg lik": lml_t, "fit term": fit_t,
                        "complexity term": comp_t,
-                       "in-sample R2": 1 - np.var(w_tr - m_in) / np.var(w_tr),
                        "out-of-sample RMSE": np.sqrt(np.mean((y_te - (m_out * sy + my)) ** 2))})
 sweep = pd.DataFrame(sweep_rows).set_index("length scale")
 print(sweep.round(3).to_string())
 
 fig, ax1 = plt.subplots()
-ax1.plot(sweep.index, sweep["log marg lik"], "o-", color="C0",
-         label="log marginal likelihood")
-ax1.set_xscale("log")
-ax1.set_xlabel("length scale on the term spread (standardised units, log scale)")
-ax1.set_ylabel("log marginal likelihood", color="C0")
-ax1.axvline(ell1_mac, color="C0", ls=":", lw=1.2)
+ax1.plot(sweep.index, sweep["log marg lik"], "o-", color="C0", label="log marginal likelihood")
+ax1.set_xscale("log"); ax1.set_xlabel("length scale on the term spread (log scale)")
+ax1.set_ylabel("log marginal likelihood", color="C0"); ax1.axvline(ell1_mac, color="C0", ls=":", lw=1.2)
 ax2 = ax1.twinx()
-ax2.plot(sweep.index, sweep["out-of-sample RMSE"], "s--", color="C3",
-         label="out-of-sample RMSE")
-ax2.set_ylabel("out-of-sample RMSE, percentage points", color="C3")
-ax2.grid(False)
-ax1.set_title("The marginal likelihood has an interior maximum; the test error barely cares")
+ax2.plot(sweep.index, sweep["out-of-sample RMSE"], "s--", color="C3", label="out-of-sample RMSE")
+ax2.set_ylabel("out-of-sample RMSE, %", color="C3"); ax2.grid(False)
+ax1.set_title("An interior maximum the test error barely notices")
 plt.tight_layout(); plt.show()
 ```
 
-The left-hand axis shows exactly the trade-off the third derivation predicted. Shrinking
-the length scale from 0.5 to 0.15 raises the fit term from $-220.35$ to $-211.19$, because
-a wigglier prior can pass closer to every observation, but it costs 36.7 in the complexity
-term, from $169.81$ down to $133.11$, and the marginal likelihood falls from $-480.60$ to
-$-508.14$. Stretching it to 8.0 does the opposite, buying 28.0 of complexity and losing
-98.6 of fit. The maximum at 0.5 is interior and clear, and nothing but the training data
-and the prior was used to find it. The in-sample $R^2$ column shows why a fit criterion
-could not have done this job: it rises monotonically as the length scale shrinks, so
-maximising it would drive us to the wiggliest model on the grid.
+The left-hand axis is R-14.3 in a picture. Shrinking the length scale from $0.5$ to $0.15$
+raises the fit term from $-220.35$ to $-211.19$ but costs $36.7$ in the complexity term,
+and the marginal likelihood falls; stretching it to $8.0$ loses fit faster than it saves in
+complexity. The maximum at $0.5$ is interior and comes from the training data and the prior
+alone. The right-hand axis is the deflating half: out-of-sample RMSE over 2000 to 2025
+moves only from $6.02$ to $6.17$ across the whole grid, and its minimum is not exactly at
+the value the evidence chose. The curvature the process found is real and was found by a
+principled route, and it makes little difference to how well the model forecasts, a pattern
+worth expecting rather than resenting. It is also the practical answer to a question a
+sceptical student should ask before trusting any of this: could the same shape have been
+manufactured by an unlucky choice of hyperparameter? The table shows that every setting on
+the grid, from a length scale six times shorter than the selected one to sixteen times
+longer, agrees to within a percentage point of predicted growth on out-of-sample error, so
+the shape in @fig-gp-curve is not an artefact of the particular length scale R-14.3
+happened to prefer.
 
-The right-hand axis is the deflating half. Out-of-sample root mean squared error over the
-2000 to 2025 period varies from 6.02 at the shortest length scale to 6.17 at the longest, a
-spread of two and a half per cent, and its minimum is not at the value the marginal
-likelihood chose. The curvature the process found is real, the marginal likelihood found it
-by a principled route, and it makes almost no difference to how well the model forecasts.
-That is a pattern worth expecting rather than being disappointed by.
-
-### An honest out-of-sample horse race
-
-The cleanest test gives every method only past data at every date. From January 1990
-onwards, we re-estimate on all observations whose twelve-month window had already closed,
-refit the process every three months, and forecast the next twelve months of industrial
-production growth. The competitors are the Gaussian process, a Bayesian linear regression
-on the same two predictors whose Student predictive distribution accounts for parameter
-uncertainty, and the historical mean of the training window, a forecast that uses no
-predictors at all. The hyperparameters are selected by marginal likelihood once, on data
-through 1989, and then held fixed, so no test information leaks backwards.
+The forecasting question needs its own test, because coefficients and curves are not the
+object of interest. We run an expanding-window comparison from January 1990, refitting
+every three months on all twelve-month windows that have already closed, forecasting the
+next month, and scoring the Gaussian process against a Bayesian linear model on the same
+two predictors and the historical mean of the training window, a forecast that ignores the
+yield curve entirely.
 
 ```{python}
-X_all = mac[["spread", "dff"]].to_numpy()
-y_all = mac["ipg"].to_numpy()
-idx_all = mac.index
+from scipy import stats
+
+X_all = mac[["spread", "dff"]].to_numpy(); y_all = mac["ipg"].to_numpy(); idx_all = mac.index
 h_mac, t_start = 12, int(np.searchsorted(idx_all, pd.Timestamp("1990-01-01")))
 hyp_grid = [(e1, e2, s) for e1 in [0.25, 0.5, 1.0, 2.0]
             for e2 in [0.5, 1.0, 2.0] for s in [0.3, 0.4, 0.6]]
@@ -904,16 +655,13 @@ hyp_grid = [(e1, e2, s) for e1 in [0.25, 0.5, 1.0, 2.0]
 oos_rows, hyp_sel, cache = [], None, None
 for t in range(t_start, len(y_all)):
     if (t - t_start) % 3 == 0:
-        end = t - h_mac                      # only windows that have already closed
+        end = t - h_mac
         Xs, ys = X_all[:end], y_all[:end]
         mxs, sxs = Xs.mean(axis=0), Xs.std(axis=0)
         mys, sys_ = ys.mean(), ys.std()
         Zs, ws = (Xs - mxs) / sxs, (ys - mys) / sys_
         if hyp_sel is None:
-            hyp_sel = max(hyp_grid,
-                          key=lambda g: gp_fit_ard(Zs, ws, np.array(g[:2]), g[2])[2])
-            print("hyperparameters selected on data through "
-                  f"{idx_all[end - 1]:%Y-%m}: {hyp_sel}")
+            hyp_sel = max(hyp_grid, key=lambda g: gp_fit_ard(Zs, ws, np.array(g[:2]), g[2])[2])
         e_sel, sn_sel = np.array(hyp_sel[:2]), hyp_sel[2]
         Lc, ac = gp_fit_ard(Zs, ws, e_sel, sn_sel)[:2]
         Xd = np.column_stack([np.ones(end), Xs])
@@ -934,8 +682,7 @@ for t in range(t_start, len(y_all)):
                      dof, hist_m, hist_s))
 
 oos = pd.DataFrame(oos_rows, columns=["date", "spread", "y", "gp_m", "gp_sd",
-                                      "lin_m", "lin_sd", "dof", "hist_m",
-                                      "hist_sd"]).set_index("date")
+                                      "lin_m", "lin_sd", "dof", "hist_m", "hist_sd"]).set_index("date")
 
 def score_block(sub, label):
     return {"regime": label, "months": len(sub),
@@ -947,588 +694,194 @@ def score_block(sub, label):
                                                        df=sub.dof) - np.log(sub.lin_sd)),
             "mean log score": np.mean(stats.norm.logpdf(sub.y, sub.hist_m, sub.hist_sd))}
 
-blocks = [score_block(oos, "all months"),
-          score_block(oos[oos.spread < 0], "inverted curve"),
-          score_block(oos[(oos.spread >= 0) & (oos.spread < 1.5)], "flat curve"),
-          score_block(oos[oos.spread >= 1.5], "steep curve")]
+blocks = [score_block(oos, "all months"), score_block(oos[oos.spread < 0], "inverted"),
+          score_block(oos[(oos.spread >= 0) & (oos.spread < 1.5)], "flat"),
+          score_block(oos[oos.spread >= 1.5], "steep")]
 print(pd.DataFrame(blocks).set_index("regime").round(3).T)
 ```
 
-Start with the row that a practitioner would look at first. Over all 426 months from 1990
-to 2025, the Gaussian process has a root mean squared error of 5.05 percentage points, the
-linear model 4.89, and the historical mean 4.51. Neither model beats a forecast that
-ignores the yield curve completely. That is not a bug in the code and it is not unique to
-this pair of predictors: industrial production growth trended down between the two halves
-of the sample, so a model with a fixed intercept estimated on an expanding window carries
-a stale level, and the two great shocks of the period, 2008 and 2020, were not visible in
-any term spread.
+Over all $426$ months from 1990 to 2025, the Gaussian process has a root mean squared error
+of $5.05$, the linear model $4.89$, and the historical mean $4.51$: neither model beats
+ignoring the yield curve, because output growth trended down across the sample and both
+models carry a stale intercept through 2008 and 2020, shocks no term spread foreshadowed.
+Split by regime the picture matches the economics. In the $71$ inverted months both models
+beat the historical mean by roughly a sixth, $4.94$ and $4.87$ against $5.84$; in the $202$
+steep months the mean wins comfortably, $3.67$ against $4.53$ and $4.96$, because a steep
+curve says only "conditions are normal" and the models insist on using it anyway. The
+remaining $153$ flat months, spreads between zero and $1.5$ points, sit in between, all
+three forecasts clustering near five percent RMSE, which is exactly the region of
+@fig-gp-curve where the tightening and easing curves have not yet separated and the term
+spread is telling the models the least. The value of the whole exercise is therefore
+concentrated in under a fifth of the sample, the months an inversion is actually under way,
+which a single overall RMSE hides and the regime split reveals.
 
-Split by regime and the picture changes in exactly the place the economics said it would.
-In the 71 months when the curve was inverted, both models beat the historical mean
-decisively: 4.94 for the process and 4.87 for the linear model against 5.84 for the mean,
-an improvement of roughly sixteen per cent in root mean squared error. In the 202 months
-when the curve was steep, the mean wins comfortably, 3.67 against 4.53 and 4.96, because a
-steep curve says nothing beyond "conditions are normal" and the models insist on using it
-anyway. This is the sense in which non-linearity pays at turning points and nowhere else.
-A flat or steep curve is a non-signal, and the value of the yield curve as a predictor is
-concentrated in the small number of months when it inverts.
-
-The log-score columns add a second lesson and it is about calibration rather than
-accuracy. The process scores $-3.81$ overall against the linear model's $-3.12$ and the
-historical mean's $-2.97$, a far larger gap than the root mean squared errors suggest. The
-reason is the last warning in the marginal-likelihood derivation. Because consecutive
-twelve-month windows overlap by eleven months, the 468 training observations contain
-something closer to forty independent pieces of information, and a marginal likelihood that
-treats them as independent concludes that the noise is small and the function is well
-pinned down. The selected noise variance of 0.3 produces predictive bands that are far too
-narrow, and a narrow band that misses is punished heavily by a log score. The linear
-model's Student predictive is wider and survives better. If you take one practical rule
-from this section, let it be that a marginal likelihood computed under an independence
-assumption that the data violate will select a model that is overconfident, and the log
-score, not the squared error, is where you will discover it.
+The log scores tell a harsher story: the process scores $-3.81$ against the linear model's
+$-3.12$ and the mean's $-2.97$, a far larger gap than the RMSE numbers suggest, and
+R-14.3's last warning is why: the $468$ overlapping training months carry closer to forty
+independent observations, and a marginal likelihood that treats them as independent selects
+a noise variance too small, producing bands so narrow that a miss is punished heavily.
+Non-linearity pays at turning points and nowhere else in this dataset, and a marginal
+likelihood computed under an assumption the data violate will select an overconfident
+model, a fact the log score reveals and the squared error does not. A practitioner who
+read only the RMSE row of the table above would conclude the Gaussian process is a mild
+disappointment; one who also read the log score would conclude its stated uncertainty
+cannot be trusted at face value, which is the sharper and more useful warning of the two.
 
 ```{python}
+#| label: fig-oos-timeseries
+#| fig-cap: "Gaussian process and linear forecasts against realised twelve-month industrial production growth, 1990 to 2025."
 fig, ax = plt.subplots(figsize=(8, 4.4))
 ax.fill_between(oos.index, oos.gp_m - 1.96 * oos.gp_sd, oos.gp_m + 1.96 * oos.gp_sd,
-                color="C0", alpha=0.22, label="GP 95% predictive band")
-ax.plot(oos.index, oos.gp_m, color="C0", lw=1.3, label="GP forecast")
-ax.plot(oos.index, oos.lin_m, color="C3", lw=1.1, label="linear forecast")
-ax.plot(oos.index, oos.y, color="black", lw=1.4, label="realised 12-month growth")
-ax.axhline(0.0, color="grey", lw=0.8, ls=":")
-ax.set_xlabel("forecast date")
-ax.set_ylabel("industrial production growth over next 12 months, %")
-ax.set_title("Forecasts and outcomes, 1990 to 2025")
+                color="C0", alpha=0.2, label="GP 95% predictive band")
+ax.plot(oos.index, oos.gp_m, color="C0", lw=1.2, label="GP forecast")
+ax.plot(oos.index, oos.lin_m, color="C3", lw=1.0, label="linear forecast")
+ax.plot(oos.index, oos.y, color="black", lw=1.3, label="realised growth")
+ax.axhline(0, color="grey", lw=0.7, ls=":")
+ax.set_xlabel("forecast date"); ax.set_ylabel("IP growth over next 12 months, %")
+ax.set_title("Both forecasts are flat next to the shocks they never saw coming")
 ax.legend(fontsize=8, ncol=2)
 plt.tight_layout(); plt.show()
 
 worst = oos.assign(err=(oos.y - oos.gp_m).abs()).nlargest(3, "err")
-print("three largest Gaussian process errors")
 print(worst[["y", "gp_m", "gp_sd", "lin_m"]].round(2))
-print(f"average GP forecast 1990-2025: {oos.gp_m.mean():.2f}")
-for lo, hi in [("1989-06", "1990-12"), ("2000-01", "2001-06"), ("2006-06", "2007-12")]:
-    w_ = oos.loc[lo:hi]
-    print(f"  {lo} to {hi}: GP forecast {w_.gp_m.mean():5.2f}, "
-          f"realised {w_.y.mean():5.2f}")
 ```
 
-The time-series view shows where the errors live. Both forecast lines are flat and modest
-compared with the black line of realised growth, which swings from $+15$ per cent in the
-2021 rebound to $-19$ per cent for the year that began in April 2019 and to $-16$ per cent
-for the year that began in May 2008. Those three dates are precisely the three largest
-errors the process makes, and the predictive band drawn around the forecast does not come
-close to containing any of them. A model whose inputs are the slope of the yield curve and
-the stance of policy cannot see a banking crisis or a pandemic, and no amount of
-flexibility in the functional form changes that. What the picture does show is a forecast
-that moves in the right direction some of the time: against its own 1990 to 2025 average of
-3.50 per cent, the process predicted 2.79 per cent on average through 2000 and the first
-half of 2001, and 1.16 per cent through the second half of 2006 and 2007, both stretches
-following inversions and both followed by contractions. It gives no warning at all before
-the 1990 recession, where it averaged 4.58 per cent and growth came in at $-1.60$.
+Both forecast lines sit close to their long-run averages next to a realised series that
+swings from about $+15$ percent in the 2021 rebound to $-19$ and $-16$ in the years that
+began in 2019 and 2008. Those three dates are the three largest errors either model makes,
+and the predictive band drawn around the Gaussian process forecast does not come close to
+covering any of them, which is the practical face of the log-score gap already reported: a
+band that is honest about distance from training inputs is not thereby honest about a
+pandemic or a banking crisis, because neither event is encoded in the term spread or the
+funds rate at all. What the line does show is a forecast that moves in a useful direction
+some of the time, dipping ahead of the two recessions that followed an inversion and
+sitting close to its unconditional level otherwise, which is the regime-split result of the
+previous table drawn as a single picture instead of a table.
 
-## Bayesian neural networks
+## Discussion: an honest band is not the same as a useful one {#sec-discussion}
 
-A neural network is a different route to a flexible function. Write a single hidden layer as $f(x) =
-\sum_{j=1}^{H} v_j\, \sigma(u_j^\top x + b_j)$, put priors on the weights $v$, $u$ and $b$, and you
-have again defined a distribution over functions. The connection to the previous section is exact:
-with independent Gaussian priors and weight variance scaled as $1/H$, the central limit theorem
-applies as $H \to \infty$ and the network prior converges to a Gaussian process whose kernel is
-fixed by the activation function. Neal showed this in 1996, so an infinitely wide Bayesian neural
-network *is* a Gaussian process, a reparameterisation of the object above rather than a new idea.
+The yield curve's non-linearity is real: the binned means of @sec-motivation showed a
+shape no coefficient can draw, R-14.1 explained why a linear model cannot draw it, and the
+posterior mean of @sec-empirical drew it, steep out of inversion and flat beyond. What that
+shape buys in forecasting is concentrated in the $71$ months when the curve is actually
+inverted, and is absent, even negative, everywhere else, which is the sense in which the
+answer is smaller than the shape suggests. Flexibility recovered a shape that was really
+there; it did not, on this dataset, turn that shape into a forecast that beats simply
+reporting the training-window average across the whole sample, and separating those two
+claims is the chapter's central discipline. A referee who only asked "is the relationship
+non-linear" would have been answered yes and would have stopped looking; a referee who
+asked "does the non-linear model forecast better" needed the regime split and the log score
+to find out that the honest answer is only sometimes, and by an amount too small to read
+off the curve in @fig-gp-curve.
 
-The difficulty is that useful cases are finite and deep, where the posterior is intractable in a
-much worse way than anything we have met. The map from weights to functions is many-to-one, so the
-posterior has a huge number of equivalent modes from permuting hidden units and flipping signs, and
-is high-dimensional, wildly multimodal and badly scaled. Hamiltonian Monte Carlo works on small
-networks and becomes expensive quickly; in practice people use variational inference, which fits a
-tractable Gaussian family to the posterior, or cheaper devices such as Monte Carlo dropout and deep
-ensembles, which are not strictly Bayesian but do spread the predictions. For most econometric
-problems the honest recommendation is the Gaussian process: calibrated uncertainty in closed form,
-interpretable hyperparameters and a marginal likelihood that selects them without a validation
-split. The network earns its keep when the input is high-dimensional and structured, as with text or
-images, where the architecture encodes what no kernel can. A monthly panel of predictors is not.
-
-### What makes a neural network Bayesian?
-
-For a network $f_w(x)$ with weight prior $p(w)$, the posterior is
-$p(w\mid y)\propto p(w)\prod_i p(y_i\mid f_w(x_i))$. Predictions integrate
-over weights, rather than evaluating only an optimised weight vector. The
-integral is usually nonconjugate because the hidden-layer transformations are
-nonlinear in $w$.
-
-UPM Class 4 introduces variational inference as an optional computational bridge.
-For a tractable density $q(w)$,
-
-$$
-\log p(y)=\underbrace{\mathbb E_q[\log p(y,w)-\log q(w)]}_{\mathrm{ELBO}(q)}
-+\operatorname{KL}(q(w)\Vert p(w\mid y)).
-$$
-
-The identity follows by inserting $p(y,w)=p(w\mid y)p(y)$ under the
-expectation. Maximising the lower bound chooses an approximation within the
-allowed family, not the exact posterior. A restricted family can miss dependence
-and understate uncertainty. HMC offers a sampling route but can be costly for
-large networks. These are computational choices for the same Bayesian model.
-
-The lecture's GP illustration teaches function uncertainty through a closed
-form. The exercise follows the fixed course plan by comparing **BART with OLS**
-on a held-out sample; it also distinguishes learned trees from the fixed-stump
-illustration in Week 10.
-
-## A predictive horse race for return predictability
-
-The interesting question is not whether a flexible model can fit a non-linear function, which we
-have settled, but whether it improves prediction where the truth is nearly buried in noise. We
-simulate a return-predictability experiment in which a predictor generates next-period returns
-through a saturating relationship $g(x) = a \tanh(2 x)$, strongest in the middle of the predictor's
-range and flat in the tails, plus unit-variance noise. Varying $a$ moves the population $R^2$ from
-the region of genuine finance data, a few per cent, to a level no return series has displayed. Each
-model is fitted on the first half of the sample and scored on the second by mean **log predictive
-density** and mean squared error, over twenty replications. The linear benchmark is the Bayesian
-linear model, whose Student predictive density accounts for parameter uncertainty.
-
-**Reading the computation.** Training and held-out segments are kept separate within each replication. Compare performance across signal strengths and seeds; this GP experiment supplements the scheduled BART-versus-OLS exercise.
+R-14.2 makes a specific, checkable claim: the posterior variance $\bar V$ does not depend
+on $y$ at all, only on where the training and new inputs sit relative to one another. That
+is worth checking directly rather than taking on faith, since it is the property that makes
+a Gaussian process say "I do not know" honestly rather than merely report a residual
+standard deviation.
 
 ```{python}
-def one_replication(amp, T, Tt, rng):
-    """Simulate, fit OLS and a GP on the first half, score both on the second."""
-    xa = rng.normal(0.0, 1.0, T + Tt)
-    g = amp * np.tanh(2.0 * xa)
-    ra = g + rng.normal(0.0, 1.0, T + Tt)
-    xi, yi, xo, yo = xa[:T], ra[:T], xa[T:], ra[T:]
-
-    Xd, Xo = np.column_stack([np.ones(T), xi]), np.column_stack([np.ones(Tt), xo])
-    b = np.linalg.solve(Xd.T @ Xd, Xd.T @ yi)
-    e, dof, XtXi = yi - Xd @ b, T - 2, np.linalg.inv(Xd.T @ Xd)
-    m_lin = Xo @ b
-    v_lin = (e @ e / dof) * (1.0 + np.einsum("ij,jk,ik->i", Xo, XtXi, Xo))
-    lpd_lin = np.mean(stats.t.logpdf((yo - m_lin) / np.sqrt(v_lin), df=dof)
-                      - 0.5 * np.log(v_lin))
-
-    mi, si = yi.mean(), yi.std()
-    e_gp, s_gp = max((gp_fit(xi, (yi - mi) / si, e2, s2_)[2], (e2, s2_))
-                     for e2 in [0.5, 1.0, 2.0, 4.0]
-                     for s2_ in [0.6, 0.8, 0.9, 0.97])[1]
-    Lg, ag, _ = gp_fit(xi, (yi - mi) / si, e_gp, s_gp)
-    m_gp, v_gp = gp_predict(xi, Lg, ag, xo, e_gp)
-    m_gp, v_gp = m_gp * si + mi, (v_gp + s_gp) * si ** 2
-    lpd_gp = np.mean(stats.norm.logpdf(yo, m_gp, np.sqrt(v_gp)))
-    return (g.var() / (g.var() + 1.0), lpd_lin, np.mean((yo - m_lin) ** 2),
-            lpd_gp, np.mean((yo - m_gp) ** 2))
-
-labels, rows = ["return-like", "moderate", "strong"], []
-for amp in [0.2, 0.3, 1.0]:
-    r = np.array([one_replication(amp, 300, 300, rng) for _ in range(20)])
-    rows.append({"true R2": round(r[:, 0].mean(), 3),
-                 "OLS log pd": round(r[:, 1].mean(), 4),
-                 "GP log pd": round(r[:, 3].mean(), 4),
-                 "OLS MSE": round(r[:, 2].mean(), 4),
-                 "GP MSE": round(r[:, 4].mean(), 4),
-                 "GP wins": f"{int((r[:, 3] > r[:, 1]).sum())}/20"})
-print(pd.DataFrame(rows, index=labels))
-```
-
-The table tells a deflating and important story. In the strong-signal regime the Gaussian process
-wins on both criteria and in all twenty replications, because the saturation in $g$ is real
-curvature a straight line cannot represent and three hundred observations suffice to see it. As the
-population $R^2$ falls towards the few per cent of actual return predictability the advantage
-evaporates: the two models score within a few ten-thousandths of each other in log predictive
-density, their mean squared errors agree to three decimals, and the process wins two runs in three.
-
-This is not a failure of the method but of the data. Detecting curvature means telling a bend from
-noise, and the sample size needed grows sharply as the signal weakens. At the signal-to-noise ratios
-of monthly equity returns the flexible model spends its freedom discovering that the relationship is
-approximately linear, its marginal likelihood selecting a long length scale and a noise variance
-close to one, so that it very nearly reproduces the linear model. Non-linear machine learning buys
-little in low-signal forecasting and a great deal in the higher-signal problems where finance also
-lives: derivative pricing surfaces, term-structure fitting and the conditional means on which causal
-adjustment depends. The Bayesian version tells you which regime you are in.
-
-The table already contains the whole story numerically; the next figure plots the log predictive density column
-against the population $R^2$ so the crossover is visible rather than merely tabulated.
-
-**Reading the computation.** The three points on each line are the three rows of the table already printed above, read out by amplitude rather than by label.
-
-```{python}
-true_r2_vals = [rw["true R2"] for rw in rows]
-fig, ax = plt.subplots()
-ax.plot(true_r2_vals, [rw["OLS log pd"] for rw in rows], "o-", label="OLS")
-ax.plot(true_r2_vals, [rw["GP log pd"] for rw in rows], "s-", label="Gaussian process")
-ax.set_xlabel("population $R^2$"); ax.set_ylabel("mean log predictive density")
-ax.legend(); ax.set_title("The predictive gap opens only once the signal is strong")
-plt.tight_layout(); plt.show()
-```
-
-The two lines are nearly on top of each other at the low end and fan apart only as the population $R^2$ rises,
-a picture of exactly the deflating message in words: flexibility is wasted until there is enough signal for it to
-find.
-
-A single replication also shows what "predicts better" means observation by observation, not only on average. We
-rerun one replication at the moderate signal strength and plot each method's out-of-sample prediction against what
-actually happened.
-
-**Reading the computation.** This reruns the same simulation design as `one_replication` at `amp = 0.3`, reusing the already selected hyperparameters `ell_hat` and `sn2_hat` rather than a fresh grid search, purely to keep the individual predictions available for plotting.
-
-```{python}
-amp_ex, T_ex, Tt_ex = 0.3, 300, 300
-xa_ex = rng.normal(0.0, 1.0, T_ex + Tt_ex)
-ra_ex = amp_ex * np.tanh(2.0 * xa_ex) + rng.normal(0.0, 1.0, T_ex + Tt_ex)
-xi_ex, yi_ex, xo_ex, yo_ex = xa_ex[:T_ex], ra_ex[:T_ex], xa_ex[T_ex:], ra_ex[T_ex:]
-
-Xd_ex = np.column_stack([np.ones(T_ex), xi_ex])
-b_ex = np.linalg.solve(Xd_ex.T @ Xd_ex, Xd_ex.T @ yi_ex)
-m_lin_ex = np.column_stack([np.ones(Tt_ex), xo_ex]) @ b_ex
-
-mi_ex, si_ex = yi_ex.mean(), yi_ex.std()
-Lg_ex, ag_ex, _ = gp_fit(xi_ex, (yi_ex - mi_ex) / si_ex, ell_hat, sn2_hat)
-m_gp_ex, _ = gp_predict(xi_ex, Lg_ex, ag_ex, xo_ex, ell_hat)
-m_gp_ex = m_gp_ex * si_ex + mi_ex
+#| label: fig-honest-bands
+#| fig-cap: "Posterior standard deviation of the funds-rate-13 model at the tightening scenario, as a function of distance from the training range of the term spread."
+Zs_check = np.column_stack([(spread_grid - mx[0]) / sx[0],
+                            np.full(200, (q75_dff - mx[1]) / sx[1])])
+_, v_check = gp_pred_ard(Z_tr, L_mac, a_mac, Zs_check, ell_mac)
+sd_check = np.sqrt(v_check) * sy
 
 fig, ax = plt.subplots()
-lims = [min(yo_ex.min(), m_lin_ex.min(), m_gp_ex.min()),
-        max(yo_ex.max(), m_lin_ex.max(), m_gp_ex.max())]
-ax.plot(lims, lims, "k--", lw=1, label="perfect prediction")
-ax.scatter(yo_ex, m_lin_ex, s=14, alpha=0.5, label="OLS")
-ax.scatter(yo_ex, m_gp_ex, s=14, alpha=0.5, label="Gaussian process")
-ax.set_xlabel("realised out-of-sample return"); ax.set_ylabel("predicted return")
-ax.legend(fontsize=9); ax.set_title("Both methods hug the same weak signal at return-like noise")
-plt.tight_layout(); plt.show()
-```
-
-Both clouds of predictions are compressed into a narrow band far from the dashed identity line, because neither
-method can move a prediction far from the unconditional mean when the signal is this weak; the two clouds all but
-overlap, which is the scatterplot version of the closely matched log predictive densities in the table.
-
-
-
-## Trees against a line: industry returns from factor exposures
-
-The Gaussian process section used macroeconomic data, where there is at least some signal.
-The harder test, and the one a finance student will be asked about, is whether a flexible
-model helps on returns. This section builds the tree ensemble of the opening section from
-scratch in numpy and puts it against a Bayesian linear model on a real cross-section.
-
-The panel is the forty-nine Fama-French industry portfolios, monthly, from January 1970.
-For each industry and each month we construct five predictors, all of them known at the
-end of that month: the industry's exposures to the market, size and value factors,
-estimated from a rolling sixty-month regression ending that month; its trailing twelve-month
-return, the standard momentum variable; and its trailing twelve-month return volatility.
-The target is the industry's excess return in the following month, in per cent. Nothing
-about the target enters any predictor, which is the only discipline that matters here. We
-train on everything before January 2000 and test on everything from January 2000 onwards,
-pooling industries so that the model learns a single cross-sectional relationship rather
-than forty-nine separate ones.
-
-This is the classic setup for cross-sectional return prediction, and the question is whether
-the relationship between exposures and expected returns is non-linear enough that a tree
-ensemble beats a straight line.
-
-```{python}
-ff_fac = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
-ind49 = pd.read_parquet(DATA / "ff_industry49_monthly.parquet")
-common_idx = ind49.loc["1970-01":].index.intersection(ff_fac.index)
-FAC = ff_fac.loc[common_idx, ["mkt_rf", "smb", "hml"]].to_numpy() * 100.0
-EXC = (ind49.loc[common_idx].mul(100.0)
-       .sub(ff_fac.loc[common_idx, "rf"] * 100.0, axis=0)).to_numpy()
-
-WIN = 60
-panel_rows = []
-for t in range(WIN, len(common_idx) - 1):
-    Xw = np.column_stack([np.ones(WIN), FAC[t - WIN + 1:t + 1]])
-    B = np.linalg.solve(Xw.T @ Xw, Xw.T @ EXC[t - WIN + 1:t + 1])   # 4 x 49 exposures
-    mom12 = EXC[t - 11:t + 1].sum(axis=0)
-    vol12 = EXC[t - 11:t + 1].std(axis=0)
-    for j in range(EXC.shape[1]):
-        panel_rows.append((common_idx[t], B[1, j], B[2, j], B[3, j],
-                           mom12[j], vol12[j], EXC[t + 1, j]))
-
-feat_names = ["b_mkt", "b_smb", "b_hml", "mom12", "vol12"]
-panel = pd.DataFrame(panel_rows, columns=["date"] + feat_names + ["y"])
-p_tr = panel[panel.date < "2000-01-01"]
-p_te = panel[panel.date >= "2000-01-01"]
-Xb_tr, yb_tr = p_tr[feat_names].to_numpy(), p_tr["y"].to_numpy()
-Xb_te, yb_te = p_te[feat_names].to_numpy(), p_te["y"].to_numpy()
-
-print(f"{len(panel)} industry-months, {panel.date.min():%Y-%m} to {panel.date.max():%Y-%m}")
-print(f"training {len(p_tr)} rows to 1999-12, test {len(p_te)} rows from 2000-01")
-print(panel[feat_names + ["y"]].describe().loc[["mean", "std", "min", "max"]].round(3))
-```
-
-### The linear benchmark, in the course's notation
-
-The benchmark is the conjugate regression of Lecture 2, written exactly as the course
-writes it: $\beta \mid \sigma^2 \sim N(b_0, \sigma^2 B_0)$ with $b_0 = 0$ and
-$B_0 = 100 I$, a prior so vague it barely shrinks, and $\sigma^2 \sim IG(\alpha_0,
-\delta_0)$ with $\alpha_0 = 3$ and $\delta_0 = 120$, centred on a monthly residual
-volatility of about 6.3 per cent, which is the right order of magnitude for an industry
-portfolio. The predictive distribution for a new observation is Student with $2\alpha_T$
-degrees of freedom, exactly as derived in the portfolio chapter.
-
-```{python}
-Zb_tr = np.column_stack([np.ones(len(Xb_tr)), Xb_tr])
-Zb_te = np.column_stack([np.ones(len(Xb_te)), Xb_te])
-k_b = Zb_tr.shape[1]
-b_0, B_0 = np.zeros(k_b), np.eye(k_b) * 100.0
-alpha_0, delta_0 = 3.0, 120.0
-
-B0_inv = np.linalg.inv(B_0)
-B_T = np.linalg.inv(B0_inv + Zb_tr.T @ Zb_tr)
-b_T = B_T @ (B0_inv @ b_0 + Zb_tr.T @ yb_tr)
-alpha_T = alpha_0 + len(yb_tr) / 2
-delta_T = delta_0 + 0.5 * (yb_tr @ yb_tr + b_0 @ B0_inv @ b_0
-                           - b_T @ np.linalg.inv(B_T) @ b_T)
-
-m_lin_b = Zb_te @ b_T
-v_lin_b = (delta_T / alpha_T) * (1 + np.einsum("ij,jk,ik->i", Zb_te, B_T, Zb_te))
-print(pd.Series(b_T, index=["intercept"] + feat_names).round(4))
-print(f"posterior mean residual sd: {np.sqrt(delta_T / (alpha_T - 1)):.3f} % per month")
-```
-
-The coefficients are the cross-sectional anomalies of the 1970s to 1990s, and it is worth
-reading them before scoring anything. An industry with a market beta one unit higher earned
-$0.27$ per cent a month less, the flat security market line that has been documented since
-Black, Jensen and Scholes. An industry with a value exposure one unit higher earned $0.20$
-per cent a month less in this sample. Trailing twelve-month return carries a coefficient of
-$-0.006$, so a hundred per cent better past year predicts about 0.6 percentage points lower
-next month, a reversal rather than momentum at the industry level. Trailing volatility
-carries $+0.13$. The posterior residual standard deviation is 6.31 per cent a month, which
-is the number every predictive claim here has to be judged against: these coefficients move
-the conditional mean by tenths of a per cent against a noise of six per cent.
-
-### A BART-style ensemble in numpy
-
-The ensemble follows the structure set out at the start of this lecture. Each tree is
-grown greedily on the partial residuals left by the trees already in the ensemble, and each
-terminal node is filled not with the leaf mean but with the posterior mean of the leaf under
-the prior $\mu_\ell \sim N(0, v_\mu)$,
-$$
-V_\ell = \Big(\frac{n_\ell}{\sigma^2} + \frac{1}{v_\mu}\Big)^{-1},
-\qquad
-m_\ell = V_\ell \frac{1}{\sigma^2}\sum_{i \in \ell} r_{i\ell},
-$$
-which is the formula derived earlier. Setting $v_\mu = \sigma_y^2 / m$ with $m$ trees keeps
-the prior variance of the sum at $\sigma_y^2$ regardless of how many trees we use, the
-scaling argument from the same section. This is a boosted approximation to BART rather than
-BART itself: it takes the posterior mean of each leaf given a greedily chosen tree, instead
-of sampling tree structures from their posterior. That distinction was made at the start of
-the lecture and it matters for interpreting the output, since the uncertainty reported below
-comes from the residual variance alone and not from uncertainty about the trees.
-
-```{python}
-rng_bart = np.random.default_rng(20260114)
-
-def grow_tree(X, r, depth, sigma2, v_mu, min_leaf, n_cand=10):
-    """Greedy tree whose leaves hold the shrunken posterior mean of the leaf parameter."""
-    def leaf(idx):
-        V = 1.0 / (len(idx) / sigma2 + 1.0 / v_mu)
-        return {"leaf": V * r[idx].sum() / sigma2}
-    def rec(idx, d):
-        if d == depth or len(idx) < 2 * min_leaf:
-            return leaf(idx)
-        best = None
-        for j in range(X.shape[1]):
-            v = X[idx, j]
-            for c in np.unique(np.quantile(v, np.linspace(0.1, 0.9, n_cand))):
-                left = v <= c
-                n_l, n_r = int(left.sum()), len(idx) - int(left.sum())
-                if n_l < min_leaf or n_r < min_leaf:
-                    continue
-                s_l = r[idx][left].sum()
-                s_r = r[idx].sum() - s_l
-                gain = s_l ** 2 / n_l + s_r ** 2 / n_r
-                if best is None or gain > best[0]:
-                    best = (gain, j, c, left)
-        if best is None:
-            return leaf(idx)
-        _, j, c, left = best
-        return {"j": j, "c": c, "L": rec(idx[left], d + 1), "R": rec(idx[~left], d + 1)}
-    return rec(np.arange(len(X)), 0)
-
-def tree_predict(node, X):
-    out = np.empty(len(X))
-    def rec(nd, idx):
-        if "leaf" in nd:
-            out[idx] = nd["leaf"]; return
-        left = X[idx, nd["j"]] <= nd["c"]
-        rec(nd["L"], idx[left]); rec(nd["R"], idx[~left])
-    rec(node, np.arange(len(X)))
-    return out
-
-m_trees, depth_b = 50, 3
-sigma2_b = yb_tr.var()
-v_mu_b = sigma2_b / m_trees
-offset_b = yb_tr.mean()
-resid_b = yb_tr - offset_b
-fit_tr, fit_te = np.zeros(len(yb_tr)), np.zeros(len(yb_te))
-for _ in range(m_trees):
-    sub = rng_bart.choice(len(yb_tr), size=6000, replace=False)
-    tree = grow_tree(Xb_tr[sub], resid_b[sub], depth_b, sigma2_b, v_mu_b, 200)
-    f_in = tree_predict(tree, Xb_tr)
-    fit_tr += f_in
-    resid_b = resid_b - f_in
-    fit_te += tree_predict(tree, Xb_te)
-
-m_tree_b = offset_b + fit_te
-res_in = yb_tr - (offset_b + fit_tr)
-sd_tree_b = np.sqrt(res_in @ res_in / len(yb_tr))
-print(f"ensemble of {m_trees} trees of depth {depth_b}, leaf prior sd "
-      f"{np.sqrt(v_mu_b):.3f} % per month")
-print(f"in-sample R2 of the ensemble: {1 - res_in.var() / yb_tr.var():.4f}")
-```
-
-The in-sample $R^2$ of the ensemble is under one per cent. That is not a failure of the
-implementation, it is the leaf prior working: with $v_\mu = \sigma_y^2/50$ the prior
-standard deviation of a leaf is 0.89 per cent a month, and a leaf containing two hundred
-observations with a partial residual mean of one per cent gets pulled most of the way back
-towards zero. An unshrunk boosted tree on this data would report an in-sample $R^2$ of
-several per cent and would be fitting noise.
-
-```{python}
-def score_pred(m, sd, df=None):
-    rmse = np.sqrt(np.mean((yb_te - m) ** 2))
-    if df is None:
-        lps = np.mean(stats.norm.logpdf(yb_te, m, sd))
-    else:
-        lps = np.mean(stats.t.logpdf((yb_te - m) / sd, df=df) - np.log(sd))
-    return rmse, lps
-
-rmse_l, lps_l = score_pred(m_lin_b, np.sqrt(v_lin_b), df=2 * alpha_T)
-rmse_t, lps_t = score_pred(m_tree_b, np.full(len(yb_te), sd_tree_b))
-rmse_m, lps_m = score_pred(np.full(len(yb_te), offset_b),
-                           np.full(len(yb_te), yb_tr.std()))
-race = pd.DataFrame({"out-of-sample RMSE": [rmse_m, rmse_l, rmse_t],
-                     "mean log predictive score": [lps_m, lps_l, lps_t]},
-                    index=["historical mean", "Bayesian linear", "tree ensemble"])
-print(race.round(4))
-print(f"linear beats the mean by {(rmse_m - rmse_l) * 100:.2f} basis points of monthly RMSE")
-print(f"tree loses to the linear model by {(rmse_t - rmse_l) * 100:.2f} basis points")
-```
-
-Here is the result, and it should be read slowly because its smallness is the point. The
-historical mean forecast has a root mean squared error of 6.9643 per cent a month. The
-Bayesian linear model, with five predictors chosen because the asset-pricing literature says
-they matter, achieves 6.9552, an improvement of 0.91 basis points, or about one seventh of
-one per cent of the error. The tree ensemble achieves 7.1440, which is worse than both. The
-log predictive scores tell the same story with the same ordering: $-3.3699$ for the mean,
-$-3.3683$ for the linear model, $-3.4030$ for the ensemble.
-
-There is no way to dress this up as a victory for flexible modelling, and dressing it up is
-what a great deal of published machine-learning-in-finance does. The honest description is
-that the linear model extracts a genuine but minuscule amount of cross-sectional signal, and
-that allowing the conditional mean to bend costs more in estimation variance than the
-bending is worth.
-
-```{python}
-lam_grid = np.linspace(0.0, 1.5, 13)
-lam_rmse = [np.sqrt(np.mean((yb_te - (m_lin_b + lam * (m_tree_b - m_lin_b))) ** 2))
-            for lam in lam_grid]
-
-fig, ax = plt.subplots()
-ax.plot(lam_grid, lam_rmse, "o-", color="C0")
-ax.axhline(rmse_m, color="grey", ls=":", lw=1.2, label="historical mean forecast")
-ax.axvline(0.0, color="C3", ls="--", lw=1.1, label="pure linear model")
-ax.axvline(1.0, color="C2", ls="--", lw=1.1, label="pure tree ensemble")
-ax.set_xlabel(r"weight $\lambda$ on the tree ensemble's deviation from the linear forecast")
-ax.set_ylabel("out-of-sample RMSE, % per month")
-ax.set_title("The best amount of non-linearity in this problem is none")
+ax.plot(spread_grid, sd_check, color="C3", lw=1.8)
+ax.axvspan(X_tr[:, 0].min(), X_tr[:, 0].max(), color="C2", alpha=0.08, label="training range")
+ax.set_xlabel("term spread, points"); ax.set_ylabel("posterior sd of the latent function, %")
+ax.set_title("The band widens with distance from the data, not with any observed value")
 ax.legend(fontsize=9)
 plt.tight_layout(); plt.show()
 
-print(pd.DataFrame({"lambda": lam_grid, "RMSE": lam_rmse}).round(4).head(7).to_string(index=False))
+print(f"posterior sd at spread=1 (inside range): {sd_check[np.argmin(abs(spread_grid-1))]:.2f}")
+print(f"posterior sd at spread=-7 (outside range): {sd_check[np.argmin(abs(spread_grid-(-7)))]:.2f}")
 ```
 
-The figure blends the two forecasts, predicting $m_{\text{lin}} + \lambda(m_{\text{tree}} -
-m_{\text{lin}})$ and sweeping $\lambda$ from zero, the pure linear model, to 1.5, an
-extrapolated version of the ensemble's disagreement with it. If the tree were finding real
-curvature, the curve would dip somewhere to the right of zero. Instead it rises
-monotonically, from 6.9552 at $\lambda = 0$ to 7.3678 at $\lambda = 1.5$, so the
-out-of-sample optimal weight on the tree ensemble's deviation is zero or below. This is a
-cleaner statement than a table of two numbers, because it shows that no amount of the
-ensemble helps rather than only that all of it does not. The dotted line marks the
-historical mean, which the whole curve sits near: at a weight above about 0.17 the blend is
-already worse than not forecasting at all, since the blend's error passes 6.9643 between
-$\lambda = 0.125$ and $\lambda = 0.25$.
+Inside the shaded training range the band sits near its narrowest, a posterior standard
+deviation of about half a percentage point where hundreds of months cluster; a few points
+beyond either edge it climbs past four, an eightfold increase driven entirely by distance
+from the training inputs, exactly as R-14.2's derivation said it must be, since $y$ never
+enters $\bar V$. A cubic polynomial fitted to the same data would extrapolate into that
+region with total confidence and, on this dataset, a large error, since the deepest
+inversion in the record already sits close to the edge of what the model has seen.
 
-```{python}
-dec_lin = pd.qcut(pd.Series(m_lin_b), 10, labels=False, duplicates="drop")
-dec_tree = pd.qcut(pd.Series(m_tree_b), 10, labels=False, duplicates="drop")
-mean_by_lin = pd.Series(yb_te).groupby(dec_lin).mean()
-mean_by_tree = pd.Series(yb_te).groupby(dec_tree).mean()
+The check against something already known is R-14.2's own claim that $\bar V$ ignores $y$.
+That is not a property special to macro data or to this kernel; it follows from the
+partitioned Normal identity in exactly the way the Kalman filter's state uncertainty in
+Lecture 8 follows from a different partitioned Normal identity, and in exactly the way the
+shrinkage matrix of Lecture 6 depended on the design and the prior but never on the
+realised $y$. Wherever this course has produced a closed-form Gaussian posterior, the
+spread of that posterior has been a statement about the experiment, not about the outcome,
+and the figure above is that statement made visible for a model whose parameter is an
+entire function rather than a finite vector.
 
-fig, ax = plt.subplots()
-width = 0.4
-pos = np.arange(10)
-ax.bar(pos - width / 2, mean_by_lin.to_numpy(), width, color="C3", label="Bayesian linear")
-ax.bar(pos + width / 2, mean_by_tree.to_numpy(), width, color="C2", label="tree ensemble")
-ax.axhline(yb_te.mean(), color="black", ls=":", lw=1.2,
-           label="unconditional test-sample mean")
-ax.set_xticks(pos); ax.set_xticklabels([str(i + 1) for i in pos])
-ax.set_xlabel("decile of the model's predicted return, 1 = lowest")
-ax.set_ylabel("realised average excess return, % per month")
-ax.set_title("Sorting industry-months by predicted return, 2000 to 2026")
-ax.legend(fontsize=9)
-plt.tight_layout(); plt.show()
+The limitation is the one the log score exposed and it does not go away with more data of
+the same kind. A twelve-month-ahead design manufactures serial correlation that a marginal
+likelihood does not model, so the noise variance it selects is too small and the resulting
+band, honestly shaped as R-14.2 requires, is nonetheless too narrow in absolute terms.
+Fixing that needs the state-space and stochastic-volatility machinery of Lectures 8 and 12
+applied to the noise process itself, which this chapter has not done, and it needs a
+likelihood built for overlapping data, which none of this course's closed-form results
+supply out of the box. Lecture 15 is the last of the course and draws every piece built so
+far, this one included, into a single retelling on one dataset, closing the chain rather
+than opening a new link in it.
 
-print(f"top minus bottom decile: linear {mean_by_lin.iloc[-1] - mean_by_lin.iloc[0]:.3f}, "
-      f"tree {mean_by_tree.iloc[-1] - mean_by_tree.iloc[0]:.3f} % per month")
-print(f"unconditional test mean {yb_te.mean():.3f} % per month")
-```
+## Exercises
 
-The decile sort is how a practitioner would look at this, and it is more forgiving than the
-squared error because it asks only whether the ordering is informative. The linear model's
-top decile of predicted returns realised 1.69 per cent a month against 0.88 per cent in the
-bottom decile, a spread of 0.82 points, which sounds impressive until one notices that the
-middle deciles are not ordered at all: decile 6 realised less than decile 1. The tree
-ensemble's spread is 0.26 points, again with no monotone pattern in between. A sort that
-works only at the extremes and is scrambled in the middle is what a weak signal plus a lot
-of noise looks like, and the squared-error comparison above is the summary that does not
-let the eye fill in the pattern.
+These are the chapter's practice questions; the [Week 14 exercise
+session](../exercise-sessions/14-bayesian-machine-learning.qmd) works through them and adds
+the lab.
 
-### Where the flexibility does pay
+1. By hand. Starting from R-14.1, show what happens to the ridge estimator $\bar w =
+   (X^\top X + \lambda I_p)^{-1}X^\top y$ as $\sigma_w^2 \to \infty$ with $\sigma_n^2$
+   fixed, and confirm the Gaussian process posterior mean under the linear kernel converges
+   to the same limit as $\sigma_w^2 \to \infty$. Then show that at $\sigma_w^2 = \infty$
+   the linear kernel posterior mean is exactly the least-squares fit, so R-14.1 recovers
+   the very method it diagnoses at one extreme of the prior.
 
-None of this says non-linear Bayesian methods are useless, and it is worth being precise
-about where they earn their place, because an exam answer that says only "machine learning
-does not work in finance" is as wrong as one that says it always does.
+2. Computational. The tree ensemble that this course's chain lists alongside the Gaussian
+   process, BART, places a different kind of prior over functions: a sum of shallow
+   regression trees, each shrunk toward zero at the leaf. Build one tree from scratch by
+   the recipe in the exercise materials, apply the leaf-posterior-mean formula given there
+   with a chosen prior variance, and compare its marginal likelihood behaviour to the
+   length-scale sweep of @sec-empirical: does adding more trees, like shortening the length
+   scale, trade fit for complexity in the same qualitative way?
 
-They pay where the signal-to-noise ratio is high. The first application in this lecture is
-an example: forecasting industrial production over a year has an in-sample $R^2$ of 0.373 for a linear
-model and a clear non-linear shape, and the Gaussian process recovered that shape from the
-data alone. Derivative pricing surfaces and term-structure fitting are the same kind of
-problem, where the quantity being modelled is nearly deterministic given the inputs and the
-only difficulty is the functional form.
+3. On real data. The exercise materials set up a second horse race, a Bayesian linear
+   model against the BART-style ensemble of question 2, on the forty-nine Fama-French
+   industry portfolios rather than the macro panel of this chapter. Run it, report the
+   out-of-sample root mean squared error and log predictive score of both models against a
+   historical-mean benchmark, and explain, using R-14.3's warning about complexity, why a
+   flexible model can lose to a linear one on this second dataset even though it won
+   convincingly on the first.
 
-They pay where the object of interest is second moments rather than first. Conditional
-volatility is far more predictable than conditional mean return, which is the entire reason
-the stochastic volatility lecture exists, and the non-linearity in the map from state
-variables to volatility is real and large. A flexible model of $\log \sigma_t^2$ has far
-more to work with than a flexible model of $E_t[r_{t+1}]$.
+Exercise 1 is the one to attempt before the session, since it is the algebra behind R-14.1
+restated as a limit. Exercises 2 and 3 are written for the session itself.
 
-They pay at turning points, which the regime split earlier made concrete. The value of the
-term spread was concentrated in the 71 inverted months out of 426, and a model constrained
-to a single slope has to average that signal away across the other 355. A flexible model
-that can be flat in the middle of the range and steep at one end is doing something that a
-linear model cannot, even when the average improvement across all months is negative.
+## Reading and references {#sec-reading}
 
-And they pay wherever a conditional mean function is an input to something else rather than
-an end in itself, as in the causal-inference lecture, where the outcome regression is a
-nuisance function whose flexibility protects against misspecification rather than a forecast
-anyone trades on.
-
-The honest summary for return prediction specifically is the one the horse race delivered:
-the Bayesian version of a flexible method is worth more than the flexibility, because the
-marginal likelihood and the predictive distribution tell you which regime you are in. A
-method that reports an improvement of 0.91 basis points and a log score that is worse than
-the unconditional mean's has told you something true and useful, which is more than a point
-forecast with an impressive in-sample $R^2$ ever does.
-
-## Reading guide and sources
-
-UPM Class 4 for the optional approximation discussion; Rasmussen and Williams (2006), Chapter 2, for GP regression; Chipman et al. (2010) for BART. These models share posterior prediction but use different priors over functions.
+The Gaussian process construction, R-14.2 and its Cholesky-based implementation follow
+Rasmussen and Williams (2006), Chapter 2, which is also the source for the automatic
+relevance determination kernel used in @sec-empirical. The marginal likelihood
+decomposition of R-14.3 and its interpretation as an Occam factor follow the same source,
+Chapter 5, and the same chapter is the reference for the practical warning about
+non-independent observations used in the discussion above. The ridge-as-Gaussian-process
+argument behind R-14.1 is standard and appears in the same reference alongside the
+basis-function view of kernel regression more generally, connecting this lecture back to
+the Normal linear model of Lecture 2 rather than presenting Gaussian processes as an
+unrelated idea. The tree-ensemble prior used in the exercise session, BART, is Chipman,
+George and McCulloch (2010), and the infinite-width equivalence between Bayesian neural
+networks and Gaussian processes mentioned in the exercise materials is Neal (1996), the
+result that keeps the exercise session's second flexible method inside the same family as
+the one derived here rather than treating it as a competitor from outside Bayesian
+statistics.
 
 The explanations and exercises are adapted to this course's notation and weekly
 structure; consult the cited originals for the full treatments.
 
-## References
-
-Rasmussen and Williams, *Gaussian Processes for Machine Learning* (2006), ch. 2 and 5. Chipman,
-George and McCulloch, *BART: Bayesian Additive Regression Trees*, Ann. Appl. Stat. (2010). Neal,
-*Bayesian Learning for Neural Networks* (1996), ch. 2.
+Rasmussen and Williams, *Gaussian Processes for Machine Learning* (2006), ch. 2 and 5.
+Chipman, George and McCulloch, *BART: Bayesian Additive Regression Trees*, Ann. Appl.
+Stat. (2010). Neal, *Bayesian Learning for Neural Networks* (1996), ch. 2.

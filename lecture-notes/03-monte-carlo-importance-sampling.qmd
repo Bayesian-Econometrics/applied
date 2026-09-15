@@ -3,88 +3,69 @@ title: "Monte Carlo integration and importance sampling"
 subtitle: "Lecture 3"
 ---
 
-::: {.callout-tip}
-## Exercise session
-Practise the derivation and implementation in [Week 3: Vanilla Monte Carlo](../exercise-sessions/03-monte-carlo-importance-sampling.qmd).
+## Overview
+
+By the end of this lecture you can compute any posterior summary for a model that
+has no closed form, and state how accurate your answer is.
+
+::: {.callout-important}
+## The result of this chapter
+
+For independent draws $\theta^{(1)}, \dots, \theta^{(S)}$ from a distribution $p$
+and any function $g$ with finite variance $\sigma_g^2$ under $p$,
+
+$$
+\hat g_S = \frac{1}{S}\sum_{s=1}^{S} g\big(\theta^{(s)}\big),
+\qquad
+\mathbb{E}\big[\hat g_S\big] = \mathbb{E}_p[g(\theta)],
+\qquad
+\text{MCSE} = \frac{\sigma_g}{\sqrt{S}},
+$$
+
+so any expectation under a distribution we can draw from is an average, unbiased,
+and carrying its own error estimate whatever the dimension of $\theta$. Two
+difficulties remain, and the rest of the chapter is about them: the error falls
+only at rate $S^{-1/2}$, and a posterior is almost never a distribution we can
+draw from directly.
 :::
 
-## Three numbers a risk desk cannot read off an average
+After working through this chapter you can
+
+1. derive the mean, variance and limiting distribution of the Monte Carlo
+   estimator, and report its standard error alongside every simulated number;
+2. diagnose why a posterior without conjugate structure admits no closed-form
+   summary, and why deterministic quadrature stops being an option as $k$ grows;
+3. derive the importance sampling identity and its self-normalised estimator, and
+   say where the bias comes from and how fast it vanishes;
+4. implement importance sampling and rejection sampling for a posterior known only
+   through a kernel, and verify each against an independent reference;
+5. interpret an effective sample size and a weight histogram, and decide from them
+   whether a simulated estimate can be believed;
+6. compute a predictive value at risk that integrates over parameter uncertainty,
+   and compare it with the plug-in and Normal conventions.
+
+Week 3 of 15, paired with the [Week 3 exercise
+session](../exercise-sessions/03-monte-carlo-importance-sampling.qmd). The chapter
+assumes the conjugate regression of Lecture 2, in particular its inverse-Gamma
+parameterisation and its noninformative limit, and nothing from later chapters.
+
+## Motivation: what a Normal model says about October 2008 {#sec-motivation}
 
 A risk officer has to say how much the US equity market might lose next month, and
 a strategist in the next room has to say how large the equity premium is. Both
 questions are asked of the same series, the monthly excess return on the market
-portfolio, and both are usually answered with a sample average and a sample standard
-deviation. That answer quietly assumes that returns are Normal, which they are not.
-Over the window we use below the monthly excess return has a skewness of $-0.55$ and a
-kurtosis of $4.03$ against the Normal's $3$, and the four worst months in the sample
-are losses of $17.2\%$, $16.0\%$, $13.4\%$ and $10.7\%$. A Normal fitted to this series
-calls a month like October 2008 a once-in-several-centuries event, which is a statement
-no risk officer believes.
+portfolio, and they differ only in which part of its distribution they care about:
+the strategist wants the centre, the risk officer the far left tail. Both are
+usually answered with a sample average and a sample standard deviation, and Lecture
+2 appears to have answered them already. A regression with a
+constant as its only regressor is exactly the model of @sec-methodology of that
+chapter with $k = 1$, so under the noninformative limit the premium has a Student
+$t$ posterior centred at the sample mean and the variance an inverse-Gamma
+posterior, both in closed form and both available without a line of simulation.
 
-The standard repair is to let the returns be Student-$t$ rather than Normal, which adds a
-third parameter, the degrees of freedom $\nu$, controlling tail thickness. That single
-change breaks every closed form we have relied on so far. There is no conjugate prior for
-the degrees of freedom, so the posterior of the three parameters has a normalising constant
-with no analytic expression, and none of the quantities a desk wants, not the mean premium,
-not the probability that tails are thick, not a one-month value at risk, can be written
-down. They can only be computed.
-
-This lecture develops the three general ideas that make such a posterior computable:
-Monte Carlo integration, which turns integrals into averages of draws; importance
-sampling, which uses draws from the wrong distribution and corrects them with weights;
-and rejection sampling, which discards enough draws from the wrong distribution that the
-survivors are exact draws from the right one. Each is stated as a general result at
-arbitrary parameter dimension and then run on one and the same posterior, defined next.
-Lectures 4 and 5 attack that identical posterior with Gibbs sampling and with
-Metropolis-Hastings, so that every method in the course can be compared on one problem
-rather than on five.
-
-## The target: a Student-$t$ model for the equity premium
-
-Write $r_t$ for the monthly excess return on the US market portfolio from the Kenneth
-French data library, and take the window from January 1990 to July 2026. The model is
-
-$$
-r_t \mid \mu, \sigma, \nu \;\overset{\text{iid}}{\sim}\; t_\nu(\mu, \sigma),
-\qquad t = 1, \dots, n,
-$$
-
-with density
-
-$$
-f(r_t \mid \mu, \sigma, \nu) =
-\frac{\Gamma\!\big(\tfrac{\nu+1}{2}\big)}{\Gamma\!\big(\tfrac{\nu}{2}\big)\sqrt{\pi\nu}\,\sigma}
-\left[1 + \frac{1}{\nu}\left(\frac{r_t - \mu}{\sigma}\right)^{\!2}\right]^{-(\nu+1)/2}.
-$$
-
-All three parameters mean something. The location $\mu$ is the monthly equity premium,
-the scale $\sigma$ sets the size of a typical monthly move, with return standard deviation
-$\sigma\sqrt{\nu/(\nu-2)}$ whenever $\nu > 2$, and the degrees of freedom $\nu$ govern
-tail thickness: small $\nu$ makes crashes a regular feature, while $\nu$ above about $30$
-is indistinguishable from a Normal at this sample size.
-
-The priors are
-
-$$
-\mu \sim \mathcal{N}(m_0, s_0^2), \qquad
-\sigma^2 \sim \text{IG}(\alpha_0, \delta_0), \qquad
-\nu - 2 \sim \text{Exp}(1/\bar\nu)\ \text{truncated to } (0, 48],
-$$
-
-with $m_0 = 0$, $s_0 = 0.01$, $\alpha_0 = 3$, $\delta_0 = 0.0032$ and $\bar\nu = 10$.
-The prior on $\mu$ is centred at zero with a monthly standard deviation of one percent,
-agnostic about the sign of the premium but ruling out absurd values. The inverse-Gamma
-prior has mean $\delta_0/(\alpha_0 - 1) = 0.0016$, a monthly scale of four percent, and a
-shape of three keeps it loose. The prior on $\nu$ is an exponential with mean $10$ shifted
-to live on $(2, 50]$: the shift to $2$ makes it proper and keeps the return variance
-finite, and the truncation at $50$ keeps $\nu$ where the data can speak, since the
-likelihood is nearly flat beyond that point and an unbounded prior would leave a right
-tail driven by the prior alone.
-
-Throughout, collect the parameters into $\theta = (\mu, \sigma, \nu)$, so $k = 3$. The
-inverse-Gamma follows Lecture 2 and is implemented as
-`scipy.stats.invgamma(a=alpha_0, scale=delta_0)`; the notation table at the end bridges
-to sources that write it in terms of the precision $h = 1/\sigma^2$.
+The trouble is not the algebra but the assumption underneath it. Lecture 2 assumed
+the errors were Normal, and the computation below asks what that assumption commits
+us to.
 
 ```{python}
 from pathlib import Path
@@ -100,55 +81,121 @@ DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
 rng = np.random.default_rng(2026)
 plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
                      "grid.alpha": 0.3, "font.size": 11})
-```
 
-The seed governs only the simulation error of the estimates below. Nothing here is
-simulated data: every posterior is conditioned on realised market returns.
-
-```{python}
 ff_m = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
 sample = ff_m["1990-01":"2026-07"]
 r = sample["mkt_rf"].to_numpy()
 n = r.size
 
-print(f"{n} months, {sample.index[0]:%Y-%m} to {sample.index[-1]:%Y-%m}")
-print(f"mean {r.mean():.5f}  sd {r.std(ddof=1):.5f}  "
-      f"skewness {stats.skew(r):.3f}  kurtosis {stats.kurtosis(r, fisher=False):.3f}")
-print(f"five worst months: {np.sort(r)[:5].round(3)}")
+ssr_0 = ((r - r.mean()) ** 2).sum()           # Lecture 2 with X = a column of ones
+s2_0 = ssr_0 / (n - 1)
+mu_post = stats.t(df=n - 1, loc=r.mean(), scale=np.sqrt(s2_0 / n))
+worst = np.sort(r)[:4]
+p_worst = stats.norm(r.mean(), np.sqrt(s2_0)).cdf(worst[0])
 
-fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.6))
-axes[0].plot(sample.index, r, lw=0.8, color="steelblue")
-axes[0].set_xlabel("date"); axes[0].set_ylabel("monthly excess return")
-axes[0].set_title(f"Market excess return, {n} months")
-grid_r = np.linspace(-0.20, 0.20, 400)
-axes[1].hist(r, bins=40, density=True, alpha=0.55, color="steelblue", label="data")
-axes[1].plot(grid_r, stats.norm(r.mean(), r.std(ddof=1)).pdf(grid_r), "k--",
-             lw=1.5, label="fitted Normal")
-axes[1].set_xlabel("monthly excess return"); axes[1].set_ylabel("density")
-axes[1].legend(fontsize=9); axes[1].set_title("Tails are thicker than Normal")
+print(f"Lecture 2 posterior for the monthly premium: mean {mu_post.mean():.5f}, "
+      f"95% [{mu_post.ppf(0.025):.5f}, {mu_post.ppf(0.975):.5f}]")
+print(f"posterior mean of sigma^2 {ssr_0/2/((n-1)/2 - 1):.6f}, "
+      f"residual sd {np.sqrt(s2_0):.5f}")
+print(f"four worst months: {worst.round(3)}")
+print(f"Normal probability of a month at or below {worst[0]:.3f}: {p_worst:.3e}")
+print(f"that is one month in {1/p_worst:,.0f}, i.e. one in {1/p_worst/12:,.0f} years")
+print(f"expected months below -10% in {n} months: {n*stats.norm(r.mean(), np.sqrt(s2_0)).cdf(-0.10):.2f}"
+      f"   observed: {(r < -0.10).sum()}")
+
+z = np.sort((r - r.mean()) / np.sqrt(s2_0))
+qq = stats.norm.ppf((np.arange(1, n + 1) - 0.5) / n)
+fig, ax = plt.subplots()
+ax.scatter(qq, z, s=12, alpha=0.6, color="steelblue")
+ax.plot([-3.5, 3.5], [-3.5, 3.5], "k--", lw=1.2, label="Normal reference line")
+ax.set_xlabel("Normal quantile"); ax.set_ylabel("standardised monthly excess return")
+ax.legend(fontsize=9); ax.set_title("Where the Normal model fails: both tails")
 plt.tight_layout(); plt.show()
 ```
 
-The left panel shows the familiar clusters of turbulence around 2000, 2008 and 2020. The
-right panel is the reason for the model: the histogram has more mass than the fitted
-Normal in the centre and in the far tails and less in the shoulders, which is the
-signature of a scale mixture rather than of a single Gaussian, and the Student-$t$ is the
-simplest distribution with that shape.
+The closed form works perfectly. It says the monthly premium is $0.745\%$ with a
+ninety-five percent credible interval from $0.333\%$ to $1.157\%$, and the residual
+standard deviation is $4.39\%$ a month, all of it read off a Student $t$ and an
+inverse-Gamma with no simulation anywhere. If the question were only how large the
+premium is, the chapter could stop here.
 
-## Posterior summaries are ratios of kernel integrals
+The risk officer's question is the one that breaks it. What the same model says
+about the worst month in the sample, a loss of $17.2\%$, is that it is a draw from
+the far left of a Normal density: its probability is $2.2\times10^{-5}$, one month
+in about forty-five thousand, or one in roughly three thousand eight hundred years.
+Told that, a risk officer has been informed that October 2008 will not happen again
+in the lifetime of the firm, which is not a statement anyone in the room believes.
+The failure is systematic rather than a single unlucky month. Across the whole
+sample the model expects $3.17$ months below minus ten percent and there are eight,
+two and a half times as many, and the figure makes the same point without any
+distributional arithmetic: the points bend away from the reference line at both
+ends, so the observed extremes are larger in magnitude than a Normal with this
+variance produces, while the middle of the distribution is too peaked. Over this
+window the monthly excess return has a skewness of $-0.55$ and a kurtosis of $4.03$
+against the Normal's $3$.
 
-Every number we will report is an integral. Writing the prior density as $\phi(\theta)$,
-the likelihood as $f(y \mid \theta)$ and the marginal likelihood as $f(y)$, Bayes'
-theorem is
+The diagnosis matters for what is repaired. Nothing here says the conjugate update
+of Lecture 2 was computed wrongly, and nothing says the premium of $0.745\%$ is far
+out. What is wrong is the shape of the assumed error distribution, and the
+quantities most damaged by it are exactly the tail quantities a risk desk reports.
+The standard repair is to let the returns be Student $t$ rather than Normal,
+
+$$
+r_t \mid \mu, \sigma, \nu \;\overset{\text{iid}}{\sim}\; t_\nu(\mu, \sigma),
+\qquad
+f(r_t \mid \mu, \sigma, \nu) =
+\frac{\Gamma\!\big(\tfrac{\nu+1}{2}\big)}{\Gamma\!\big(\tfrac{\nu}{2}\big)\sqrt{\pi\nu}\,\sigma}
+\left[1 + \frac{1}{\nu}\left(\frac{r_t - \mu}{\sigma}\right)^{\!2}\right]^{-(\nu+1)/2},
+$$
+
+which adds a third parameter, the degrees of freedom $\nu$, controlling tail
+thickness. Small $\nu$ makes crashes a regular feature of the series, while $\nu$
+above about thirty is indistinguishable from a Normal at this sample size. Fixing it
+in advance would be assuming the answer, since how thick the tails are is precisely
+what the risk officer is asking, so $\nu$ has to be an unknown with a prior and a
+posterior like any other, and the natural first question of the chapter becomes how
+much posterior mass sits at the small values.
+
+That single change breaks every closed form the course has relied on so far. The next
+section states the model with its priors and shows exactly what is lost, which is not
+a convenience but the ability to write down any reported number at all.
+
+## The problem: no conjugate structure, and a grid that dies with $k$ {#sec-problem}
+
+Write $\theta = (\mu, \sigma, \nu)$, so $k = 3$, with $\mu$ the monthly equity
+premium and $\sigma$ the scale, so that the return standard deviation is
+$\sigma\sqrt{\nu/(\nu-2)}$ whenever $\nu > 2$. The priors are
+
+$$
+\mu \sim \mathcal{N}(m_0, s_0^2), \qquad
+\sigma^2 \sim \text{IG}(\alpha_0, \delta_0), \qquad
+\nu - 2 \sim \text{Exp}(1/\bar\nu)\ \text{truncated to } (0, 48],
+$$
+
+with $m_0 = 0$, $s_0 = 0.01$, $\alpha_0 = 3$, $\delta_0 = 0.0032$ and $\bar\nu = 10$.
+The prior on $\mu$ is centred at zero with a monthly standard deviation of one
+percent, agnostic about the sign of the premium but ruling out absurd values. The
+inverse-Gamma prior, in the Lecture 2 parameterisation implemented as
+`scipy.stats.invgamma(a=alpha_0, scale=delta_0)`, has mean
+$\delta_0/(\alpha_0 - 1) = 0.0016$, a monthly scale of four percent, and a shape of
+three keeps it loose. The prior on $\nu$ is an exponential with mean $10$ shifted to
+live on $(2, 50]$: the shift makes it proper and keeps the return variance finite,
+and the truncation keeps $\nu$ where the data can speak, since the likelihood is
+nearly flat beyond that point.
+
+### Result R-3.1: every summary is a ratio of kernel integrals, and quadrature costs $G^k$
+
+Write the prior density as $\phi(\theta)$, the likelihood as $f(y \mid \theta)$ and
+the marginal likelihood as $f(y)$. Bayes theorem gives
 
 $$
 \phi(\theta \mid y) = \frac{\phi(\theta) f(y \mid \theta)}{f(y)}
 \;\propto\; \phi(\theta) f(y \mid \theta) \;\equiv\; \kappa(\theta \mid y),
 $$
 
-where $\kappa(\theta \mid y)$ is a kernel of the posterior, the shape of a density with
-the normalising constant left out. Any posterior summary is the expectation of some
-function $g(\theta)$, and written with the kernel it becomes
+where $\kappa(\theta \mid y)$ is a kernel of the posterior, the shape of a density
+with the normalising constant left out. Any posterior summary is the expectation of
+some function $g(\theta)$, and written with the kernel it becomes
 
 $$
 \mathbb{E}[g(\theta) \mid y]
@@ -159,24 +206,30 @@ $$
 
 because multiplying numerator and denominator by the same missing constant
 $K(y) = \int \kappa(\theta \mid y)\, d\theta$ leaves the ratio unchanged, and the
-denominator is the special case $g(\theta) = 1$. Choosing $g(\theta) = \mu$ gives the
-posterior mean premium, $g(\theta) = \mathbf{1}\{\nu < 10\}$ the posterior probability of
-genuinely thick tails, and $g(\theta) = \Pr(r_{n+1} < c \mid \theta)$ a predictive tail
-probability. Everything below approximates this one ratio without ever computing $K(y)$
-on its own.
+denominator is the special case $g(\theta) = 1$. For this model neither integral has
+a closed form. Lecture 2 could evaluate both because the exponent of its likelihood
+was a quadratic form in $\beta$ and a power of $\sigma^2$, so a conjugate prior
+returned a recognisable kernel; here $\nu$ enters through $\Gamma(\nu/2)$ and through
+an exponent that depends on it, no finite-dimensional sufficient statistic exists,
+and no conjugate family for $\nu$ is available at all. The general fallback is
+deterministic quadrature, and it carries its own bound: a product rule with $G$ points
+per coordinate needs $G^{k}$ evaluations of $\kappa$, so the cost is exponential in
+the number of parameters.
 
-Two different failures can put this ratio out of analytic reach, and it is worth keeping
-them apart. The first is that $K(y)$ itself has no closed form, so we know only the
-kernel; the ratio above dispatches exactly that, since it never asks for $K(y)$
-separately. The second is that even with a fully known density a particular $g$ may have
-no closed-form integral, as with a ratio of two jointly Normal parameters, a well defined
+Two different failures are packed into that statement and it is worth keeping them
+apart. The first is that $K(y)$ itself has no closed form, so we know only the kernel;
+the ratio above dispatches exactly that, since it never asks for $K(y)$ separately.
+The second is that even with a fully known density a particular $g$ may have no
+closed-form integral, as with a ratio of two jointly Normal parameters, a well defined
 random variable that can nonetheless fail to have a finite mean, exactly as Lecture 2
 warned when dividing one regression coefficient by another. Both occur here, and the
-methods below handle both at once.
+methods of @sec-methodology handle both at once.
 
 The kernel itself is available in closed form and cheap to evaluate. We code its
-logarithm, because the likelihood of $439$ observations is of order $e^{750}$ and would
-overflow otherwise.
+logarithm, because the likelihood of $439$ observations is of order $e^{750}$ and
+would overflow otherwise. With $k = 3$ we can still afford the brute-force answer, and
+it is worth buying once: a product grid gives a reference value for every quantity in
+the chapter, so each simulation method below can be checked rather than trusted.
 
 ```{python}
 m_0, s_0 = 0.0, 0.01                    # mu ~ N(m_0, s_0^2)
@@ -216,19 +269,6 @@ def log_kernel(mu, sigma, nu):
     return out
 
 
-print(f"log kappa at (0.009, 0.038, 8) = {log_kernel(0.009, 0.038, 8.0)[0]:.3f}")
-```
-
-With $k = 3$ parameters we can still afford the brute-force answer, and it is worth buying
-once: a product grid gives a reference value for every quantity in the chapter, so each
-simulation method can be checked rather than trusted. The grid below uses
-$64 \times 64 \times 96$ points, which is $393{,}216$ kernel evaluations. That count is the
-point. Lecture 1 warned that a grid costs $G^k$ evaluations, so a five-parameter version at
-the same resolution would need about $10^{9}$ evaluations and a ten-parameter one about
-$10^{18}$. Grids answer this question and then stop working, permanently, one or two
-parameters later.
-
-```{python}
 g_mu = np.linspace(0.0015, 0.017, 64)
 g_sig = np.linspace(0.029, 0.049, 64)
 g_nu = np.linspace(2.02, 50.0, 96)
@@ -243,6 +283,8 @@ grid_sd = np.array([np.sqrt((p_grid * MU ** 2).sum() - grid_mean[0] ** 2),
                     np.sqrt((p_grid * SG ** 2).sum() - grid_mean[1] ** 2),
                     np.sqrt((p_grid * NU ** 2).sum() - grid_mean[2] ** 2)])
 names = ["mu", "sigma", "nu"]
+print(f"log kappa at (0.009, 0.038, 8) = {log_kernel(0.009, 0.038, 8.0)[0]:.3f}")
+print(f"grid evaluations: {MU.size:,}")
 for nm, m_, s_ in zip(names, grid_mean, grid_sd):
     print(f"grid posterior  E[{nm:>5s} | r] = {m_:9.6f}   sd = {s_:.6f}")
 print(f"annualised premium at the posterior mean: {12 * grid_mean[0]:.4f}")
@@ -250,7 +292,7 @@ print(f"implied return sd {grid_mean[1]*np.sqrt(grid_mean[2]/(grid_mean[2]-2)):.
       f"monthly vs sample sd {r.std(ddof=1):.4f}")
 
 fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.4))
-for ax, X, axis_keep, gr, nm, lab in [
+for ax, Xg, axis_keep, gr, nm, lab in [
         (axes[0], MU, (1, 2), g_mu, grid_mean[0], r"$\mu$  (monthly premium)"),
         (axes[1], SG, (0, 2), g_sig, grid_mean[1], r"$\sigma$  (monthly scale)"),
         (axes[2], NU, (0, 1), g_nu, grid_mean[2], r"$\nu$  (degrees of freedom)")]:
@@ -263,26 +305,35 @@ fig.suptitle("The target posterior: marginals from a 393,216-point grid")
 plt.tight_layout(); plt.show()
 ```
 
-The posterior mean premium is $0.9126\%$ a month, or $10.95\%$ a year, noticeably above
-the sample average of $0.745\%$ a month. That gap is the Student-$t$ at work: a Normal
-model has to explain the 2008 and 2020 crashes by lowering the mean, while the $t$ model
-reads them as tail draws and leaves the central tendency higher. The posterior mean scale
-is $0.03776$ and the posterior mean degrees of freedom is $8.60$ with a posterior standard
-deviation of $3.93$, so the marginal for $\nu$ is wide and clearly right-skewed. The
-implied monthly return standard deviation is $0.0431$ against a sample value of $0.0439$,
-so the model is not buying fat tails at the cost of overall spread. The right-skewness of
-the $\nu$ marginal is worth noticing now, because it is what breaks the first importance
-sampler we try.
+The posterior mean premium is $0.9126\%$ a month, or $10.95\%$ a year, noticeably
+above the sample average of $0.745\%$ a month that @sec-motivation reported. That gap
+is the Student $t$ at work: a Normal model has to explain the 2008 and 2020 crashes by
+lowering the mean, while the $t$ model reads them as tail draws and leaves the central
+tendency higher. The posterior mean scale is $0.03776$ and the posterior mean degrees
+of freedom is $8.60$ with a posterior standard deviation of $3.93$, so the marginal for
+$\nu$ is wide and clearly right-skewed. The implied monthly return standard deviation is
+$0.0431$ against a sample value of $0.0439$, so the model is not buying fat tails at the
+cost of overall spread.
 
-## Result: Monte Carlo integration
+The number to keep from this section is not any of those, however, but $393{,}216$, the
+count of kernel evaluations the grid cost at $64 \times 64 \times 96$ points. Result
+R-3.1 says that count is $G^k$. At the same resolution a five-parameter version of this
+model would need about $10^{9}$ evaluations and a ten-parameter one about $10^{18}$.
+Grids answer this question and then stop working, permanently, one or two parameters
+later. The right-skewness of the $\nu$ marginal is worth noticing now too, because it is
+what breaks the first simulation method we try.
 
-::: {.callout-important}
-## Result: the Monte Carlo estimator, its unbiasedness and its standard error
+## Methodology: Monte Carlo, importance sampling and rejection {#sec-methodology}
+
+Every method below replaces the ratio of Result R-3.1 by an average over draws. They
+differ in where the draws come from and in what has to be done to them afterwards.
+
+### Result R-3.2: the Monte Carlo estimator, its unbiasedness and its standard error
 
 Let $\theta^{(1)}, \dots, \theta^{(S)}$ be independent draws from a distribution $p$ on
 $\mathbb{R}^k$, and let $g: \mathbb{R}^k \to \mathbb{R}$ have
-$\mathbb{E}_p[g(\theta)] = \mu_g$ and $\operatorname{Var}_p[g(\theta)] = \sigma_g^2 <
-\infty$. The Monte Carlo estimator
+$\mathbb{E}_p[g(\theta)] = \mu_g$ and
+$\operatorname{Var}_p[g(\theta)] = \sigma_g^2 < \infty$. The Monte Carlo estimator
 
 $$
 \hat g_S = \frac{1}{S}\sum_{s=1}^{S} g\big(\theta^{(s)}\big)
@@ -300,12 +351,15 @@ $$
 The Monte Carlo standard error is $\text{MCSE} = \sigma_g/\sqrt{S}$, estimated in
 practice by $\hat\sigma_g/\sqrt{S}$ with $\hat\sigma_g$ the sample standard deviation of
 the $g(\theta^{(s)})$.
-:::
 
 Nothing in that statement mentions $k$. That is why simulation escapes the curse of
-dimensionality that sank the grid: the accuracy of $\hat g_S$ depends on the variability
-of the single random variable $g(\theta)$, not on the volume of the space $\theta$ lives
-in.
+dimensionality that sank the grid in Result R-3.1: the accuracy of $\hat g_S$ depends on
+the variability of the single random variable $g(\theta)$, not on the volume of the space
+$\theta$ lives in. The $\sqrt{S}$ in the denominator is the compensating bad news and the
+single most important practical fact about simulation. The error shrinks with the square
+root of the number of draws, so halving the standard error costs four times as many draws
+and one extra decimal digit costs a hundred times as many. Every later question of the
+form "how many draws do we need" comes back to this line.
 
 ::: {.callout-note collapse="true"}
 ## Derivation
@@ -340,87 +394,17 @@ Replacing $\sigma_g$ by its sample counterpart is justified by Slutsky's theorem
 $\hat\sigma_g \to \sigma_g$ almost surely.
 :::
 
-The $\sqrt{S}$ in the denominator is the single most important practical fact about
-simulation. The error shrinks with the square root of the number of draws, so halving the
-standard error costs four times as many draws and one extra decimal digit costs a hundred
-times as many. The estimator converges, but the rate is unforgiving, and every later
-question of the form "how many draws do we need" comes back to this line.
+All of that assumes we can draw from the distribution we are integrating against. For a
+prior we usually can; for a posterior known only up to a constant and belonging to no
+named family, no generator exists. The next two results are the standard ways around
+that.
 
-To see the machinery work before the difficulty arrives, apply it to the one distribution
-in this model we can sample directly, the prior, two of whose moments are known exactly:
-$\mathbb{E}[\sigma^2] = \delta_0/(\alpha_0 - 1) = 0.0016$, and for the truncated shifted
-exponential with rate $\lambda = 1/\bar\nu$ on $(2, 2+b]$,
-
-$$
-\mathbb{E}[\nu] = 2 + \frac{1}{\lambda} - \frac{b e^{-\lambda b}}{1 - e^{-\lambda b}} .
-$$
-
-Drawing from the prior on $\nu$ uses the inverse transform, $\nu = 2 - \bar\nu \log\{1 -
-u(1 - e^{-b/\bar\nu})\}$ with $u$ uniform.
-
-```{python}
-S_mc = 20_000
-mu_pr = rng.normal(m_0, s_0, size=S_mc)
-sig_pr = np.sqrt(stats.invgamma(a=alpha_0, scale=delta_0).rvs(size=S_mc, random_state=rng))
-u_pr = rng.uniform(size=S_mc)
-b_nu = nu_hi - nu_lo
-nu_pr = nu_lo - nu_mean * np.log(1.0 - u_pr * (1.0 - np.exp(-b_nu / nu_mean)))
-
-exact_var = delta_0 / (alpha_0 - 1.0)
-exact_nu = nu_lo + nu_mean - b_nu * np.exp(-b_nu / nu_mean) / (1 - np.exp(-b_nu / nu_mean))
-
-for lab, draws, exact in [("E[sigma^2]", sig_pr ** 2, exact_var),
-                          ("E[nu]      ", nu_pr, exact_nu)]:
-    est = draws.mean()
-    mcse = draws.std(ddof=1) / np.sqrt(S_mc)
-    print(f"prior {lab}  exact {exact:10.6f}   MC {est:10.6f}   "
-          f"MCSE {mcse:.6f}   |error|/MCSE {abs(est - exact) / mcse:.2f}")
-```
-
-Both estimates sit within two Monte Carlo standard errors of the exact value, which is
-what an unbiased estimator with a correctly computed standard error should do. That
-standard error says nothing about the prior, which is fixed; it says how far this
-particular average of $20{,}000$ draws might be from the number the draws estimate.
-Watching the running average makes the rate visible.
-
-```{python}
-run_est = np.cumsum(nu_pr) / np.arange(1, S_mc + 1)
-s_axis = np.arange(1, S_mc + 1)
-band = 1.96 * nu_pr.std(ddof=1) / np.sqrt(s_axis)
-
-fig, ax = plt.subplots()
-ax.plot(s_axis, run_est, lw=1, color="steelblue", label="running MC estimate")
-ax.axhline(exact_nu, color="black", lw=1, ls=":", label="exact prior mean")
-ax.fill_between(s_axis, exact_nu - band, exact_nu + band, alpha=0.2,
-                label=r"exact $\pm\,1.96\times$MCSE")
-ax.set_xscale("log")
-ax.set_xlabel("number of draws  S (log scale)"); ax.set_ylabel(r"estimate of $E[\nu]$")
-ax.set_ylim(exact_nu - 2, exact_nu + 2)
-ax.legend(); ax.set_title(r"Monte Carlo error shrinks like $1/\sqrt{S}$")
-plt.tight_layout(); plt.show()
-```
-
-The band narrows steadily and the running average stays inside it without ever settling on
-the exact value, which is the result above made concrete. Note how slow the narrowing is
-on the logarithmic axis: each factor of ten in $S$ buys a factor of only about three in
-accuracy.
-
-All of that assumed we can draw from the distribution we are integrating against. For the
-prior we can; for the posterior we cannot, because no generator exists for a distribution
-known only up to a constant and belonging to no named family. The next two sections are
-the standard ways around that.
-
-## Result: importance sampling
+### Result R-3.3: importance sampling, the self-normalised estimator and the effective sample size
 
 The idea is to rewrite the target expectation as an expectation under a distribution we
 can sample, called the proposal or importance density $q$, by multiplying and dividing
-inside the integral.
-
-::: {.callout-important}
-## Result: the importance sampling identity and the self-normalised estimator
-
-Let $p$ be a density on $\mathbb{R}^k$ and let $q$ be a density with $q(\theta) > 0$
-wherever $g(\theta) p(\theta) \neq 0$. Then
+inside the integral. Let $p$ be a density on $\mathbb{R}^k$ and let $q$ be a density with
+$q(\theta) > 0$ wherever $g(\theta) p(\theta) \neq 0$. Then
 
 $$
 \mathbb{E}_p[g(\theta)]
@@ -442,10 +426,24 @@ $$
 \qquad w_{\text{norm}}^{(s)} = \frac{\tilde w^{(s)}}{\sum_{j} \tilde w^{(j)}},
 $$
 
-is biased for every finite $S$, with bias of order $1/S$, but is consistent,
-$\hat g_S^{\,\text{IS}} \to \mathbb{E}_p[g(\theta)]$ almost surely, and asymptotically
-Normal at rate $\sqrt{S}$.
-:::
+is biased for every finite $S$, with bias of order $1/S$, but is consistent and
+asymptotically Normal at rate $\sqrt{S}$. Its variance is governed by the weights: the
+second moment of a single weighted term is
+$\mathbb{E}_q[\{g(\theta)w(\theta)\}^2] = \mathbb{E}_p[g(\theta)^2 w(\theta)]$, so the
+variance is inflated exactly where $w(\theta)$ is large and $g(\theta)^2 p(\theta)$ is
+not negligible, and if $q$ has lighter tails than $p$ in some direction then
+$w(\theta) \to \infty$ along it and the variance can be infinite even though the
+estimator remains consistent. The standard one-number diagnostic is the effective sample
+size
+
+$$
+\text{ESS} = \frac{\big(\sum_{s} \tilde w^{(s)}\big)^2}{\sum_{s} (\tilde w^{(s)})^2}
+= \frac{1}{\sum_{s} \big(w_{\text{norm}}^{(s)}\big)^2} \;\in\; [1, S],
+$$
+
+which equals $S$ when all normalised weights are $1/S$ and falls towards $1$ as a single
+weight comes to dominate. It is the number of independent draws from $p$ that the
+weighted sample is worth.
 
 ::: {.callout-note collapse="true"}
 ## Derivation
@@ -462,8 +460,8 @@ $$
 $$
 
 where $w = p/q$ is the weight built from the normalised $p$. Each is an ordinary Monte
-Carlo average of independent draws from $q$, so by the previous result $\hat A_S$ is
-unbiased and consistent for $\mathbb{E}_q[gw] = \mathbb{E}_p[g]$ and $\hat B_S$ for
+Carlo average of independent draws from $q$, so by Result R-3.2 $\hat A_S$ is unbiased
+and consistent for $\mathbb{E}_q[gw] = \mathbb{E}_p[g]$ and $\hat B_S$ for
 $\mathbb{E}_q[w] = \int p = 1$.
 
 The unknown constant $c$ multiplies every $\tilde w^{(s)}$ identically, so it cancels from
@@ -489,6 +487,20 @@ ratio gives $\sqrt{S}(\hat g_S^{\,\text{IS}} - \mu_g) \overset{d}{\to}
 \mathcal{N}(0, \tau_g^2)$ with $\tau_g^2 = \operatorname{Var}_q[w(\theta)\{g(\theta) -
 \mu_g\}]$, provided that variance is finite. Notice that $\tau_g^2$ involves the weights
 quadratically, which is the formal reason uneven weights are expensive.
+
+The second-moment identity is the same change of measure applied to $g^2 w^2$ rather than
+to $g w$: one factor of $q$ in the denominator cancels against the $q$ from the
+expectation, leaving $g^2 w$ integrated against $p$. Subtracting $\mu_g^2$ gives the
+variance of a single term, and dividing by $S$ gives the variance of the estimator.
+
+For the effective sample size, compare the variance of the weighted average with that of
+an unweighted average of $S_{\text{eff}}$ draws from $p$. Treating the weights as fixed,
+$\sum_s w_{\text{norm}}^{(s)} g(\theta^{(s)})$ has variance
+$\sigma_g^2 \sum_s (w_{\text{norm}}^{(s)})^2$, while the unweighted average has variance
+$\sigma_g^2/S_{\text{eff}}$. Equating them gives
+$S_{\text{eff}} = 1/\sum_s (w_{\text{norm}}^{(s)})^2$. The bounds follow from
+$\sum_s (w_{\text{norm}}^{(s)})^2 \ge 1/S$ by Cauchy-Schwarz, with equality when all
+weights are equal, and $\le 1$, with equality when one weight is one and the rest zero.
 :::
 
 The practical reading is unglamorous but important. The bias shrinks like $1/S$ while the
@@ -505,13 +517,205 @@ weights no longer estimates one; it estimates $K(y)/c_\iota$. When $c_\iota$ is 
 that average times $c_\iota$ is therefore an estimator of the marginal likelihood $K(y)$,
 which is how Lecture 9 computes model evidence.
 
-Now the choice of $q$. Every requirement on a good proposal follows from keeping
-$w = \kappa/q$ well behaved: its support must cover everywhere the target has mass, its
-tails must be no lighter than the target's, since a proposal that decays faster sends
-$w \to \infty$ in the tail, and it must be cheap to sample. For this posterior the natural
-first attempt is a Normal centred at the posterior mode with covariance taken from the
-curvature of the log kernel there, the Laplace approximation, inflated a little for
-safety.
+Every requirement on a good proposal follows from keeping $w = \kappa/q$ well behaved: its
+support must cover everywhere the target has mass, its tails must be no lighter than the
+target's, since a proposal that decays faster sends $w \to \infty$ in the tail, and it
+must be cheap to sample. One construction is safe by arithmetic rather than by inspection.
+Because the likelihood is bounded above by some finite $\bar l$, the kernel obeys
+$\kappa(\theta) = l(\theta)\phi(\theta) \le \bar l\, \phi(\theta)$, so a proposal built
+from the prior can never have lighter tails than the posterior.
+
+### Exact draws by rejection
+
+Importance sampling returns weighted points. Rejection sampling returns actual draws from
+the target, by discarding proposals geometrically rather than reweighting them. Let
+$\kappa$ be a kernel of the target with $K = \int \kappa(\theta)\, d\theta < \infty$ and
+target density $p = \kappa/K$, and let $q$ be a density and $M$ a constant with
+$\kappa(\theta) \le M\, q(\theta)$ for all $\theta$. Repeat: draw $\tilde\theta \sim q$ and
+$u \sim \text{Uniform}(0,1)$ independently, and accept $\theta = \tilde\theta$ if
+
+$$
+u \le \frac{\kappa(\tilde\theta)}{M\, q(\tilde\theta)} ,
+$$
+
+otherwise discard and start again. Then every accepted $\theta$ is an exact draw from $p$,
+accepted draws are mutually independent, and the acceptance probability at any single
+trial is $\Pr(\text{accept}) = K/M$, so the expected number of proposals per accepted draw
+is $M/K$. No reweighting of accepted draws is needed, which is the advantage; finding a
+valid $M$ is the price.
+
+::: {.callout-note collapse="true"}
+## Derivation
+
+Take the joint density of proposing $\tilde\theta$ and accepting it. The proposal has
+density $q(\theta)$, and given $\tilde\theta = \theta$ the acceptance event has
+probability $\kappa(\theta)/\{M q(\theta)\}$ because $u$ is uniform on $(0,1)$ and the
+envelope condition guarantees the ratio lies in $[0,1]$. Hence
+
+$$
+\Pr(\text{propose near }\theta \text{ and accept})
+= q(\theta)\, \frac{\kappa(\theta)}{M q(\theta)} = \frac{\kappa(\theta)}{M} .
+$$
+
+Integrating over $\theta$ gives the unconditional acceptance probability
+$\int \kappa(\theta)\, d\theta / M = K/M$. Dividing the joint density by that probability
+gives the density of an accepted draw,
+
+$$
+p(\theta \mid \text{accept}) = \frac{\kappa(\theta)/M}{K/M}
+= \frac{\kappa(\theta)}{K} = p(\theta),
+$$
+
+which is the target exactly, with the unknown constant $K$ cancelling. Independence of
+successive accepted draws follows because the trials are independent and the accept
+decision depends only on the current trial.
+
+Geometrically the same argument reads as an area statement. The first two steps generate a
+point uniformly over the region under the envelope,
+$\{(\theta, v) : 0 \le v \le M q(\theta)\}$, since $\theta$ comes from $q$ and
+$v = u M q(\theta)$ is uniform on $[0, M q(\theta)]$ given $\theta$. The third keeps the
+points that also fall under $\kappa$, a sub-region of the envelope. A point uniform on a
+region and restricted to a sub-region is uniform on that sub-region, and the marginal of
+$\theta$ under a uniform distribution on the area beneath a curve is the density
+proportional to that curve. The acceptance probability is the ratio of the two areas, and
+when $q = p$ exactly $M = 1$ and everything is accepted.
+:::
+
+One special case deserves naming because it recurs throughout the course. Suppose the
+target is an unrestricted posterior with kernel $\kappa(\theta)$ truncated to a region
+$\Theta_r$, and the unrestricted posterior is already easy to simulate. Then it serves as
+its own proposal with envelope constant exactly $M = 1$, since
+$\kappa(\theta)\mathbf{1}\{\theta \in \Theta_r\} \le 1 \cdot \kappa(\theta)$ holds
+trivially, and the algorithm collapses to drawing from the unrestricted posterior and
+discarding whatever falls outside $\Theta_r$. The acceptance rate is then
+$\Pr(\theta \in \Theta_r \mid y)$, usually a quantity of interest in its own right. This is
+how sign restrictions are imposed in the structural vector autoregressions of Lecture 7.
+
+### Turning weights into draws: sampling importance resampling
+
+Between the two lies a cheap compromise. Having drawn
+$\theta^{(1)}, \dots, \theta^{(S)} \sim q$ with normalised weights $w_{\text{norm}}^{(s)}$,
+draw $N \le S$ indices from $\{1, \dots, S\}$ with replacement using the weights as
+selection probabilities and keep the corresponding $\theta$ values. A heavily weighted draw
+is copied more often and a negligible one is unlikely to appear, so the resampled set is
+approximately an unweighted sample from $p$. The approximation is exact only as
+$S \to \infty$ with $N$ fixed, which is the essential difference from rejection sampling,
+but it needs no envelope constant and wastes no draws.
+
+## Data: monthly US market excess returns, 1990 to 2026 {#sec-data}
+
+The chapter's dataset is the monthly Fama-French factor file,
+`data/ff_factors_monthly.parquet`, from the Kenneth French data library, and the single
+column used is `mkt_rf`, the excess return on the value-weighted US market portfolio over
+the one-month Treasury bill. The window is January 1990 to July 2026, which is $439$
+complete months and the same window Lecture 2 used for the banking regression, so the two
+chapters describe the same regime. Chapters 4 and 5 reuse this series, this window and this
+model without change, so that every sampler in the course can be compared on one problem
+rather than on five.
+
+```{python}
+print(f"{n} months, {sample.index[0]:%Y-%m} to {sample.index[-1]:%Y-%m}")
+print(f"mean {r.mean():.5f}  sd {r.std(ddof=1):.5f}  "
+      f"skewness {stats.skew(r):.3f}  kurtosis {stats.kurtosis(r, fisher=False):.3f}")
+print(f"five worst months: {np.sort(r)[:5].round(3)}")
+
+fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.6))
+axes[0].plot(sample.index, r, lw=0.8, color="steelblue")
+axes[0].set_xlabel("date"); axes[0].set_ylabel("monthly excess return")
+axes[0].set_title(f"Market excess return, {n} months")
+grid_r = np.linspace(-0.20, 0.20, 400)
+axes[1].hist(r, bins=40, density=True, alpha=0.55, color="steelblue", label="data")
+axes[1].plot(grid_r, stats.norm(r.mean(), r.std(ddof=1)).pdf(grid_r), "k--",
+             lw=1.5, label="fitted Normal")
+axes[1].set_xlabel("monthly excess return"); axes[1].set_ylabel("density")
+axes[1].legend(fontsize=9); axes[1].set_title("Tails are thicker than Normal")
+plt.tight_layout(); plt.show()
+```
+
+The series has a mean of $0.00745$ and a standard deviation of $0.04392$ a month, so the
+average month earns three quarters of a percent over the bill rate with a typical swing
+about six times that size. The skewness is $-0.545$ and the kurtosis $4.026$ against the
+Normal's $3$, and the five worst months are losses of $17.2\%$, $16.0\%$, $13.4\%$,
+$10.7\%$ and $10.3\%$, all of which are the numbers the model of @sec-problem is being
+asked to accommodate.
+
+The left panel shows the familiar clusters of turbulence around 2000, 2008 and 2020. That
+clustering is visible enough to be worth naming as a known defect of the model rather than
+a discovery: the specification treats the $439$ months as independent and identically
+distributed, so it can accommodate a fat tail but not a tail that arrives in bursts, and
+@sec-discussion returns to the point. The right panel is the reason for the model in the
+first place. The histogram has more mass than the fitted Normal in the centre and in the
+far tails and less in the shoulders, which is the signature of a scale mixture rather than
+of a single Gaussian, and the Student $t$ is the simplest distribution with that shape.
+
+## Empirical analysis: three simulators on one Student-$t$ posterior {#sec-empirical}
+
+The three methods of @sec-methodology are now run on the posterior of @sec-problem, in
+the order in which a working paper would report them: first Monte Carlo where the answer
+is known exactly, so that the standard error can be audited; then importance sampling
+twice, once with the obvious proposal and once with a proposal chosen to have heavy
+tails; then rejection sampling, which delivers exact draws; and finally resampling, which
+converts a weighted sample into an unweighted one. Every estimate is compared against the
+$393{,}216$-point grid, which is available here and will not be available again after
+Lecture 5.
+
+### Monte Carlo where the answer is known
+
+To see Result R-3.2 work before the difficulty arrives, apply it to the one distribution in
+this model we can sample directly, the prior, two of whose moments are known exactly:
+$\mathbb{E}[\sigma^2] = \delta_0/(\alpha_0 - 1) = 0.0016$, and for the truncated shifted
+exponential with rate $\lambda = 1/\bar\nu$ on $(2, 2+b]$,
+$\mathbb{E}[\nu] = 2 + 1/\lambda - b e^{-\lambda b}/(1 - e^{-\lambda b})$. Drawing from the
+prior on $\nu$ uses the inverse transform,
+$\nu = 2 - \bar\nu \log\{1 - u(1 - e^{-b/\bar\nu})\}$ with $u$ uniform.
+
+```{python}
+S_mc = 20_000
+mu_pr = rng.normal(m_0, s_0, size=S_mc)
+sig_pr = np.sqrt(stats.invgamma(a=alpha_0, scale=delta_0).rvs(size=S_mc, random_state=rng))
+u_pr = rng.uniform(size=S_mc)
+b_nu = nu_hi - nu_lo
+nu_pr = nu_lo - nu_mean * np.log(1.0 - u_pr * (1.0 - np.exp(-b_nu / nu_mean)))
+
+exact_var = delta_0 / (alpha_0 - 1.0)
+exact_nu = nu_lo + nu_mean - b_nu * np.exp(-b_nu / nu_mean) / (1 - np.exp(-b_nu / nu_mean))
+
+for lab, draws, exact in [("E[sigma^2]", sig_pr ** 2, exact_var),
+                          ("E[nu]      ", nu_pr, exact_nu)]:
+    est = draws.mean()
+    mcse = draws.std(ddof=1) / np.sqrt(S_mc)
+    print(f"prior {lab}  exact {exact:10.6f}   MC {est:10.6f}   "
+          f"MCSE {mcse:.6f}   |error|/MCSE {abs(est - exact) / mcse:.2f}")
+
+run_est = np.cumsum(nu_pr) / np.arange(1, S_mc + 1)
+s_axis = np.arange(1, S_mc + 1)
+band = 1.96 * nu_pr.std(ddof=1) / np.sqrt(s_axis)
+
+fig, ax = plt.subplots()
+ax.plot(s_axis, run_est, lw=1, color="steelblue", label="running MC estimate")
+ax.axhline(exact_nu, color="black", lw=1, ls=":", label="exact prior mean")
+ax.fill_between(s_axis, exact_nu - band, exact_nu + band, alpha=0.2,
+                label=r"exact $\pm\,1.96\times$MCSE")
+ax.set_xscale("log")
+ax.set_xlabel("number of draws  S (log scale)"); ax.set_ylabel(r"estimate of $E[\nu]$")
+ax.set_ylim(exact_nu - 2, exact_nu + 2)
+ax.legend(); ax.set_title(r"Monte Carlo error shrinks like $1/\sqrt{S}$")
+plt.tight_layout(); plt.show()
+```
+
+Both estimates sit within two Monte Carlo standard errors of the exact value, which is what
+an unbiased estimator with a correctly computed standard error should do. That standard
+error says nothing about the prior, which is fixed; it says how far this particular average
+of $20{,}000$ draws might be from the number the draws estimate. The band in the figure
+narrows steadily and the running average stays inside it without ever settling on the exact
+value, which is Result R-3.2 made concrete. Note how slow the narrowing is on the
+logarithmic axis: each factor of ten in $S$ buys a factor of only about three in accuracy.
+
+### A Normal proposal, and why it fails
+
+For the posterior the natural first attempt at a proposal is a Normal centred at the mode
+with covariance taken from the curvature of the log kernel there, the Laplace approximation,
+inflated a little for safety.
 
 ```{python}
 neg_log_kernel = lambda t: -log_kernel(t[0], t[1], t[2])[0]
@@ -555,72 +759,21 @@ print(f"ESS = {ess_n:.0f} out of {S_is} ({100*ess_n/S_is:.1f}%), "
 The estimates for $\mu$ and $\sigma$ are excellent, agreeing with the grid to within a few
 parts in ten thousand. The estimate for $\nu$ is not: it comes out at $8.42$ against the
 grid value of $8.60$, an error of two percent that no amount of staring at the point
-estimate would reveal. The effective sample size, defined next, explains why, and so does the fact
-that thirteen percent of the Normal proposal's draws land outside the prior support, at
-negative $\sigma$ or at $\nu$ below $2$, and are wasted outright.
+estimate would reveal. The effective sample size of Result R-3.3 explains why. It is about
+eight percent of the draws, and the diagnosis follows from the shape of the posterior: the
+marginal for $\nu$ is right-skewed with a long tail towards thirty, while a Normal
+proposal's tail dies like $e^{-x^2}$. In the region $\nu \in (15, 40)$, where the posterior
+still has real mass, the proposal has almost none, so the few draws that land there carry
+very large weights, and a right tail represented by a handful of heavy points is a right
+tail estimated badly. Thirteen percent of the proposal's draws land outside the prior
+support altogether, at negative $\sigma$ or at $\nu$ below $2$, and are wasted outright.
 
-## Result: weight variance and the effective sample size
-
-::: {.callout-important}
-## Result: why uneven weights inflate the variance, and what ESS measures
-
-For the unnormalised estimator, the second moment of a single weighted term is
-
-$$
-\mathbb{E}_q\!\big[\{g(\theta) w(\theta)\}^2\big]
-= \int g(\theta)^2 \frac{p(\theta)^2}{q(\theta)^2}\, q(\theta)\, d\theta
-= \mathbb{E}_p\!\big[g(\theta)^2\, w(\theta)\big],
-$$
-
-so the variance of the importance sampling estimator is inflated exactly where
-$w(\theta)$ is large and $g(\theta)^2 p(\theta)$ is not negligible. If $q$ has lighter
-tails than $p$ in some direction, then $w(\theta) \to \infty$ along it and the variance
-can be infinite even though the estimator remains consistent. The standard one-number
-diagnostic is the effective sample size
-
-$$
-\text{ESS} = \frac{\big(\sum_{s} \tilde w^{(s)}\big)^2}{\sum_{s} (\tilde w^{(s)})^2}
-= \frac{1}{\sum_{s} \big(w_{\text{norm}}^{(s)}\big)^2} \;\in\; [1, S],
-$$
-
-which equals $S$ when all normalised weights are $1/S$ and falls towards $1$ as a single
-weight comes to dominate. It is the number of independent draws from $p$ that the
-weighted sample is worth.
-:::
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-The second-moment identity is the same change of measure as before, applied to $g^2 w^2$
-rather than to $g w$: one factor of $q$ in the denominator cancels against the $q$ from
-the expectation, leaving $g^2 w$ integrated against $p$. Subtracting $\mu_g^2$ gives the
-variance of a single term, and dividing by $S$ gives the variance of the estimator.
-
-For the effective sample size, compare the variance of the weighted average with that of
-an unweighted average of $S_{\text{eff}}$ draws from $p$. Treating the weights as fixed,
-$\sum_s w_{\text{norm}}^{(s)} g(\theta^{(s)})$ has variance
-$\sigma_g^2 \sum_s (w_{\text{norm}}^{(s)})^2$, while the unweighted average has variance
-$\sigma_g^2/S_{\text{eff}}$. Equating them gives
-$S_{\text{eff}} = 1/\sum_s (w_{\text{norm}}^{(s)})^2$. The bounds follow from
-$\sum_s (w_{\text{norm}}^{(s)})^2 \ge 1/S$ by Cauchy-Schwarz, with equality when all
-weights are equal, and $\le 1$, with equality when one weight is one and the rest zero.
-:::
-
-Applied to the run above, the ESS is about eight percent of the draws, and the diagnosis
-follows from the shape of the posterior. The marginal for $\nu$ is right-skewed with a
-long tail towards thirty, while a Normal proposal's tail dies like $e^{-x^2}$. In the
-region $\nu \in (15, 40)$, where the posterior still has real mass, the proposal has
-almost none, so the few draws that land there carry very large weights, and a right tail
-represented by a handful of heavy points is a right tail estimated badly. That is
-precisely the $8.42$ against $8.60$.
+### A heavy-tailed proposal
 
 The repair is to give the proposal heavier tails than the target in every direction, built
-component by component: a Student-$t_5$ for $\mu$ and for $\sigma$, whose polynomial tails
-dominate the posterior's exponential ones, and for $\nu$ the prior itself. That last choice
-is not laziness. Because the likelihood is bounded above by some finite $\bar l$, the kernel
-obeys $\kappa(\theta) = l(\theta)\phi(\theta) \le \bar l\, \phi(\theta)$, so a proposal
-built from the prior can never have lighter tails than the posterior. It is safe by
-construction.
+component by component: a Student $t_5$ for $\mu$ and for $\sigma$, whose polynomial tails
+dominate the posterior's exponential ones, and for $\nu$ the prior itself, which by the
+boundedness argument of @sec-methodology can never have lighter tails than the posterior.
 
 ```{python}
 q_mu = stats.t(df=5, loc=0.00913, scale=0.0022)
@@ -664,102 +817,30 @@ fig.suptitle("Importance weights on the Student-t posterior")
 plt.tight_layout(); plt.show()
 ```
 
-The heavier-tailed proposal raises the effective sample size to about thirty percent of
-the draws and brings the estimate of $\nu$ to within four hundredths of the grid value.
-The figure shows why. Both weight distributions are right-skewed, which is normal and not
-by itself a problem; what differs is the extreme. The largest single normalised weight
-under the Normal proposal is roughly five hundred times the average weight $1/S$, while
-under the heavy-tailed proposal it is about eight times. A weight distribution whose
-maximum is far out relative to its bulk is the visual form of a small effective sample
-size, and it is the thing to look at before believing any importance sampling estimate.
+The heavier-tailed proposal raises the effective sample size to about thirty percent of the
+draws and brings the estimate of $\nu$ to within four hundredths of the grid value. The
+figure shows why. Both weight distributions are right-skewed, which is normal and not by
+itself a problem; what differs is the extreme. The largest single normalised weight under
+the Normal proposal is roughly five hundred times the average weight $1/S$, while under the
+heavy-tailed proposal it is about eight times. A weight distribution whose maximum is far
+out relative to its bulk is the visual form of a small effective sample size, and it is the
+thing to look at before believing any importance sampling estimate.
 
-Two habits keep such a run honest. Always plot the weights, and treat a single draw
-carrying a large share of the total as a failure of the proposal rather than an accident
-of the seed. And track the coefficient of variation of the raw weights,
-$\text{sd}(w)/\text{mean}(w)$, as $S$ grows: one that keeps climbing is the signature of
-an infinite weight variance and cannot be trusted however large $S$ is made. Note also
-that finding heavy enough tails in every direction took a few minutes of thought at
-$k = 3$ with a posterior we could plot, and that no fixed $q$ chosen in advance will do at
-the $k = 40$ of Lecture 6, which is why Lectures 4 and 5 exist.
+Two habits keep such a run honest. Always plot the weights, and treat a single draw carrying
+a large share of the total as a failure of the proposal rather than an accident of the seed.
+And track the coefficient of variation of the raw weights, $\text{sd}(w)/\text{mean}(w)$, as
+$S$ grows: one that keeps climbing is the signature of an infinite weight variance and cannot
+be trusted however large $S$ is made.
 
-## Result: rejection sampling
+### Exact draws, and what they cost
 
-Importance sampling returns weighted points. Rejection sampling returns actual draws from
-the posterior, by discarding proposals geometrically rather than reweighting them.
-
-::: {.callout-important}
-## Result: an accepted draw is an exact draw from the target
-
-Let $\kappa$ be a kernel of the target with $K = \int \kappa(\theta)\, d\theta < \infty$
-and target density $p = \kappa/K$. Let $q$ be a density and $M$ a constant with
-
-$$
-\kappa(\theta) \le M\, q(\theta) \qquad \text{for all } \theta .
-$$
-
-Repeat: draw $\tilde\theta \sim q$ and $u \sim \text{Uniform}(0,1)$ independently, and
-accept $\theta = \tilde\theta$ if
-
-$$
-u \le \frac{\kappa(\tilde\theta)}{M\, q(\tilde\theta)} ,
-$$
-
-otherwise discard and start again. Then every accepted $\theta$ is an exact draw from
-$p$, accepted draws are mutually independent, and the acceptance probability at any
-single trial is
-
-$$
-\Pr(\text{accept}) = \frac{K}{M} .
-$$
-
-No reweighting of accepted draws is needed, and the expected number of proposals per
-accepted draw is $M/K$.
-:::
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-Take the joint density of proposing $\tilde\theta$ and accepting it. The proposal has
-density $q(\theta)$, and given $\tilde\theta = \theta$ the acceptance event has
-probability $\kappa(\theta)/\{M q(\theta)\}$ because $u$ is uniform on $(0,1)$ and the
-envelope condition guarantees the ratio lies in $[0,1]$. Hence
-
-$$
-\Pr(\text{propose near }\theta \text{ and accept})
-= q(\theta)\, \frac{\kappa(\theta)}{M q(\theta)} = \frac{\kappa(\theta)}{M} .
-$$
-
-Integrating over $\theta$ gives the unconditional acceptance probability
-$\int \kappa(\theta)\, d\theta / M = K/M$. Dividing the joint density by that
-probability gives the density of an accepted draw,
-
-$$
-p(\theta \mid \text{accept}) = \frac{\kappa(\theta)/M}{K/M}
-= \frac{\kappa(\theta)}{K} = p(\theta),
-$$
-
-which is the target exactly, with the unknown constant $K$ cancelling. Independence of
-successive accepted draws follows because the trials are independent and the accept
-decision depends only on the current trial.
-
-Geometrically the same argument reads as an area statement. The first two steps generate a
-point uniformly over the region under the envelope,
-$\{(\theta, v) : 0 \le v \le M q(\theta)\}$, since $\theta$ comes from $q$ and
-$v = u M q(\theta)$ is uniform on $[0, M q(\theta)]$ given $\theta$. The third keeps the
-points that also fall under $\kappa$, a sub-region of the envelope. A point uniform on a
-region and restricted to a sub-region is uniform on that sub-region, and the marginal of
-$\theta$ under a uniform distribution on the area beneath a curve is the density
-proportional to that curve. The acceptance probability is the ratio of the two areas, and
-when $q = p$ exactly $M = 1$ and everything is accepted.
-:::
-
-The envelope constant is the whole practical problem. We need an $M \ge
-\sup_\theta \kappa(\theta)/q(\theta)$, and we reuse the heavy-tailed proposal, whose
-tails dominate the target's in every direction so that the supremum is finite. We locate
-it numerically, over the evaluation grid and over a large sample from $q$, which is
-reliable here only because $k = 3$ and the posterior is unimodal. In higher dimensions a
-numerically located envelope is a trap, and this is one reason rejection sampling is
-rarely used on large models.
+The envelope constant is the whole practical problem for rejection sampling. We need an
+$M \ge \sup_\theta \kappa(\theta)/q(\theta)$, and we reuse the heavy-tailed proposal, whose
+tails dominate the target's in every direction so that the supremum is finite. We locate it
+numerically, over the evaluation grid of @sec-problem and over a large sample from $q$,
+which is reliable here only because $k = 3$ and the posterior is unimodal. In higher
+dimensions a numerically located envelope is a trap, and this is one reason rejection
+sampling is rarely used on large models.
 
 ```{python}
 grid_pts = np.column_stack([MU.ravel(), SG.ravel(), NU.ravel()])
@@ -801,23 +882,25 @@ The observed acceptance rate agrees with the theoretical $K/M$ to within two
 ten-thousandths, a check on both the envelope and the arithmetic, and the three posterior
 means land within about one Monte Carlo standard error of the grid values. We now have
 $20{,}000$ independent, unweighted draws from the posterior, usable downstream exactly like
-draws from a named distribution. The price is the acceptance rate, roughly ten proposals
-per draw kept, which is tolerable here. In $k$ dimensions the volume between a safe
-envelope and the target typically makes $M/K$ grow exponentially in $k$, so rejection
-sampling suffers from the same curse of dimensionality as the grid, just with a slower
-fuse.
+draws from a named distribution, and they answer the strategist's other question directly:
+the posterior probability that the degrees of freedom are below ten, which is to say that
+the tails are genuinely thick, is $0.7567$ with a standard error of $0.0030$. The price is
+the acceptance rate, roughly ten proposals per draw kept, which is tolerable here. In $k$
+dimensions the volume between a safe envelope and the target typically makes $M/K$ grow
+exponentially in $k$, so rejection sampling suffers from the same curse of dimensionality as
+the grid of Result R-3.1, just with a slower fuse.
 
-One special case deserves naming because it recurs throughout the course. Suppose the
-target is an unrestricted posterior with kernel $\kappa(\theta)$ truncated to a region
-$\Theta_r$, and the unrestricted posterior is already easy to simulate. Then it serves as
-its own proposal with envelope constant exactly $M = 1$, since
-$\kappa(\theta)\mathbf{1}\{\theta \in \Theta_r\} \le 1 \cdot \kappa(\theta)$ holds
-trivially, and the algorithm collapses to drawing from the unrestricted posterior and
-discarding whatever falls outside $\Theta_r$. The acceptance rate is then
-$\Pr(\theta \in \Theta_r \mid y)$, usually a quantity of interest in its own right. This
-is how sign restrictions are imposed in the structural vector autoregressions of Lecture
-7, and the curse of dimensionality returns in a new guise: restricting several components
-at once shrinks the accepted region multiplicatively.
+Two features of that printout are worth reading carefully, because they are the reason
+this method is the reference for the rest of the course. The first is that the acceptance
+rate is a testable prediction and not a diagnostic to be interpreted: Result R-3.3's
+companion statement says it must equal $K/M$, both sides were computed by different
+routes, one from a grid quadrature of the kernel and one from a Monte Carlo experiment,
+and they agree to two ten-thousandths. A discrepancy there would have meant a violated
+envelope condition and silently wrong draws, which is a failure mode with no other
+warning sign. The second is that the accepted draws carry no weights at all, so the
+standard error attached to each mean is the plain $\hat\sigma_g/\sqrt{S}$ of Result R-3.2
+rather than something inflated by weight variability, and the ratios of error to standard
+error, $0.51$, $0.10$ and $0.94$, are the sizes one expects from an unbiased estimator.
 
 ```{python}
 fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.8))
@@ -836,23 +919,12 @@ plt.tight_layout(); plt.show()
 
 The left panel confirms that the accepted draws reproduce the grid marginal for $\nu$ with
 no weight appearing anywhere in the calculation. The right panel explains the importance
-sampling failure diagnosed earlier: $\sigma$ and $\nu$ are strongly positively dependent
-and the cloud curves upwards, because a model with thicker tails needs a smaller scale to
-fit the same data. An elliptical Normal proposal cannot follow a curved ridge, so it
-wastes draws on one side and starves the other.
+sampling failure diagnosed two subsections ago: $\sigma$ and $\nu$ are strongly positively
+dependent and the cloud curves upwards, because a model with thicker tails needs a smaller
+scale to fit the same data. An elliptical Normal proposal cannot follow a curved ridge, so
+it wastes draws on one side and starves the other.
 
-## Sampling importance resampling
-
-Importance sampling gives weighted points and rejection sampling gives unweighted points
-at a cost that grows quickly with dimension. Sampling importance resampling, or SIR, is
-the cheap compromise. Having drawn $\theta^{(1)}, \dots, \theta^{(S)} \sim q$ with
-normalised weights $w_{\text{norm}}^{(s)}$, draw $N \le S$ indices from $\{1, \dots, S\}$
-with replacement using the weights as selection probabilities and keep the corresponding
-$\theta$ values. A heavily weighted draw is copied more often and a negligible one is
-unlikely to appear, so the resampled set is approximately an unweighted sample from $p$.
-The approximation is exact only as $S \to \infty$ with $N$ fixed, which is the essential
-difference from rejection sampling, but it needs no envelope constant and wastes no
-draws.
+### Resampling the weighted sample
 
 ```{python}
 idx = rng.choice(S_is, size=N_want, replace=True, p=w_n)
@@ -868,29 +940,40 @@ they came from: $\mu$ and $\sigma$ are right and $\nu$ is still too low, because
 cannot manufacture information the proposal never collected. The number of distinct source
 draws is the practical warning signal: the $20{,}000$ resampled points are built from only
 $10{,}350$ distinct values, and with a badly degenerate weight distribution the same recipe
-would copy a handful of dominant points over and over. SIR is also the bridge to the next
-two lectures, where instead of reweighting a fixed proposal once the sampler moves its own
-proposal as it goes.
+would copy a handful of dominant points over and over.
 
-## Application: one-month value at risk
+Put side by side, the four runs say the same thing about this posterior from four
+directions. On $\mu$ and $\sigma$ every method is right to four significant figures,
+because those two coordinates are nearly Gaussian and any reasonable proposal covers
+them. On $\nu$ they separate: the grid says $8.598$, rejection sampling $8.572$ with a
+standard error of $0.027$, the heavy-tailed importance sampler $8.558$, and the Normal
+proposal and its resampled version $8.422$ and $8.460$. The ranking is not a ranking of
+the algorithms in the abstract, since importance sampling with a good proposal beat
+importance sampling with a bad one by more than rejection sampling beat either. It is a
+ranking of how well each construction covered the right tail of a skewed marginal, which
+is the only place the three methods could disagree. The lesson to carry forward is that
+the failure was invisible in the point estimates of the other two coordinates and visible
+in the effective sample size before any comparison with the grid was made.
 
-We close by putting the finished posterior to the use that motivated the chapter. The risk
-officer wants the loss exceeded with probability one percent next month, and the correct
-object is the posterior predictive distribution, which integrates over parameter
-uncertainty,
+## Discussion: value at risk, and where a fixed proposal fails {#sec-discussion}
+
+The desk can now be answered. The equity premium is $0.91\%$ a month, or $10.95\%$ a year,
+and the tails are thick with probability $0.76$. The remaining question was the loss exceeded
+with probability one percent next month, and the correct object for it is the posterior
+predictive distribution, which integrates over parameter uncertainty,
 
 $$
 f(r_{n+1} \mid r) = \int f(r_{n+1} \mid \theta)\, \phi(\theta \mid r)\, d\theta ,
 $$
 
-and is approximated by drawing one future return per posterior draw: for each accepted
+approximated by drawing one future return per posterior draw: for each accepted
 $\theta^{(s)} = (\mu^{(s)}, \sigma^{(s)}, \nu^{(s)})$ take
 $r_{n+1}^{(s)} = \mu^{(s)} + \sigma^{(s)} \varepsilon^{(s)}$ with
 $\varepsilon^{(s)} \sim t_{\nu^{(s)}}(0,1)$. Value at risk is the empirical quantile of
-those draws, which is Monte Carlo integration again with
-$g(\theta) = \mathbf{1}\{r_{n+1} < c\}$ and the threshold solved for. We compare three
-conventions: this predictive quantile, the plug-in Student-$t$ quantile that fixes
-$\theta$ at its posterior mean, and the Normal convention a desk would use by default.
+those draws, which is Result R-3.2 again with $g(\theta) = \mathbf{1}\{r_{n+1} < c\}$ and
+the threshold solved for. We compare three conventions: this predictive quantile, the
+plug-in Student $t$ quantile that fixes $\theta$ at its posterior mean, and the Normal
+convention of @sec-motivation.
 
 ```{python}
 eps = stats.t(df=post[:, 2]).rvs(size=N_want, random_state=rng)
@@ -910,6 +993,8 @@ var_table = pd.DataFrame(rows).set_index("level")
 print((100 * var_table).round(3).to_string() + "   (percent of notional)")
 print(f"\nexpected shortfall at 99%: {-r_pred[r_pred < np.quantile(r_pred, 0.01)].mean():.4f}")
 print(f"predictive sd {r_pred.std(ddof=1):.4f} vs sample sd {r.std(ddof=1):.4f}")
+print(f"posterior of nu: mean {nu_b:.2f}, 2.5th percentile "
+      f"{np.percentile(post[:, 2], 2.5):.2f}, 97.5th {np.percentile(post[:, 2], 97.5):.2f}")
 
 fig, ax = plt.subplots()
 ax.hist(r_pred, bins=120, density=True, range=(-0.30, 0.25), alpha=0.55,
@@ -924,78 +1009,105 @@ ax.legend(fontsize=9); ax.set_title("Predictive distribution and value at risk")
 plt.tight_layout(); plt.show()
 ```
 
-At the ninety-nine percent level the predictive value at risk is $10.35\%$ of notional,
-the plug-in Student-$t$ figure is $9.85\%$ and the Normal figure is $9.47\%$. The Normal
+At the ninety-nine percent level the predictive value at risk is $10.35\%$ of notional, the
+plug-in Student $t$ figure is $9.85\%$ and the Normal figure is $9.47\%$. The Normal
 convention gives the smallest number because it has no tail to speak of, and the $0.87$
-percentage point gap to the predictive answer is the cost of pretending the four worst
-months in the sample were not there. The plug-in Student-$t$ sits between: it has the fat
-tail, but it fixes $\nu$ at its posterior mean of $8.57$ and ignores the posterior's own
-statement that $\nu$ could be as low as four, the 2.5th percentile of its marginal, which
-is where the tail is heaviest. Averaging over the posterior of $\nu$ rather than fixing it
-adds the remaining half a percentage point. The gap to the Normal convention grows
-monotonically with the level, from $-0.23$ points at ninety-five percent to $0.87$ at
-ninety-nine and $1.43$ at ninety-nine and a half.
+percentage point gap to the predictive answer is the cost of pretending the four worst months
+of @sec-motivation were not there. The plug-in Student $t$ sits between: it has the fat tail,
+but it fixes $\nu$ at its posterior mean of $8.57$ and ignores the posterior's own statement
+that $\nu$ plausibly runs from about four to about eighteen, and it is the low end, where
+the tail is heaviest, that a value at risk is sensitive to. Averaging over the posterior of
+$\nu$ rather than fixing it adds the remaining half a percentage point. The gap to the
+Normal convention, by contrast, grows monotonically with the level, from minus $0.23$
+points at ninety-five percent to $0.87$ at ninety-nine and $1.43$ at ninety-nine and a
+half, which is what it means to say that the error of a Normal model lives in the tail and
+not in the middle. On a one hundred million euro book the
+difference between the plug-in and the predictive number at the ninety-nine percent level
+is about half a million euros of capital, which is the practical content of the phrase
+"integrating over parameter uncertainty".
 
-Two qualifications belong with the number. The model assumes returns are independent and
-identically distributed over thirty-six years, which the volatility clustering in the
-first figure plainly contradicts, and Lecture 12 replaces exactly this specification with
-stochastic volatility. And the predictive distribution carries parameter uncertainty, not
-model uncertainty, which is the subject of Lectures 9 and 11.
+Two checks say the simulation can be trusted. The predictive standard deviation is $0.0441$
+against a realised $0.0439$, so the fitted model reproduces the spread of the data it was
+given rather than inventing tails; and every estimate in @sec-empirical was compared against
+the $393{,}216$-point grid of @sec-problem, with rejection sampling landing within one Monte
+Carlo standard error and the heavy-tailed importance sampler within four hundredths on the
+hardest coordinate. Two qualifications belong with the number all the same. The model assumes
+returns are independent and identically distributed over thirty-six years, which the
+volatility clustering in the first panel of @sec-data plainly contradicts, and Lecture 12
+replaces exactly this specification with stochastic volatility. And the predictive
+distribution carries parameter uncertainty, not model uncertainty, which is the subject of
+Lectures 9 and 11.
 
-## Takeaways
+The binding limitation is elsewhere, and it is about the machinery rather than the model.
+Everything here rested on choosing one fixed proposal $q$ in advance and using it for every
+draw. Finding tails heavy enough in every direction took a few minutes of thought at $k = 3$
+with a posterior we could plot and a grid to check against, and even then the first attempt
+lost ninety-two percent of its draws to a curved ridge that an ellipse could not follow. That
+work does not scale. As the parameter count grows the region where the posterior has mass
+becomes a vanishing fraction of anything a fixed $q$ covers, the weights concentrate on a
+handful of draws, and the effective sample size collapses towards one; at the $k = 40$ of
+Lecture 6 no proposal chosen in advance is usable at all. Lecture 4 is the repair: instead of
+one fixed proposal it writes the Student $t$ as a Normal scale mixture,
+$r_t \mid \mu, \sigma, \nu, w_t \sim \mathcal{N}(\mu, \sigma^2/w_t)$ with
+$w_t \sim \text{Gamma}(\nu/2, \nu/2)$, which makes every full conditional recognisable, and
+draws each block from its own conditional so that the proposal moves with the chain. Lecture
+5 attacks this same posterior again without the latent variables and closes with one table of
+effective sample size per second for every method in Lectures 3 to 5 on this identical
+problem.
 
-Posterior summaries are ratios of kernel integrals, and outside conjugate models those
-integrals have no closed form, with grid quadrature failing exponentially fast in the
-number of parameters. Monte Carlo integration replaces an integral by an average of
-draws, unbiased by linearity of expectation, consistent by the law of large numbers, and
-carrying an error of order $1/\sqrt{S}$ regardless of dimension. When the target cannot be
-sampled, importance sampling reweights draws from a proposal by the exact ratio of target
-to proposal density, and its self-normalised version trades an $O(1/S)$ bias for the
-ability to work with an unnormalised kernel; its reliability rests on the proposal having
-heavier tails than the target, which the effective sample size measures in one number. On
-this posterior a Laplace-based Normal proposal returned an effective sample size of about
-eight percent of the draws and an estimate of $\nu$ wrong by two percent, while a proposal
-built with deliberately heavy tails reached about thirty percent and got $\nu$ right.
-Rejection sampling takes the other route, accepting or discarding proposals geometrically
-so that survivors are exact draws from the target, at a known acceptance rate $K/M$ that
-matched the observed rate to three decimal places here and that collapses exponentially in
-higher dimensions. Sampling importance resampling converts a weighted sample into an
-approximately unweighted one and inherits whatever the weights were worth.
+## Exercises
 
-Lecture 4 returns to this exact posterior and shows that writing the Student-$t$ as a
-Normal scale mixture, $r_t \mid \mu, \sigma, \nu, w_t \sim \mathcal{N}(\mu, \sigma^2/w_t)$
-with $w_t \sim \text{Gamma}(\nu/2, \nu/2)$, makes every full conditional recognisable and
-hands us a Gibbs sampler. Lecture 5 attacks it again without the latent variables and
-closes with one table of effective sample size per second for every method in Lectures 3
-to 5 on this identical problem.
+These are the chapter's practice questions; the [Week 3 exercise
+session](../exercise-sessions/03-monte-carlo-importance-sampling.qmd) works through them and
+adds the lab.
 
-## Reading these results in the sources' notation
+1. By hand. Derive the bias expansion of the self-normalised estimator in Result R-3.3 to
+   order $1/S$, stating where Jensen's inequality enters and why the unnormalised estimator
+   is exempt. Then show that for the special case $g \equiv 1$ the estimator is exactly one
+   for every $S$, and explain what that says about which functions $g$ the bias can hurt.
 
-The simulation literature uses different letters for the same objects, so it is worth
-bridging them once.
+2. Computational. Take the heavy-tailed proposal of @sec-empirical and compute the
+   coefficient of variation of the raw weights at $S = 10^3, 10^4, 10^5$ and $10^6$. Repeat
+   with the scale of the $\mu$ and $\sigma$ components of the proposal halved, so that its
+   tails are too light. Plot both paths and say which one shows the signature of an infinite
+   weight variance, then relate what you see to the effective sample sizes reported in the
+   chapter.
 
-| This course | Source (Bauwens, Lopes) | Relation |
-|---|---|---|
-| posterior kernel, `log_kernel` | kernel $\kappa(\theta \mid y)$ | identical object |
-| proposal density $q$, `q_logpdf` | importance function $\iota(\theta)$ | identical object |
-| weight $w(\theta) = \kappa(\theta)/q(\theta)$ | $w(\theta) = \kappa(\theta\mid y)/\iota(\theta)$ | identical |
-| envelope constant $M$ | $c \ge \sup_\theta \kappa(\theta)/\iota(\theta)$ | identical |
-| normalising constant $K(y)$ | marginal likelihood $f(y)$ | identical |
-| effective sample size | the weights' histogram and coefficient of variation | ESS summarises the same diagnostic in one number |
-| $\sigma^2 \sim \text{IG}(\alpha_0, \delta_0)$ | $h = 1/\sigma^2 \sim \text{Gamma}(\alpha_0, 1/\delta_0)$, or $\text{IG}_2(\nu_0, s_0)$ | $\nu_0 = 2\alpha_0$, $s_0 = 2\delta_0$ |
+3. On real data. Refit the model of @sec-problem to the size factor `smb` over the same
+   window, keeping the priors unchanged. Report the posterior mean of $\nu$ with its Monte
+   Carlo standard error, $\Pr(\nu < 10 \mid r)$, and the ninety-nine percent predictive value
+   at risk, and say in one paragraph whether the size factor needs fat tails as badly as the
+   market does.
 
-: Notation bridge {.striped}
+Exercise 1 is the one to attempt before the session, because Lecture 9 reuses the weight
+average as a marginal likelihood estimator and the same expansion controls its error.
+Exercises 2 and 3 are written for the session itself and reuse the chapter's `log_kernel` and
+`q_rvs` with the data line changed.
 
-## Reading guide and sources
+## Reading and references
 
-Supplied UPM Class 3 for Monte Carlo, importance sampling and rejection sampling.
-Geweke (2005), Sections 4.2 to 4.4, and Greenberg (2008), Chapter 5, develop the
-integration and simulation arguments. The Student-$t$ location-scale model with unknown
-degrees of freedom is treated in Geweke (1993). The UPM materials are by Audronė
-Virbickaitė and Martina Zaharieva, adapted to this course's notation and weekly
+The three methods of @sec-methodology follow the supplied UPM Class 3 on Monte Carlo,
+importance sampling and rejection sampling, whose ordering, general statement first and one
+running target afterwards, this chapter keeps. Geweke (2005), Sections 4.2 to 4.4, and
+Greenberg (2008), Chapter 5, develop the integration and simulation arguments, and Greenberg
+is the source for the bias expansion in the collapsed derivation of Result R-3.3. The
+Student-$t$ location-scale model with unknown degrees of freedom, the target of @sec-problem,
+is treated in Geweke (1993), which is also where the scale-mixture representation that
+Lecture 4 exploits is set out. Robert and Casella give the rejection sampling argument in the
+form used here, including the geometric reading in the collapsed derivation. The UPM materials
+are by Audronė Virbickaitė and Martina Zaharieva, adapted to this course's notation and weekly
 sequence.
 
-## References
+One notational bridge is worth carrying to those sources. What this chapter calls the kernel
+$\kappa(\theta \mid y)$ and the proposal $q$ appear there as $\kappa(\theta \mid y)$ and the
+importance function $\iota(\theta)$, the envelope constant $M$ as $c$, and the normalising
+constant $K(y)$ as the marginal likelihood $f(y)$; the inverse-Gamma prior on $\sigma^2$
+appears as a Gamma prior on the precision $h = 1/\sigma^2$ with shape $\alpha_0$ and rate
+$\delta_0$. The full translation table is in the week's exercise session.
 
-Geweke (1989). Geweke (1993), Bayesian treatment of the independent Student-$t$ linear
-model. Robert and Casella, *Monte Carlo Statistical Methods*.
+The explanations and exercises are adapted to this course's notation and weekly structure;
+consult the cited originals for the full treatments.
+
+Geweke (1989). Geweke (1993), Bayesian treatment of the independent Student-$t$ linear model.
+Robert and Casella, *Monte Carlo Statistical Methods*, ch. 2-3. Geweke, *Contemporary Bayesian
+Econometrics and Statistics* (2005), ch. 4.
