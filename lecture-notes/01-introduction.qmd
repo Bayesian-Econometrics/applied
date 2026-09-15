@@ -3,7 +3,7 @@ title: "Introduction: the Bayesian paradigm"
 subtitle: "Lecture 1"
 ---
 
-::: {.callout-important}
+::: {.callout-tip icon=false}
 ## Key takeaways {.unnumbered}
 
 - **Bayesian inference describes what we know about an unknown quantity through a probability distribution.** The quantity need not change randomly for our knowledge of it to be uncertain.
@@ -44,6 +44,32 @@ reasons behind them—previous evidence, scientific knowledge or explicit modell
 judgements—and we should examine whether reasonable alternatives change the answer.
 Two analysts with different information can start differently while applying the
 same updating rule.
+
+### How does this differ from frequentist inference?
+
+Both approaches start with a model of how observations arise and aim to learn
+about unknown parameters. The distinction is **which uncertainty their
+probability statements describe**. A fixed but unknown parameter is compatible
+with both approaches.
+
+| Question | Frequentist approach | Bayesian approach |
+|:--|:--|:--|
+| What varies in the inference calculation? | Hypothetical samples generated at a fixed parameter value. | Plausible parameter values, conditional on the observed sample and prior. |
+| How do we estimate the parameter? | For example, maximise the likelihood; study the estimator over repeated samples. | Form the posterior; summarise it with a mean, median or other decision rule. |
+| What does a 95% interval mean? | The interval procedure covers the fixed parameter in 95% of repetitions, or at least 95% for some discrete procedures. | The realised interval contains 95% of posterior probability, given the data, model and prior. |
+| Where do assumptions enter? | The sampling model and the chosen inferential procedure. | The sampling model and the prior. |
+
+For coin tosses, a frequentist might ask: “If the heads probability were 0.5,
+how unusual would this sample be?” A Bayesian might ask: “After this sample,
+how plausible are different heads probabilities?” A p-value for the first
+question is not a posterior probability that the coin is fair. We will make
+the interval distinction visible after deriving our first posterior.
+
+Neither approach removes modelling judgement. Frequentist methods can provide
+predictions and regularised estimates; Bayesian methods also need checks of
+model fit and predictive performance. Our reason for studying Bayesian inference
+is its coherent way to carry uncertainty from estimation into prediction and
+decisions.
 
 For now, we will learn four objects:
 
@@ -157,30 +183,30 @@ obtain $4/7$ for the fair coin and $3/7$ for the other coin.
 
 ### Bayes' theorem comes from writing a joint probability twice
 
-For an event $A$ and observed evidence $D$, conditional probability gives
+For events $A$ and $B$, conditional probability gives
 
 $$
-P(A,D)=P(D\mid A)P(A)=P(A\mid D)P(D).
+P(A\cap B)=P(B\mid A)P(A)=P(A\mid B)P(B).
 $$
 
-Dividing by $P(D)>0$ yields Bayes' theorem:
+Dividing by $P(B)>0$ yields Bayes' theorem:
 
 $$
-P(A\mid D)=\frac{P(D\mid A)P(A)}{P(D)}.
+P(A\mid B)=\frac{P(B\mid A)P(A)}{P(B)}.
 $$
 
 If $A_1,\ldots,A_J$ are mutually exclusive and exhaustive possibilities, the
 law of total probability supplies the denominator:
 
-$$P(D)=\sum_{j=1}^J P(D\mid A_j)P(A_j).$$
+$$P(B)=\sum_{j=1}^J P(B\mid A_j)P(A_j).$$
 
-The two-coin table calculated exactly these terms. The rule itself adds no
+In the two-coin example, $A$ can mean “the selected coin is fair” and $B$ means “the observed toss is heads”. The two-coin table calculated exactly these terms. The rule itself adds no
 extra assumption about coins or economics. The model determines the probabilities
 that we put into it.
 
 ### From two possible values to an unknown parameter
 
-Let $\theta$ denote an unknown parameter and $y$ the observed sample. When
+Let $\theta$ denote an unknown parameter and $y=(y_1,\ldots,y_n)$ the observed sample. Lower-case $y$ denotes the values actually observed; upper-case $Y$ will denote a sample that could vary across repetitions. When
 $\theta$ is continuous, we describe it by a density rather than a probability
 assigned to each individual value. The same factorisation of the joint density gives
 
@@ -273,6 +299,40 @@ probabilities near one half while leaving substantial uncertainty. We choose it
 before using the twelve tosses. An application needs its own justification;
 we will examine sensitivity rather than treating this choice as compulsory.
 
+### What observations does a prior make plausible?
+
+A prior is easier to assess when translated into observable outcomes. Before
+seeing any tosses, imagine twelve tosses under each proposed prior. For a given
+$\theta$, the count is binomial; averaging those binomial probabilities over
+the prior gives the **prior predictive distribution**:
+
+$$P(S=s)=\int_0^1 P(S=s\mid\theta)p(\theta)\,d\theta.$$
+
+This is the same averaging idea used for the next toss in the two-coin example.
+The following plot evaluates it for three Beta priors. All have mean heads
+probability one half, but they imply different plausible counts.
+
+```{python}
+#| label: fig-prior-predictive
+#| fig-cap: "Equal prior means do not imply equal prior information. A concentrated prior around one half expects counts near six; a uniform prior over the probability gives equal prior predictive probability to every count from zero to twelve."
+#| code-fold: true
+prior_counts = np.arange(13)
+fig, axes = plt.subplots(1, 3, figsize=(10, 3.3), sharey=True)
+for ax, strength in zip(axes, [1, 2, 20]):
+    ax.bar(prior_counts, stats.betabinom.pmf(prior_counts, 12, strength, strength),
+           color=BLUE)
+    ax.set(title=f"Beta({strength},{strength}) prior", xlabel="Heads in twelve tosses",
+           xticks=[0, 3, 6, 9, 12])
+    ax.grid(axis="y", alpha=0.3)
+axes[0].set_ylabel("Prior predictive probability")
+plt.tight_layout()
+plt.show()
+```
+
+Ask whether these predicted outcomes make sense **before using the observations
+in the update**. This gives prior choice an interpretable consequence. We derive
+the corresponding predictive count formula below, after obtaining the posterior.
+
 ### Derive the posterior by collecting powers
 
 Multiply the likelihood and prior, dropping only factors independent of $\theta$:
@@ -362,9 +422,62 @@ The posterior also answers questions a point estimate leaves open:
 - **Remaining uncertainty:** the posterior variance is
   $(a+s)(b+n-s)/[(a+b+n)^2(a+b+n+1)]$.
 
-A frequentist confidence interval instead has a repeated-sampling coverage
-interpretation with the parameter fixed. Both approaches can support inference
-and prediction; the distinction here is what probability statements refer to.
+### Confidence and credible intervals: what does 95% refer to?
+
+Imagine fixing the true heads probability at $\theta_0=0.75$ and repeatedly
+collecting twelve tosses. Each sample produces a different confidence interval.
+The probability statement concerns this **procedure before the sample is drawn**:
+
+$$P_{\theta_0}\{L(Y)\leq\theta_0\leq U(Y)\}\geq 0.95.$$
+
+The subscript says that samples are generated at the fixed value $\theta_0$.
+The interval endpoints vary because they are functions of the random sample
+$Y$. Here we use exact binomial (Clopper–Pearson) intervals: discreteness makes
+their coverage at least, rather than exactly, 95%.
+
+```{python}
+#| label: fig-confidence-coverage
+#| fig-cap: "Repeated sampling moves the confidence interval, while the true heads probability stays fixed. Blue intervals cover the truth; brown intervals miss it. Sixty repetitions illustrate the mechanism, not an exact 95% empirical coverage guarantee."
+#| code-fold: true
+rng = np.random.default_rng(7)
+true_theta, sample_size = 0.75, 12
+successes = rng.binomial(sample_size, true_theta, size=60)
+lower = np.zeros(60)
+upper = np.ones(60)
+positive = successes > 0
+below_n = successes < sample_size
+lower[positive] = stats.beta.ppf(0.025, successes[positive],
+                                sample_size - successes[positive] + 1)
+upper[below_n] = stats.beta.ppf(0.975, successes[below_n] + 1,
+                               sample_size - successes[below_n])
+covers = (lower <= true_theta) & (true_theta <= upper)
+fig, ax = plt.subplots(figsize=(7, 5))
+ax.hlines(np.arange(60), lower, upper, color=np.where(covers, BLUE, BROWN), lw=1.5)
+ax.axvline(true_theta, color=GREY, linestyle="--")
+ax.set(xlabel="Heads probability", ylabel="Repeated sample", xlim=(0, 1))
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+Once we observe a particular sample $y$, its confidence interval is fixed too:
+it either covers $\theta_0$ or it does not. The coverage guarantee does not
+assign a probability distribution to $\theta_0$ conditional on that sample.
+
+Our Bayesian calculation instead holds the observed twelve tosses fixed and
+uses the posterior distribution over $\theta$. Its equal-tailed interval satisfies
+
+$$P\{q_{0.025}(y)\leq\theta\leq q_{0.975}(y)\mid y\}=0.95.$$
+
+Here $q_r(y)$ is the posterior quantile with probability $r$ below it. The shaded
+area in the posterior plot is precisely this probability. Its interpretation is
+conditional on the stated prior and model; it does not automatically guarantee
+95% frequentist coverage for every fixed parameter value. Conversely, a
+confidence interval's coverage does not make it a posterior interval.
+
+**The distinction is about interpretation, not necessarily numerical size.**
+With substantial data and a weak prior, the two intervals can be very similar.
+With a short sample or an informative prior, they can differ noticeably.
 
 **Check your understanding.** If we observed 90 heads in 120 tosses, the sample
 frequency would still be 0.75. Would the posterior mean be closer to 0.75? Would
@@ -445,6 +558,32 @@ These are exactly the parameters obtained from updating once with the combined
 sample. We retain what we learned, then incorporate new evidence. This argument
 uses the same common probability and conditional-independence assumptions;
 it does not license counting the same observations twice.
+
+The next plot makes accumulation of information visible. To isolate sample
+size, these illustrative samples all have exactly three quarters heads. They
+can be viewed as nested samples with 9, 30 and 90 heads in 12, 40 and 120 tosses.
+The prior stays $\operatorname{Beta}(2,2)$ throughout.
+
+```{python}
+#| label: fig-posterior-concentration
+#| fig-cap: "With the same observed frequency and a fixed prior, larger samples concentrate the posterior and move its mean toward 0.75. Actual sequences can also move the observed frequency, so successive posteriors need not narrow monotonically."
+#| code-fold: true
+fig, axes = plt.subplots(1, 3, figsize=(10, 3.3), sharex=True, sharey=True)
+for ax, n_obs, n_heads in zip(axes, [12, 40, 120], [9, 30, 90]):
+    updated = stats.beta(2 + n_heads, 2 + n_obs - n_heads)
+    ax.plot(theta, updated.pdf(theta), color=BLUE)
+    ax.plot(theta, stats.beta.pdf(theta, 2, 2), color=GREY, linestyle=":")
+    ax.axvline(0.75, color=BROWN, linestyle="--", lw=1)
+    ax.set(title=f"{n_heads} heads in {n_obs} tosses", xlabel="Heads probability")
+    ax.grid(axis="y", alpha=0.3)
+axes[0].set_ylabel("Density")
+plt.tight_layout()
+plt.show()
+```
+
+The dotted curve is the original prior; the dashed line is the observed
+frequency. Posterior concentration means that fewer parameter values remain
+plausible. It does not make the next toss deterministic.
 
 ## Economic application and interpretation {#sec-empirical}
 
@@ -646,19 +785,9 @@ choose a prior, and identify the posterior by collecting its terms.
 
 ### Reading guide
 
-The exposition follows **Frühwirth-Schnatter's Wien course**, *Bayesian Computing*,
-Part I, PDF pp. 7–11 and 16–18: specify how observations arise, update uncertainty
-about unknowns, and use the posterior for estimation and probability statements.
-Those slides illustrate conjugacy with counts; we use the Bernoulli model to
-match this course's first exercise.
+- **Koop (2003), *Bayesian Econometrics*, Chapter 1:** the basic Bayesian framework and the role of the posterior in inference.
+- **Zellner (1971), *An Introduction to Bayesian Inference in Econometrics*:** textbook background on Bayesian probability and econometric inference.
 
-**Koop's supplied ECNM11060 Lecture 1**, PDF pp. 3–8 and 16–26, provides the main
-Bernoulli–Beta sequence: likelihood construction, prior elicitation, posterior
-updating and prediction. The two-coin warm-up and market-return application here
-are adapted teaching examples. Page numbers refer to physical PDF pages.
-
-For the assigned reading, use Koop (2003), *Bayesian Econometrics*, Chapter 1,
-and Zellner (1971), *An Introduction to Bayesian Inference in Econometrics*.
 The empirical series comes from the
 [Kenneth French Data Library](https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html),
 using the documented course snapshot rather than a live download during the lecture.
