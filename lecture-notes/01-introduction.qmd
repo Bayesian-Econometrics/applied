@@ -1,6 +1,17 @@
 ---
 title: "Introduction: the Bayesian paradigm"
 subtitle: "Lecture 1"
+format:
+  html:
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img, .cell figure img, figure img {
+          width: 100%;
+          max-width: 100%;
+          height: auto;
+        }
+        </style>
 ---
 
 ::: {.callout-tip icon=false}
@@ -90,27 +101,28 @@ computes the same kind of posterior on a grid.
 ### Two coins and one observation
 
 A box contains two coins. One produces heads with probability $1/2$; the other
-produces heads with probability $3/4$. We select one coin at random, without
+produces heads with probability $4/5$. We select one coin at random, without
 seeing which, and keep that coin. Before tossing it, each possibility has prior
 probability $1/2$.
 
 Now we observe a head. Which coin is more plausible?
 
-Imagine repeating the selection-and-toss experiment 800 times. About 400
-experiments would select each coin. The fair coin would produce about 200 heads;
-the other coin would produce about 300. Among experiments that produced a head,
-roughly 300 out of 500 selected the second coin. That is the posterior probability
-$300/500=0.6$.
+Imagine 100 selection-and-toss trials. In expectation, 50 select each coin.
+Of the 50 fair-coin trials, 25 produce heads; of the 50 biased-coin trials,
+40 produce heads. Among the 65 head outcomes, 40 come from the biased coin.
+Its posterior probability is therefore $40/65=8/13\approx0.615$.
+These are expected counts to make the probabilities tangible, not a claim
+that a random set of 100 trials must produce exactly these counts.
 
 The same reasoning can be written without imaginary repetitions:
 
 | Possible coin | Prior probability | Probability of the observed head | Product | Posterior probability |
 |:--|--:|--:|--:|--:|
-| $\theta=1/2$ | $1/2$ | $1/2$ | $1/4$ | $2/5$ |
-| $\theta=3/4$ | $1/2$ | $3/4$ | $3/8$ | $3/5$ |
+| $\theta=1/2$ | $1/2$ | $1/2$ | $1/4$ | $5/13$ |
+| $\theta=4/5$ | $1/2$ | $4/5$ | $2/5$ | $8/13$ |
 
 The product is the joint probability of selecting that coin **and** observing a
-head. The products sum to $5/8$, the probability of a head before knowing which
+head. The products sum to $13/20$, the probability of a head before knowing which
 coin was selected. Dividing each product by that sum leaves probabilities
 conditional on the head we actually observed.
 
@@ -131,7 +143,7 @@ import matplotlib.pyplot as plt
 from scipy import stats
 from pathlib import Path
 
-plt.rcParams.update({"figure.figsize": (7, 4.2), "font.size": 11,
+plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
                      "axes.spines.top": False, "axes.spines.right": False,
                      "axes.grid": False})
 BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
@@ -141,17 +153,17 @@ BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 #| label: fig-two-coin-update
 #| fig-cap: "One head makes the coin with a higher heads probability more plausible, while leaving both possibilities open."
 #| code-fold: true
-coin_values = np.array([0.5, 0.75])
+coin_values = np.array([0.5, 0.8])
 coin_prior = np.array([0.5, 0.5])
 coin_joint = coin_prior * coin_values
 coin_posterior = coin_joint / coin_joint.sum()
-fig, axes = plt.subplots(1, 2, figsize=(8, 3.5), sharey=True)
+fig, axes = plt.subplots(1, 2, figsize=(9, 4.5), sharey=True)
 for ax, probabilities, title in zip(
         axes, [coin_prior, coin_posterior], ["Before the toss", "After one head"]):
     ax.bar([0, 1], probabilities, color=[GREY, BLUE], width=0.55)
     for position, probability in enumerate(probabilities):
         ax.text(position, probability + 0.025, f"{probability:.2f}", ha="center")
-    ax.set(xticks=[0, 1], xticklabels=["Fair coin", "Heads probability 0.75"],
+    ax.set(xticks=[0, 1], xticklabels=["Fair coin", "Heads probability 0.80"],
            ylim=(0, 0.8), title=title)
     ax.grid(axis="y", alpha=0.3)
 axes[0].set_ylabel("Probability of the selected coin")
@@ -161,23 +173,23 @@ plt.show()
 
 ### Learning about the coin is different from predicting a toss
 
-We now assign probability 0.4 to the fair coin and 0.6 to the other coin.
+We now assign probability $5/13$ to the fair coin and $8/13$ to the biased coin.
 The next toss is a head with probability
 
 $$
-P(H_{\mathrm{next}}\mid H)=0.4\left(\frac12\right)
-+0.6\left(\frac34\right)=0.65.
+P(H_{\mathrm{next}}\mid H)=\frac5{13}\left(\frac12\right)
++\frac8{13}\left(\frac45\right)=\frac{89}{130}\approx0.685.
 $$
 
 We have averaged each coin's heads probability using its **posterior** weight.
-The answer is neither the probability that we selected the second coin, 0.6,
-nor that coin's heads probability, 0.75. This distinction between inference and
+The answer is neither the probability that we selected the second coin, approximately 0.615,
+nor that coin's heads probability, 0.8. This distinction between inference and
 prediction will reappear in every model we study.
 
 **Pause and reason.** Suppose the next toss is a tail. Which coin should gain
-posterior probability? Use the current probabilities 0.4 and 0.6 as the new
+posterior probability? Use the current probabilities $5/13$ and $8/13$ as the new
 prior, multiply by the respective tail probabilities, and normalise. You should
-obtain $4/7$ for the fair coin and $3/7$ for the other coin.
+obtain $25/41$ for the fair coin and $16/41$ for the biased coin.
 
 ## Formal framework and derivation {#sec-methodology}
 
@@ -205,36 +217,40 @@ extra assumption about coins or economics. The model determines the probabilitie
 that we put into it.
 
 Conditioning means restricting attention to the outcomes consistent with what
-we observed. The diagram returns to the 800 equally weighted illustrative
-experiments: 200 fair-coin heads, 200 fair-coin tails, 300 biased-coin heads and
-100 biased-coin tails. Each dot represents 20 experiments. After observing a
-head, only the 25 head dots remain relevant; 10 of them belong to the fair coin.
+we observed. Follow the branches from 100 trials to the 65 expected head
+outcomes. Once we observe a head, the tail branches are no longer relevant.
+The two remaining counts, 25 and 40, give the posterior weights.
 
 ```{python}
 #| label: fig-conditioning-sample-space
-#| fig-cap: "Conditioning changes the reference set: among all experiments half select the fair coin; among experiments with a head, only 10 of 25 dots select it. The counts illustrate expected proportions, not newly observed data."
+#| fig-cap: "Expected counts out of 100 trials. After observing heads, compare the 25 fair-coin heads with all 65 heads: P(fair coin | head) = 25/65. Faded tail branches are excluded by the observation."
 #| code-fold: true
-fig, axes = plt.subplots(1, 2, figsize=(9, 3.6), sharey=True)
-for ax, conditioned in zip(axes, [False, True]):
-    for row in range(4):
-        for column in range(10):
-            fair = column < 5
-            head = row < (2 if fair else 3)
-            color = BLUE if fair else BROWN
-            ax.scatter(column, row, s=110, color=color,
-                       alpha=1 if head or not conditioned else 0.08)
-    ax.set(xticks=[2, 7], xticklabels=["Fair coin", "Biased coin"],
-           yticks=[], xlim=(-0.8, 9.8), ylim=(-0.8, 3.8))
-    ax.set_title("All outcomes: 20 / 40 fair" if not conditioned
-                 else "Heads only: 10 / 25 fair")
-    ax.spines[["left", "bottom"]].set_visible(False)
+fig, ax = plt.subplots(figsize=(10, 5.5))
+ax.set(xlim=(0, 1), ylim=(0, 1))
+ax.axis("off")
+ax.text(0.12, 0.5, "100 trials", ha="center", va="center",
+        bbox=dict(boxstyle="round,pad=0.6", facecolor="white", edgecolor=GREY))
+for y_coin, label, heads, tails, color in [
+        (0.75, "Fair coin", 25, 25, BLUE),
+        (0.25, "Biased coin", 40, 10, BROWN)]:
+    ax.annotate("", xy=(0.36, y_coin), xytext=(0.22, 0.5),
+                arrowprops=dict(arrowstyle="->", color=color))
+    ax.text(0.45, y_coin, f"{label}\n50 trials", ha="center", va="center",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="white", edgecolor=color))
+    for offset, count, outcome in [(0.10, heads, "heads"), (-0.10, tails, "tails")]:
+        alpha = 1 if outcome == "heads" else 0.3
+        ax.annotate("", xy=(0.77, y_coin + offset), xytext=(0.57, y_coin),
+                    arrowprops=dict(arrowstyle="->", color=color, alpha=alpha))
+        ax.text(0.87, y_coin + offset, f"{count} {outcome}", ha="center",
+                va="center", color=color, alpha=alpha,
+                fontweight="bold" if outcome == "heads" else "normal")
 plt.tight_layout()
 plt.show()
 ```
 
 The denominator in $P(A\mid B)=P(A\cap B)/P(B)$ is therefore essential:
 we measure the fair-coin-and-head outcomes relative to **all head outcomes**,
-not relative to all experiments. Here this gives $200/500=0.4$.
+not relative to all trials. Here this gives $25/65=5/13$.
 
 ### From two possible values to an unknown parameter
 
@@ -336,7 +352,9 @@ compare Beta(2,5) with Beta(5,2) for different beliefs about the likely bias.
 #| code-fold: true
 prior_grid = np.linspace(0.001, 0.999, 500)
 shape_cases = [(1, 1), (2, 2), (20, 20), (2, 5), (5, 2)]
-fig, axes = plt.subplots(1, 5, figsize=(12, 3), sharex=True, sharey=True)
+fig, axes = plt.subplots(2, 3, figsize=(10, 7), sharex=True, sharey=True)
+axes = axes.ravel()
+axes[-1].set_visible(False)
 for ax, (prior_a, prior_b) in zip(axes, shape_cases):
     ax.plot(prior_grid, stats.beta.pdf(prior_grid, prior_a, prior_b), color=BLUE)
     ax.axvline(prior_a / (prior_a + prior_b), color=BROWN, linestyle="--", lw=1)
@@ -375,7 +393,7 @@ probability one half, but they imply different plausible counts.
 #| fig-cap: "Equal prior means do not imply equal prior information. A concentrated prior around one half expects counts near six; a uniform prior over the probability gives equal prior predictive probability to every count from zero to twelve."
 #| code-fold: true
 prior_counts = np.arange(13)
-fig, axes = plt.subplots(1, 3, figsize=(10, 3.3), sharey=True)
+fig, axes = plt.subplots(1, 3, figsize=(10, 4.5), sharey=True)
 for ax, strength in zip(axes, [1, 2, 20]):
     ax.bar(prior_counts, stats.betabinom.pmf(prior_counts, 12, strength, strength),
            color=BLUE)
@@ -419,31 +437,35 @@ With nine heads, three tails and the $\operatorname{Beta}(2,2)$ prior, the
 posterior is $\operatorname{Beta}(11,5)$. Before inspecting the figure, predict
 where its centre should lie relative to 0.5 and 0.75.
 
-The code below plots the three ingredients separately. The middle panel is a
-likelihood scaled to have maximum one, so its vertical scale is intentionally
-different from the probability-density scales in the other panels.
+Overlaying the three curves makes the update visible: the posterior balances
+the prior centred at 0.5 and the likelihood peaking at 0.75. To compare their
+shapes on one axis, we divide the likelihood by its integral over $\theta$.
+This scaling is for display; it does not turn the likelihood into our posterior.
 
 ```{python}
 #| label: fig-beta-learning
-#| fig-cap: "Prior beliefs centred on one half combine with nine heads in twelve tosses to give a Beta(11,5) posterior. The shaded posterior area is a 95% credible interval."
+#| fig-cap: "Prior, scaled likelihood and posterior on the same axes. The posterior combines the two sources of information; shading marks its 95% credible interval. The likelihood is scaled to integrate to one for visual comparison."
 #| code-fold: true
 A, B, N, S = 2, 2, 12, 9
 prior = stats.beta(A, B)
 posterior = stats.beta(A + S, B + N - S)
 theta = np.linspace(0.001, 0.999, 600)
-likelihood = stats.binom.pmf(S, N, theta)
+# The binomial likelihood integrates to 1 / (N + 1) over the probability.
+scaled_likelihood = (N + 1) * stats.binom.pmf(S, N, theta)
 interval = posterior.ppf([0.025, 0.975])
-fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
-axes[0].plot(theta, prior.pdf(theta), color=GREY)
-axes[1].plot(theta, likelihood / likelihood.max(), color=BROWN)
-axes[2].plot(theta, posterior.pdf(theta), color=BLUE)
+fig, ax = plt.subplots()
+ax.plot(theta, prior.pdf(theta), color=GREY, linestyle=":", lw=2,
+        label="Prior: Beta(2,2)")
+ax.plot(theta, scaled_likelihood, color=BROWN, linestyle="--", lw=2,
+        label="Scaled likelihood")
+ax.plot(theta, posterior.pdf(theta), color=BLUE, lw=2.5,
+        label="Posterior: Beta(11,5)")
 in_interval = (theta >= interval[0]) & (theta <= interval[1])
-axes[2].fill_between(theta, 0, posterior.pdf(theta), where=in_interval,
-                     color=BLUE, alpha=0.25)
-for ax, title, ylabel in zip(axes, ["Prior", "Likelihood", "Posterior"],
-                            ["Density", "Relative likelihood", "Density"]):
-    ax.set(title=title, xlabel="Heads probability", ylabel=ylabel, xlim=(0, 1))
-    ax.grid(axis="y", alpha=0.3)
+ax.fill_between(theta, 0, posterior.pdf(theta), where=in_interval,
+                color=BLUE, alpha=0.15)
+ax.set(xlabel="Heads probability", ylabel="Density / scaled likelihood", xlim=(0, 1))
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=3, frameon=False)
 plt.tight_layout()
 plt.show()
 ```
@@ -541,7 +563,7 @@ lower[positive] = stats.beta.ppf(0.025, successes[positive],
 upper[below_n] = stats.beta.ppf(0.975, successes[below_n] + 1,
                                sample_size - successes[below_n])
 covers = (lower <= true_theta) & (true_theta <= upper)
-fig, ax = plt.subplots(figsize=(7, 5))
+fig, ax = plt.subplots(figsize=(9, 6))
 ax.hlines(np.arange(60), lower, upper, color=np.where(covers, BLUE, BROWN), lw=1.5)
 ax.axvline(true_theta, color=GREY, linestyle="--")
 ax.set(xlabel="Heads probability", ylabel="Repeated sample", xlim=(0, 1))
@@ -658,7 +680,7 @@ The prior stays $\operatorname{Beta}(2,2)$ throughout.
 #| label: fig-posterior-concentration
 #| fig-cap: "With the same observed frequency and a fixed prior, larger samples concentrate the posterior and move its mean toward 0.75. Actual sequences can also move the observed frequency, so successive posteriors need not narrow monotonically."
 #| code-fold: true
-fig, axes = plt.subplots(1, 3, figsize=(10, 3.3), sharex=True, sharey=True)
+fig, axes = plt.subplots(1, 3, figsize=(10, 4.5), sharex=True, sharey=True)
 for ax, n_obs, n_heads in zip(axes, [12, 40, 120], [9, 30, 90]):
     updated = stats.beta(2 + n_heads, 2 + n_obs - n_heads)
     ax.plot(theta, updated.pdf(theta), color=BLUE)
