@@ -1,0 +1,96 @@
+~~~{python}
+#| label: fig-minnesota-forecast-comparison
+#| fig-cap: "One-month-ahead inflation forecast RMSE, 2010–2019. Smaller variance multipliers mean stronger shrinkage. The three settings are fixed in advance; lower RMSE is better."
+#| code-fold: true
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+FORECAST_LAGS = 4
+TIGHTNESS_VALUES = np.array([0.004, 0.04, 0.4])
+CROSS_MULTIPLIER = 0.5
+forecast_data_path = next(
+    p for p in (Path("data"), Path("../data")) if p.exists()
+)
+forecast_macro = pd.read_parquet(forecast_data_path / "fred_macro_monthly.parquet")
+forecast_panel = pd.DataFrame({
+    "Output growth": 100 * np.log(forecast_macro["industrial_prod"]).diff(),
+    "Inflation": 100 * np.log(forecast_macro["cpi"]).diff(),
+    "Policy rate change": forecast_macro["fed_funds"].diff(),
+}).loc["1990":"2019"].dropna()
+
+forecast_rows = []
+for forecast_date in forecast_panel.loc["2010":"2019"].index:
+    history = forecast_panel.loc[forecast_panel.index < forecast_date].to_numpy()
+    target = history[FORECAST_LAGS:, 1]
+    design = np.column_stack(
+        [np.ones(len(target))]
+        + [history[FORECAST_LAGS - lag:len(history) - lag]
+           for lag in range(1, FORECAST_LAGS + 1)]
+    )
+    next_row = np.concatenate(
+        [np.ones(1)] + [history[-lag] for lag in range(1, FORECAST_LAGS + 1)]
+    )
+    residual_variances = np.empty(3)
+    for j in range(3):
+        ar_design = np.column_stack([np.ones(len(history) - 1), history[:-1, j]])
+        ar_beta = np.linalg.lstsq(ar_design, history[1:, j], rcond=None)[0]
+        ar_residual = history[1:, j] - ar_design @ ar_beta
+        residual_variances[j] = np.mean(ar_residual**2)
+
+    ols_beta = np.linalg.lstsq(design, target, rcond=None)[0]
+    row = {
+        "Date": forecast_date,
+        "Actual": forecast_panel.loc[forecast_date, "Inflation"],
+        "Historical mean": history[:, 1].mean(),
+        "OLS VAR": next_row @ ols_beta,
+    }
+    for tightness in TIGHTNESS_VALUES:
+        diagonal = [100 * residual_variances[1]]
+        for lag in range(1, FORECAST_LAGS + 1):
+            for j in range(3):
+                variance = tightness / lag**2
+                if j != 1:
+                    variance *= CROSS_MULTIPLIER * (
+                        residual_variances[1] / residual_variances[j]
+                    )
+                diagonal.append(variance)
+        precision = (
+            design.T @ design / residual_variances[1]
+            + np.diag(1 / np.array(diagonal))
+        )
+        posterior_mean = np.linalg.solve(
+            precision, design.T @ target / residual_variances[1]
+        )
+        row[f"Minnesota {tightness:g}"] = next_row @ posterior_mean
+    forecast_rows.append(row)
+
+forecast_results = pd.DataFrame(forecast_rows).set_index("Date")
+forecast_errors = forecast_results.drop(columns="Actual").subtract(
+    forecast_results["Actual"], axis=0
+)
+forecast_rmse = np.sqrt(forecast_errors.pow(2).mean())
+minnesota_rmse = [
+    forecast_rmse[f"Minnesota {tightness:g}"] for tightness in TIGHTNESS_VALUES
+]
+fig, ax = plt.subplots(figsize=(9, 5.4))
+ax.plot(TIGHTNESS_VALUES, minnesota_rmse, color="#527a99", marker="o",
+        lw=2, label="Minnesota")
+ax.axhline(forecast_rmse["OLS VAR"], color="#aa8066",
+           linestyle="--", label="OLS VAR")
+ax.axhline(forecast_rmse["Historical mean"], color="#777777",
+           linestyle=":", label="Historical mean")
+ax.set(xscale="log", xticks=TIGHTNESS_VALUES,
+       xticklabels=[f"{value:g}" for value in TIGHTNESS_VALUES],
+       xlabel="Prior variance multiplier (stronger shrinkage ← → weaker shrinkage)",
+       ylabel="Inflation forecast RMSE (percentage points)")
+ax.spines[["top", "right"]].set_visible(False)
+ax.grid(False)
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3, frameon=False)
+plt.tight_layout()
+plt.show()
+print(forecast_rmse.rename("RMSE").round(4).to_string())
+~~~
