@@ -357,7 +357,7 @@ plt.tight_layout()
 plt.show()
 ```
 
-### Sparse signals or many weak exposures?
+### Sparse signals or many weak exposures? Kelly's virtue of complexity
 
 SSVS places substantial prior mass near sparse representations. Ridge-type
 Normal shrinkage instead pulls every slope toward zero without a separate
@@ -371,6 +371,39 @@ question raised by the factor zoo and the broader discussion of model
 complexity: should we search for a few useful directions, or regularise
 many? A large model need not overfit if it is regularised appropriately;
 a small selected model need not be stable.
+
+Kelly, Malamud and Zhou (2024), **The Virtue of Complexity in Return
+Prediction**, makes this challenge concrete. They develop theoretical
+results and US equity-market evidence showing benefits from return-prediction
+models with more parameters than observations. Their results challenge
+the presumption that a small predictive model must be preferable.
+This is a finding about prediction under their framework, not a claim that
+every additional published factor is useful or that unrestricted model
+expansion always improves performance.
+See the [paper and publication details](https://www.nber.org/papers/w30217).
+
+For this course, the Bayesian connection is a question about **prior
+beliefs concerning the distribution of signal**. SSVS gives a coefficient
+a choice between strong and weak shrinkage. A dense shrinkage model allows
+many small contributions to remain. If useful information is distributed
+across many features, a strong preference for a tiny subset can lose
+predictive information. If most candidates are noise, sparse shrinkage
+may be helpful. This is our interpretation through the course's prior
+framework; the paper is not a derivation of Bayesian SSVS.
+
+For example, imagine twenty weak signals that collectively predict returns
+but are individually hard to distinguish from noise. Selecting only the
+strongest two may discard much of their combined information. Keeping all
+twenty with shrinkage expresses a different belief about how predictability
+is distributed. Whether this helps depends on signal strength, dependence
+between features and estimation uncertainty.
+
+**The lesson is to compare sparsity with regularised complexity, not to
+assume sparsity is the goal.** Our four-factor bank regression illustrates
+exposure selection; it does not replicate the paper's return-prediction
+experiment. The simulated sparse-versus-dense exercise below explores the
+underlying distinction. Chapter 14 will return to complexity when
+nonlinear feature representations enter the model.
 
 Prior sensitivity is therefore substantive. Change $\pi$ to alter expected
 model size; change $\tau_0$ to alter what counts as negligible; change
@@ -594,6 +627,9 @@ probability that at least one is included.
 2. Why does a zero indicator not imply an exactly zero coefficient here?
 3. Contrast sparsity with continuous shrinkage of many small effects.
 4. Explain why enlarging the candidate set can change an existing predictor's PIP.
+5. How does Kelly, Malamud and Zhou's virtue-of-complexity argument challenge
+   a strong sparsity prior? Why does it not imply that every factor has
+   a high posterior inclusion probability?
 
 The factor zoo motivates this distinction. Large predictive models may benefit
 from many weak features, while sparse priors prefer a smaller representation.
@@ -605,3 +641,9 @@ feature maps and nonlinear prediction.
 Koop (2003), *Bayesian Econometrics*, on model uncertainty and variable selection;
 Bauwens, Lubrano and Richard (1999), *Bayesian Inference in Dynamic Econometric
 Models*, for the regression and simulation foundations.
+
+For the finance discussion: Kelly, Malamud and Zhou (2024),
+[*The Virtue of Complexity in Return Prediction*](https://www.nber.org/papers/w30217),
+*Journal of Finance*, 79(1), 459–503. Focus on the economic argument for
+complex prediction models; the high-dimensional asymptotic derivations
+are beyond this lecture.
