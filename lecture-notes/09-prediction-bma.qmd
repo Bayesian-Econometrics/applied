@@ -74,33 +74,41 @@ DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
 
 ### Predict an observation, not just its mean
 
-Suppose an illustrative growth model has posterior
-$\mu\mid y\sim N(1,0.25)$, with growth measured in percentage points.
-Next period's outcome satisfies $y_*=\mu+\varepsilon_*$, where
-$\varepsilon_*\sim N(0,1)$ is independent new noise. Conditional on a
-particular mean, we would predict $N(\mu,1)$. But we do not know that mean.
+Suppose our posterior for an equity portfolio's expected monthly excess
+return is $\mu\mid y\sim N(0.5,0.5^2)$, in percentage-point units.
+The expected return is uncertain: its posterior mean is 0.5% and its
+posterior standard deviation is 0.5 percentage points. These are illustrative
+numbers, not estimates from the data used later.
 
-Adding two independent Normal variables gives
+Next month's excess return satisfies $y_*=\mu+\varepsilon_*$, with
+independent new noise $\varepsilon_*\sim N(0,4^2)$. Conditional on a
+particular expected return, we would predict $N(\mu,16)$. But we do not
+know that expected return.
 
-$$y_*\mid y\sim N(1,1.25).$$
+Adding the independent Normal variables gives
+$$y_*\mid y\sim N(0.5,16.25).$$
 
-The predictive mean is one and the predictive standard deviation is
-$\sqrt{1.25}\approx1.118$. A plug-in forecast fixing $\mu$ at its
-posterior mean would instead use standard deviation one. It leaves out
-the 0.25 variance arising from parameter uncertainty.
+The predictive mean is 0.5% and the predictive standard deviation is
+$\sqrt{16.25}\approx4.03$ percentage points. A plug-in forecast fixing
+$\mu=0.5$ would instead use standard deviation 4. It omits the 0.25
+variance arising from uncertainty about the expected return.
 
-The state of knowledge has not become more pessimistic simply because
-the interval is wider. It has become more complete: it now represents
-both the uncertain mean and the next period's unpredictable disturbance.
-The posterior distribution of $\mu$ alone would be narrower still,
-and is not an appropriate interval for next period's realised growth.
+The small difference is an economic lesson: short-horizon realised equity
+returns are dominated by return noise. Parameter uncertainty still belongs
+in the forecast, even when its contribution to one month's variance is
+modest. The much narrower posterior of $\mu$ describes uncertainty about
+the expected return; it is not an interval for next month's realised return.
+
+Our question is: **what is the probability of a negative excess return
+next month?** That means underperforming the risk-free return, which is
+different from necessarily losing money in nominal terms.
 
 ### Generate future outcomes before doing any more algebra
 
 For the worked example, take three illustrative posterior mean draws:
-$\mu^{(1)}=0.8$, $\mu^{(2)}=1.2$, $\mu^{(3)}=1.0$.
-Pair them with new disturbance draws $0.4,-1.5,0.2$.
-The resulting future growth draws are $1.2,-0.3,1.2$.
+$\mu^{(1)}=0.3$, $\mu^{(2)}=0.8$, $\mu^{(3)}=0.4$.
+Pair them with new disturbance draws $2.0,-4.0,1.0$ percentage points.
+The resulting future excess-return draws are $2.3,-3.2,1.4$ percent.
 One out of three is negative, so these three draws estimate its probability
 as one third. That tiny sample explains the procedure, not an accurate answer.
 
@@ -112,17 +120,17 @@ posterior. The analytical answer provides a benchmark.
 #| label: predictive-simulation-example
 #| code-fold: true
 N_PREDICTIVE = 10000
-mean_draws = rng.normal(1, 0.5, N_PREDICTIVE)
-new_disturbances = rng.normal(0, 1, N_PREDICTIVE)
-future_growth = mean_draws + new_disturbances
-print("Simulated probability of negative growth:", np.mean(future_growth < 0))
-print("Analytical probability:", stats.norm.cdf(0, loc=1, scale=np.sqrt(1.25)))
+mean_draws = rng.normal(0.5, 0.5, N_PREDICTIVE)
+new_disturbances = rng.normal(0, 4, N_PREDICTIVE)
+future_excess_returns = mean_draws + new_disturbances
+print("Simulated probability of negative excess return:", np.mean(future_excess_returns < 0))
+print("Analytical probability:", stats.norm.cdf(0, loc=0.5, scale=np.sqrt(16.25)))
 print("Simulated central 95% predictive interval:",
-      np.quantile(future_growth, [0.025, 0.975]))
+      np.quantile(future_excess_returns, [0.025, 0.975]))
 ```
 
-Notice why adding observation noise matters. A plausible mean of one
-does not rule out negative growth next period. Using the posterior of the
+Notice why adding observation noise matters. A plausible expected return of 0.5%
+does not rule out negative excess return next period. Using the posterior of the
 mean itself as the outcome forecast would understate that possibility.
 When the noise variance is also unknown, first draw it from its posterior,
 then draw the coefficients conditional on it, and use its square root
@@ -132,18 +140,18 @@ to scale the new disturbance.
 #| label: fig-predictive-uncertainty
 #| fig-cap: "Three different objects: uncertainty about the mean, a plug-in outcome forecast, and the predictive distribution integrating over the mean."
 #| code-fold: true
-growth_grid = np.linspace(-3, 5, 500)
+return_grid = np.linspace(-15, 16, 800)
 fig, ax = plt.subplots()
-ax.hist(future_growth, bins=60, density=True, color=BLUE, alpha=0.15,
+ax.hist(future_excess_returns, bins=60, density=True, color=BLUE, alpha=0.15,
         label="Simulated future outcomes")
 for sd, color, name in [
     (0.5, GREY, "Posterior of mean"),
-    (1., BROWN, "Plug-in outcome forecast"),
-    (np.sqrt(1.25), BLUE, "Posterior predictive"),
+    (4., BROWN, "Plug-in outcome forecast"),
+    (np.sqrt(16.25), BLUE, "Posterior predictive"),
 ]:
-    ax.plot(growth_grid, stats.norm.pdf(growth_grid, 1, sd),
+    ax.plot(return_grid, stats.norm.pdf(return_grid, 0.5, sd),
             color=color, label=name)
-ax.set(xlabel="Growth / mean growth (%)", ylabel="Density")
+ax.set(xlabel="Monthly excess return / expected excess return (%)", ylabel="Density")
 ax.grid(axis="y", alpha=0.3)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
 plt.tight_layout()
@@ -228,21 +236,24 @@ We will explain how the data update the weights after seeing its meaning.
 
 ### Work through an average of two forecasts
 
-Suppose two models predict growth with means 1% and 3%, each with standard
-deviation 1 percentage point. Give them probabilities 0.6 and 0.4.
-The averaged mean is 1.8%, but its variance is not merely the within-model
-variance of 1. The disagreement between the means contributes another 0.96.
+Suppose the constant-mean model predicts next month's portfolio excess
+return with mean 0.5%. The lagged-return model predicts 1.5% at the
+current predictor value. For a simple illustration, give both predictive
+distributions variance 16.25, including their parameter uncertainty,
+and assign model probabilities 0.6 and 0.4.
 
-The mixture variance is therefore 1.96 and its standard deviation is 1.4.
-Averaging means and attaching the old standard deviation would hide model
-uncertainty.
+The averaged mean is $0.6(0.5)+0.4(1.5)=0.9\%$.
+Within-model variance is $0.6(16.25)+0.4(16.25)=16.25$.
+Disagreement about the mean adds
+$$0.6(0.5-0.9)^2+0.4(1.5-0.9)^2=0.24.$$
+The mixture variance is therefore $16.25+0.24=16.49$, with standard
+deviation about 4.06 percentage points. Variances are in squared
+percentage-point units.
 
-The arithmetic is worth doing explicitly. The weighted mean is
-$0.6(1)+0.4(3)=1.8$. Within-model variance is $0.6(1)+0.4(1)=1$.
-The variance due to disagreement is
-$0.6(1-1.8)^2+0.4(3-1.8)^2=0.96$.
-Both components matter because we do not first learn which model generated
-the future observation.
+These models disagree about expected returns but both predict substantial
+monthly noise. Their densities therefore overlap considerably. BMA retains
+that disagreement without manufacturing a dramatic difference in short-run
+risk. Averaging the means and keeping the old variance would omit it.
 
 The mixture is formed by adding **density heights** at every possible
 outcome. Averaging model standard deviations or interval endpoints
@@ -254,13 +265,14 @@ be Normal. The figure displays the distribution we will actually use.
 #| label: fig-bma-mixture
 #| fig-cap: "Averaging distributions retains both within-model uncertainty and disagreement between models. The mixture need not itself be Normal."
 #| code-fold: true
-grid = np.linspace(-3, 7, 500)
-first, second = stats.norm.pdf(grid, 1, 1), stats.norm.pdf(grid, 3, 1)
+grid = np.linspace(-15, 17, 600)
+first = stats.norm.pdf(grid, 0.5, np.sqrt(16.25))
+second = stats.norm.pdf(grid, 1.5, np.sqrt(16.25))
 fig, ax = plt.subplots()
-ax.plot(grid, first, color=GREY, linestyle=":", label="Model 1")
-ax.plot(grid, second, color=BROWN, linestyle="--", label="Model 2")
+ax.plot(grid, first, color=GREY, linestyle=":", label="Constant mean")
+ax.plot(grid, second, color=BROWN, linestyle="--", label="Lagged return")
 ax.plot(grid, .6*first+.4*second, color=BLUE, lw=2, label="Model average")
-ax.set(xlabel="Growth (%)", ylabel="Predictive density")
+ax.set(xlabel="Next monthly portfolio excess return (%)", ylabel="Predictive density")
 ax.grid(axis="y", alpha=.3)
 ax.legend(loc="upper center", bbox_to_anchor=(.5, -.15), ncol=3, frameon=False)
 plt.tight_layout()
@@ -297,17 +309,17 @@ plausible values within a model, while the model prior describes our
 initial allocation across models.
 
 Suppose current model probabilities are 0.6 and 0.4. A new observation
-arrives at a point where the models' predictive densities are 0.2 and
-0.3, respectively. Bayes' rule multiplies weight by predictive density:
+arrives at a point where the models' predictive densities are 0.02 and
+0.03 per percentage point, respectively, in a separate illustrative update. Bayes' rule multiplies weight by predictive density:
 
 | Model | Weight before observation | Predictive density at outcome | Product | Updated weight |
 |:--|--:|--:|--:|--:|
-| $M_1$ | 0.6 | 0.2 | 0.12 | 0.5 |
-| $M_2$ | 0.4 | 0.3 | 0.12 | 0.5 |
+| $M_1$ | 0.6 | 0.02 | 0.012 | 0.5 |
+| $M_2$ | 0.4 | 0.03 | 0.012 | 0.5 |
 
 The observation is 1.5 times as well predicted by the second model, enough
 to offset its smaller starting weight. The mixture predictive density
-of that observation was $0.12+0.12=0.24$, computed using the **old**
+of that observation was $0.012+0.012=0.024$, computed using the **old**
 weights. The updated weights are available only after it has arrived.
 
 ```{python}
@@ -469,8 +481,8 @@ plt.tight_layout()
 plt.show()
 ```
 
-For the numerical weight example above, the mixture score is $\log(0.24)$.
-It is not $0.6\log(0.2)+0.4\log(0.3)$. The first scores the mixture
+For the numerical weight example above, the mixture score is $\log(0.024)$.
+It is not $0.6\log(0.02)+0.4\log(0.03)$. The first scores the mixture
 distribution we actually issued; the second averages scores of separate
 forecasts. After recording the mixture score, update the model weights
 and parameter posteriors for the next forecast.
@@ -718,7 +730,7 @@ illustrative return models.
 The [Week 9 lab](../exercise-sessions/09-prediction-bma.qmd) uses the same
 forecast–score–update order in a controlled simulation.
 
-1. Reproduce the 1.96 mixture variance by separating its two components.
+1. Reproduce the 16.49 mixture variance by separating its two components.
 2. Explain why marginal likelihood integrates against the prior.
 3. Show which observations enter a forecast issued at date $t-1$.
 4. Change the coefficient-prior width and assess weight sensitivity.
