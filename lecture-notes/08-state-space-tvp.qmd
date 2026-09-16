@@ -15,44 +15,44 @@ format:
 ::: {.callout-tip icon=false}
 ## Key takeaways {.unnumbered}
 
-- **A state-space model separates an evolving quantity from its noisy observations.** Market beta, trend growth and latent activity are examples.
-- **The Kalman filter is repeated Bayesian updating.** Predict the state, then correct that prediction using the new observation.
+- **The Kalman filter updates a changing regression coefficient as observations arrive.** Propagate yesterday's uncertainty, predict today's observation, then correct using its forecast error.
+- **Coefficient movement and observation noise are different.** A surprising return does not automatically mean that market beta changed.
 - **The gain balances two uncertainties.** A noisy observation receives less weight; an uncertain state prediction receives more correction.
 - **Filtering and smoothing use different information sets.** A smoothed historical path must not be presented as a real-time estimate.
 :::
 
 ## Motivation and the central question {#sec-motivation}
 
-An exposure estimated from past returns may change as a firm's business changes.
-A macroeconomic trend is also not necessarily constant over decades. We want
-to describe gradual evolution without treating every period as an unrelated
-parameter.
+In an ordinary regression, one coefficient vector describes the whole
+sample. For a bank's market exposure, that can be a restrictive assumption:
+leverage, assets and business activities change. We want to update our
+estimate as returns arrive, allowing the underlying exposure to change too.
 
-**How should a new observation update our belief about an unobserved, evolving
-state?** A state equation describes evolution and an observation equation
-describes measurement. Their combination makes the information flow explicit.
+**Given yesterday's estimate of beta and today's observation, how do we
+update beta and our uncertainty about it?** Answering this question is the
+central goal of this lecture. The answer is the Kalman filter.
 
-The central difficulty is that we do not observe the changing quantity
-directly. A bank's return can move sharply even if its market exposure has
-not changed. Conversely, exposure may drift during months with unremarkable
-returns. We need a model that distinguishes changes in the underlying
-relationship from noise around that relationship.
+Keep the familiar regression notation:
+$$y_t=x_t^\top\beta_t+\varepsilon_t,\qquad
+\beta_t=\beta_{t-1}+u_t.$$
 
-Start with a **local-level model**:
+The first equation relates the observed outcome to its predictors. The
+second says how its unobserved coefficients evolve. A subscript $t$ on
+$\beta$ is the essential change from the regression we already know.
+Measurement noise $\varepsilon_t$ makes the outcome noisy; state noise
+$u_t$ changes the coefficients themselves.
 
-$$\alpha_t=\alpha_{t-1}+\eta_t,\qquad
-y_t=\alpha_t+\varepsilon_t.$$
+The filter repeats three steps: **propagate the coefficient distribution,
+predict the observation, and correct using the forecast error**. We first
+work through them with one coefficient and an observation equation
+$y_t=\beta_t+\varepsilon_t$, so that $x_t=1$. This could describe underlying
+inflation as a changing intercept. Once that calculation is clear, we use
+an intercept and slope to track banking exposure.
 
-The state $\alpha_t$ is an unobserved level, such as underlying monthly
-inflation. The observation $y_t$ is the published measurement. State noise
-$\eta_t$ changes the underlying level; measurement noise $\varepsilon_t$
-changes the observation without changing that level. Both have mean zero,
-but their variances answer different questions.
-
-This is a dynamic extension of Normal–Normal updating. Yesterday's
-posterior supplies today's starting information, allowing for movement
-in between. We then combine that prediction with today's measurement.
-In a time-varying regression, the same logic updates a vector of coefficients.
+We will use lowercase $\beta_t$ for the unknown coefficients and
+$\widehat\beta_{t|t}$ for their filtered mean. Uppercase $P_t$ and $Q$
+will denote covariance matrices, never coefficient estimates. The second
+subscript in $t|t-1$ tells us which observations are available.
 
 
 ```{python}
@@ -107,44 +107,26 @@ plt.show()
 
 ### Work through one correction
 
-Before today's observation, suppose a state has distribution $N(1,0.04)$.
-We observe $y=1.4$ with measurement variance 0.09. This is the Normal update
-from Chapter 2, now indexed by time:
+Before today's observation, suppose the changing coefficient has mean
+one and variance 0.04. We observe $y_t=1.4$ through
+$y_t=\beta_t+\varepsilon_t$, with observation-noise variance 0.09.
 
-$$K=\frac{0.04}{0.04+0.09}=0.3077,\qquad
-a=1+K(1.4-1)=1.1231,\qquad P=(1-K)0.04=0.0277.$$
+The observation points towards a higher coefficient, but it is noisy.
+The Bayesian weight on it is
+$$k_t=\frac{0.04}{0.04+0.09}=0.3077.$$
+The filtered mean is therefore
+$$\widehat\beta_{t|t}=1+0.3077(1.4-1)=1.1231,$$
+and its variance is
+$$p_{t|t}=(1-0.3077)0.04=0.0277.$$
 
-The observation moves the state estimate upward, but not all the way to 1.4.
-If measurement noise were smaller, it would receive more weight. Before the
-next observation, uncertainty may increase again because the state itself evolves.
+The observation shifts our estimate towards 1.4 without making us believe
+the coefficient is exactly 1.4. The posterior is also more concentrated
+than the predicted coefficient distribution: we learned something.
 
-Here 0.04 is uncertainty about the state **before** seeing the observation.
-The value 0.09 is the measurement-noise variance. Neither is the variance
-of a parameter estimate obtained by rerunning the filter.
-
-To derive the update, write $a^-=1$, $P^-=0.04$ and $H=0.09$.
-Multiplication of the predicted-state density by the likelihood gives
-
-$$p(\alpha\mid y)\propto
-\exp\left[-\frac12\left\{
-\frac{(\alpha-a^-)^2}{P^-}+\frac{(y-\alpha)^2}{H}\right\}\right].$$
-
-Completing the square produces
-
-$$P=\left(\frac1{P^-}+\frac1H\right)^{-1},\qquad
-a=P\left(\frac{a^-}{P^-}+\frac yH\right).$$
-
-Rearrange the mean to obtain $a=a^-+K(y-a^-)$ with
-$K=P^-/(P^-+H)$. Thus the gain is simply the familiar Bayesian data
-weight written as a correction to a prior prediction. The residual
-$y-a^-=0.4$ is the new information; the correction is only
-$0.3077(0.4)=0.1231$ because the observation is noisy.
-
-If state noise has variance $Q=0.01$, next period's predicted variance
-is $0.0277+0.01=0.0377$. Learning reduced uncertainty today, but movement
-of the state creates new uncertainty before the next measurement.
-If the next observation is unavailable, the prediction still proceeds;
-there is simply no measurement correction at that date.
+The three curves below display this single correction. We next derive
+where the predicted distribution comes from, how to forecast the observation,
+and why Bayes' theorem gives this particular weight. Those three calculations,
+repeated at every date, are the Kalman filter.
 
 ```{python}
 #| label: fig-kalman-update
@@ -168,107 +150,164 @@ plt.show()
 
 ## Formal framework and derivation {#sec-methodology}
 
-### State and observation equations
+### State the model and the information available
 
-Write
-$\alpha_t=T_t\alpha_{t-1}+\eta_t$, $\eta_t\sim N(0,Q_t)$, and
-$y_t=Z_t\alpha_t+\varepsilon_t$, $\varepsilon_t\sim N(0,H_t)$.
-Assume mutually independent disturbances and an initial Normal distribution.
-For now, matrices and noise covariances are known.
+Begin with one coefficient:
+$$
+\underbrace{\beta_t=\beta_{t-1}+u_t,\quad u_t\sim N(0,q)}_{\text{coefficient evolution}},
+\qquad
+\underbrace{y_t=x_t\beta_t+\varepsilon_t,\quad
+\varepsilon_t\sim N(0,\sigma^2)}_{\text{observed regression}}.
+$$
 
-For $d$ states and $r$ observations, $T_t$ is $d\times d$,
-$Z_t$ is $r\times d$, $Q_t$ is $d\times d$ and $H_t$ is $r\times r$.
-The local-level example has $d=r=1$, $T_t=Z_t=1$.
-The initial distribution $\alpha_0\sim N(a_0,P_0)$ specifies uncertainty
-before the first observation.
+The predictor $x_t$ is known when conditioning on the observation.
+The disturbances are mutually independent over time and of each other.
+We start with $\beta_0\sim N(\widehat\beta_{0|0},p_{0|0})$.
+For now, the evolution variance $q$ and observation variance $\sigma^2$
+are fixed. The lowercase $p$ here denotes a scalar coefficient variance.
 
-The three calculations are **propagation of the state**, **prediction
-of the observation**, and **correction after observing it**. Writing the
-information set explicitly prevents us from accidentally using tomorrow's
-observation in today's filtered estimate.
+The random walk does not say that beta must move every period in the same
+direction. Its expected change is zero, while $q$ measures plausible
+movement around that expectation. Setting $q=0$ gives a constant unknown
+coefficient, which we can still learn about sequentially.
 
-The state equation is also a **prior on an entire path**. For a random
-walk with a fixed covariance,
+| Symbol | Meaning |
+|:--|:--|
+| $\beta_t$ | Unknown coefficient at date $t$ |
+| $\widehat\beta_{t|t-1}$ | Predicted coefficient mean, before observing $y_t$ |
+| $\widehat\beta_{t|t}$ | Updated coefficient mean, after observing $y_t$ |
+| $p_{t|t-1},p_{t|t}$ | Corresponding coefficient variances |
+| $q$ | Variance of a change in the coefficient |
+| $\sigma^2$ | Observation noise variance |
 
-$$p(\alpha_{0:T}\mid Q)=p(\alpha_0)
-\prod_{t=1}^T N(\alpha_t;\alpha_{t-1},Q).$$
+### Step 1: propagate yesterday's coefficient distribution
 
-Thus we are not estimating an unrelated coefficient vector at every date.
-Neighbouring vectors are linked by a prior favouring small increments.
-This is the dynamic counterpart of Lecture 6's shrinkage: there we
-penalised departures from a coefficient baseline; here we penalise changes
-between adjacent coefficients. For diagonal $Q$, the log prior contains
-$-\tfrac12\sum_{t,j}(\alpha_{tj}-\alpha_{t-1,j})^2/Q_j$.
-Small evolution variances impose more continuity.
+Suppose yesterday's update gave
+$\beta_{t-1}\mid y_{1:t-1}\sim
+N(\widehat\beta_{t-1|t-1},p_{t-1|t-1})$.
+The state equation adds independent mean-zero noise. Consequently,
 
-A macroeconomic extension is a local linear trend with level $\mu_t$
-and slope $d_t$. Stack them in $\alpha_t=(\mu_t,d_t)^\top$ and set
-$T=\left(\begin{smallmatrix}1&1\\0&1\end{smallmatrix}\right)$,
-$Z=(1,0)$. Last period's slope predicts the next change in the level,
-and disturbances allow either component to evolve. The filter formulas
-below apply directly. Our Python implementation instead uses $T=I$
-for the exercise's drifting regression coefficients; a local-trend
-implementation must include the matrix multiplication in propagation.
+$$\widehat\beta_{t|t-1}=\widehat\beta_{t-1|t-1},\qquad
+p_{t|t-1}=p_{t-1|t-1}+q.$$
 
-If $\alpha_{t-1}\mid y_{1:t-1}\sim N(a_{t-1},P_{t-1})$, linear transformation
-and independent noise give the prediction
+The best prediction of the coefficient is unchanged, but our uncertainty
+increases because it may have moved since yesterday. This propagation
+happens before seeing today's outcome.
 
-$$a_t^-=T_ta_{t-1},\qquad P_t^-=T_tP_{t-1}T_t^\top+Q_t.$$
+### Step 2: predict today's observation
 
-The mean follows the transition equation because state noise has mean zero.
-The covariance transforms through $T_t$ and then gains $Q_t$ because the
-new state disturbance is independent. A superscript minus means “before
-the current observation”, not a negative quantity.
+Substitute the predicted coefficient into the regression:
+$$\widehat y_{t|t-1}=x_t\widehat\beta_{t|t-1}.$$
 
-The forecast observation is $Z_ta_t^-$, with innovation
-$v_t=y_t-Z_ta_t^-$ and innovation covariance
-$F_t=Z_tP_t^-Z_t^\top+H_t$.
+The outcome depends on both the uncertain coefficient and new observation
+noise. Their independence gives
+$$f_t=x_t^2p_{t|t-1}+\sigma^2,\qquad
+y_t\mid y_{1:t-1},x_t\sim N(\widehat y_{t|t-1},f_t).$$
 
-This forecast variance has two sources. We are unsure where the state is,
-giving $Z_tP_t^-Z_t^\top$, and even a known state produces a noisy
-observation, giving $H_t$. Their sum measures how surprising a forecast
-error should be.
+The first variance term comes from not knowing beta. The second remains
+even if beta were known exactly. After observing $y_t$, calculate the
+**innovation**, or forecast error,
+$$v_t=y_t-\widehat y_{t|t-1}.$$
 
-### Derive the correction from a joint Normal
+A forecast error is new information, but not all of it should be attributed
+to coefficient movement. The correction step determines how much.
 
-Before observing $y_t$, state and observation have joint covariance
+### Step 3: correct using Bayes' theorem
 
-$$\operatorname{Var}\begin{pmatrix}\alpha_t\\y_t\end{pmatrix}
-=\begin{pmatrix}
-P_t^-&P_t^-Z_t^\top\\
-Z_tP_t^-&F_t
-\end{pmatrix}.$$
+The predicted coefficient distribution is today's prior. Multiply it by
+the observation likelihood:
+$$p(\beta_t\mid y_{1:t})\propto
+\exp\left[-\frac12\left\{
+\frac{(\beta_t-\widehat\beta_{t|t-1})^2}{p_{t|t-1}}
++\frac{(y_t-x_t\beta_t)^2}{\sigma^2}\right\}\right].$$
 
-The conditional-Normal identity gives the correction because
-$\operatorname{Cov}(\alpha_t,y_t\mid y_{1:t-1})=P_t^-Z_t^\top$.
-The observation depends on the state through $Z_t$; its additional noise
-is independent of that state. Conditioning shifts the state mean by the
-cross-covariance times the inverse forecast variance times the observed
-forecast error:
+Collecting the quadratic and linear terms in $\beta_t$ gives
+$$
+p_{t|t}=\left(p_{t|t-1}^{-1}+\frac{x_t^2}{\sigma^2}\right)^{-1},
+\qquad
+\widehat\beta_{t|t}
+=p_{t|t}\left(
+\frac{\widehat\beta_{t|t-1}}{p_{t|t-1}}+
+\frac{x_ty_t}{\sigma^2}\right).
+$$
 
-$$K_t=P_t^-Z_t^\top F_t^{-1},\qquad
-a_t=a_t^-+K_tv_t,\qquad
-P_t=P_t^--K_tF_tK_t^\top.$$
+These are the Normal updating formulas from Lecture 2. Rearranging them
+shows the filter's correction form:
+$$k_t=\frac{p_{t|t-1}x_t}{f_t},\qquad
+\boxed{\widehat\beta_{t|t}=\widehat\beta_{t|t-1}+k_tv_t},\qquad
+p_{t|t}=(1-k_tx_t)p_{t|t-1}.$$
 
-Thus the filter performs one prior-to-posterior update per date. It also gives
-the likelihood through the innovation densities:
-$\log p(y_{1:T})=\sum_t\log N(y_t;Z_ta_t^-,F_t)$.
-This can support inference for unknown noise parameters; the filter alone does
-not integrate their uncertainty.
+The **Kalman gain** $k_t$ converts an observation forecast error into a
+coefficient correction. If $x_t=1$, it is the Bayesian weight on the
+measurement. With a general regressor it also converts between the units
+of the outcome and the coefficient. It need not lie between zero and one.
 
-In scalar observation form, its log-likelihood contribution is
+### Put all three steps together with numbers
 
-$$-\frac12\left\{\log(2\pi)+\log F_t+\frac{v_t^2}{F_t}\right\}.$$
+Suppose yesterday's coefficient mean was one and its variance was 0.03.
+Set $q=0.01$, $x_t=1$ and $\sigma^2=0.09$. Today's observed value is 1.4.
 
-The forecast error alone is insufficient: a model could accommodate large
-errors by claiming enormous uncertainty. The $\log F_t$ term charges
-for that diffuseness. Lecture 9 uses the same predictive-density logic
-to evaluate forecasts and compare models.
+| Step | Calculation | Interpretation |
+|:--|:--|:--|
+| Propagate | Mean $1$; variance $0.03+0.01=0.04$ | Allow beta to move |
+| Predict | Outcome mean $1$; variance $0.04+0.09=0.13$ | Account for coefficient and observation uncertainty |
+| Observe | Forecast error $1.4-1=0.4$ | Measure the surprise |
+| Correct | Gain $0.04/0.13=0.3077$ | Attribute only part of the surprise to beta |
+| Store | Mean $1.1231$; variance $0.0277$ | Today's posterior becomes tomorrow's starting point |
+
+This completes the earlier one-step example: its variance 0.04 was the
+**propagated** variance, not necessarily yesterday's posterior variance.
+On the next date, add $q$ again and repeat. If an observation is missing,
+propagate the state but skip its measurement correction.
+
+### Extend the same calculation to an intercept and a slope
+
+Let $\beta_t=(\beta_{0t},\beta_{1t})^\top$ and
+$x_t=(1,r_{m,t}^e)^\top$. Now $P$ and $Q$ are $2\times2$ covariance
+matrices. With $\beta_t=\beta_{t-1}+u_t$, $u_t\sim N(0,Q)$,
+the scalar formulas become
+
+$$
+\begin{aligned}
+\widehat\beta_{t|t-1}&=\widehat\beta_{t-1|t-1},
+& P_{t|t-1}&=P_{t-1|t-1}+Q,\\
+\widehat y_{t|t-1}&=x_t^\top\widehat\beta_{t|t-1},
+& f_t&=x_t^\top P_{t|t-1}x_t+\sigma^2,\\
+k_t&=P_{t|t-1}x_t/f_t,
+& \widehat\beta_{t|t}&=\widehat\beta_{t|t-1}
++k_t(y_t-\widehat y_{t|t-1}),\\
+&&P_{t|t}&=P_{t|t-1}-k_tf_tk_t^\top.
+\end{aligned}
+$$
+
+The gain is now a two-element vector: one forecast error updates both
+coefficients. Their posterior covariance determines how the information
+is shared. When the market return is zero, the observation directly measures
+the intercept, while any beta update arises through existing coefficient
+covariance.
+
+::: {.callout-note collapse="true"}
+## Why the vector correction has this form {.unnumbered}
+
+Before seeing $y_t$, the coefficient vector and observation are jointly
+Normal, with covariance
+$$
+\begin{pmatrix}
+P_{t|t-1}&P_{t|t-1}x_t\\
+x_t^\top P_{t|t-1}&f_t
+\end{pmatrix}.
+$$
+Conditioning a joint Normal shifts the first mean by the cross-covariance
+times the inverse second variance times its realised residual. That gives
+$k_t=P_{t|t-1}x_t/f_t$. The corresponding conditional covariance subtracts
+$k_tf_tk_t^\top$. This is the multivariate justification for the same
+Bayesian update we derived by completing the scalar square.
+:::
 
 ### Understand what makes the gain large
 
-In the local-level model, a small $H$ makes the measurement reliable
-and pushes $K$ towards one. A large $P^-$ makes the state prediction
+In the local-level model, a small $\sigma^2$ makes the measurement reliable
+and pushes $k_t$ towards one. A large $p_{t|t-1}$ makes the state prediction
 uncertain and has the same effect. Large measurement noise pushes the
 gain towards zero. These are changes in the relative information supplied
 by the two sources.
@@ -292,14 +331,14 @@ plt.show()
 
 In a regression the gain is a vector, so its entries need not lie between
 zero and one. For a scalar slope observed through $y_t=x_t\beta_t+\varepsilon_t$,
-the gain is $P_t^-x_t/(x_t^2P_t^-+H)$. Its sign follows $x_t$.
+the gain is $p_{t|t-1}x_t/(x_t^2p_{t|t-1}+\sigma^2)$. Its sign follows $x_t$.
 A negative market return therefore reverses how a given return residual
 updates beta. This follows the regression equation, not a failure of the filter.
 
 ### Implement the random-walk filter
 
-The following function implements a random-walk state ($T=I$) with one
-observed outcome per date. Each row of the design matrix supplies $Z_t$.
+The following function implements a random-walk coefficient vector with one
+observed outcome per date. Each row of the design matrix supplies $x_t^\top$.
 It returns predicted and filtered moments plus the innovation log likelihood.
 The covariance update uses the Joseph form, algebraically equivalent to
 the formula above but less vulnerable to floating-point asymmetry.
@@ -308,7 +347,7 @@ the formula above but less vulnerable to floating-point asymmetry.
 #| label: random-walk-kalman-filter
 #| code-fold: true
 def kalman_filter(y: np.ndarray, design: np.ndarray, Q: np.ndarray,
-                  H: float, a0: np.ndarray, P0: np.ndarray) -> tuple:
+                  sigma2: float, a0: np.ndarray, P0: np.ndarray) -> tuple:
     """Return predicted and filtered state moments and the log likelihood."""
     n, d = design.shape
     predicted_mean = np.empty((n, d))
@@ -320,11 +359,11 @@ def kalman_filter(y: np.ndarray, design: np.ndarray, Q: np.ndarray,
     for t, (outcome, z) in enumerate(zip(y, design)):
         prior_mean, prior_cov = mean.copy(), covariance + Q
         innovation = outcome - z @ prior_mean
-        innovation_var = z @ prior_cov @ z + H
+        innovation_var = z @ prior_cov @ z + sigma2
         gain = prior_cov @ z / innovation_var
         mean = prior_mean + gain * innovation
         correction = np.eye(d) - np.outer(gain, z)
-        covariance = correction @ prior_cov @ correction.T + H * np.outer(gain, gain)
+        covariance = correction @ prior_cov @ correction.T + sigma2 * np.outer(gain, gain)
         predicted_mean[t], predicted_cov[t] = prior_mean, prior_cov
         filtered_mean[t], filtered_cov[t] = mean, covariance
         log_likelihood -= 0.5 * (
@@ -361,88 +400,15 @@ plt.tight_layout()
 plt.show()
 ```
 
-### Filtering, smoothing and path draws
-
-Filtering conditions on $y_{1:t}$. Smoothing conditions on the full sample
-$y_{1:T}$, including observations after date $t$. A smoothed beta can be more
-precise because it uses information unavailable at that date.
-
-For instance, a high return this month could reflect either a high beta
-or a large idiosyncratic disturbance. Several subsequent months with
-similar evidence make a persistent beta change more plausible. A smoother
-uses that later evidence to revise its assessment of this month's state.
-That is legitimate historical inference, but it is not the estimate a
-portfolio manager possessed at the time.
-
-The backward smoothing recursions follow from the same joint-Normal
-conditioning argument. Write $a_t^s,P_t^s$ for smoothed moments and initialise
-them at the final filtered moments. Then
-
-$$
-J_t=P_tT_{t+1}^\top(P_{t+1}^-)^{-1},\qquad
-a_t^s=a_t+J_t(a_{t+1}^s-a_{t+1}^-),\qquad
-P_t^s=P_t+J_t(P_{t+1}^s-P_{t+1}^-)J_t^\top.
-$$
-
-The mean correction compares what later data now tell us about tomorrow
-with what we predicted about tomorrow at date $t$. The covariance $P_t$
-links today's state to tomorrow's, transmitting that new information
-backward. At the sample endpoint there is no future information, so
-filter and smoother coincide.
-
-::: {.callout-note collapse="true"}
-## Optional derivation: backward conditioning {.unnumbered}
-
-Let $J_t=P_tT_{t+1}^\top(P_{t+1}^-)^{-1}$. The same conditional-Normal identity
-gives
-$\alpha_t\mid\alpha_{t+1},y_{1:t}\sim
-N(a_t+J_t(\alpha_{t+1}-a_{t+1}^-),P_t-J_tP_{t+1}^-J_t^\top)$.
-Draw the final state from its filtered distribution, then draw backwards using
-this conditional. Forward-filtering backward-sampling gives a joint state path.
-Drawing independently from each smoothed marginal would lose the temporal
-dependence of that path.
-:::
-
-### If the evolution variances are unknown
-
-So far the filter is conditional on $Q$ and $H$. To perform joint
-Bayesian inference, alternate a draw of the entire state path with draws
-of the variance parameters. For diagonal $Q$, independent inverse-Gamma
-priors give particularly transparent conditionals. In the random-walk
-model, conditional on $\alpha_{0:T}$,
-
-$$
-Q_j\mid\alpha_{0:T},y\sim IG\left(
-a_{Qj}+\frac T2,\ d_{Qj}+
-\frac12\sum_{t=1}^T(\alpha_{tj}-\alpha_{t-1,j})^2\right),
-$$
-
-and for a scalar observation variance,
-
-$$H\mid\alpha_{0:T},y\sim IG\left(
-a_H+\frac T2,\ d_H+\frac12\sum_{t=1}^T(y_t-Z_t\alpha_t)^2\right).$$
-
-These are the variance updates from Lecture 4 applied to state increments
-and observation residuals. They assume the initial-state prior is independent
-of these variances and that its state draw is included. The state path
-must be drawn jointly, for example by forward-filtering backward-sampling.
-Replacing it by the filtered mean is not a Gibbs update.
-
-Small $Q_j$ favours a nearly constant coefficient. Estimating very small
-evolution variances can be sensitive to their priors; adding state flexibility
-does not guarantee that the data identify its magnitude well. The core
-exercise keeps these variances fixed so students can understand and verify
-the filtering recursions first.
-
 ## Economic application and interpretation {#sec-empirical}
 
-For banking returns, let $\alpha_t=(a_t^{\rm CAPM},b_t^{\rm CAPM})^\top$ contain
-time-varying intercept and beta. Use $T=I$, $Z_t=(1,r_{m,t}^{e})$ and fixed $Q,H$.
-The state random walk permits gradual change; $Q$ determines how much.
-The following 2000–2024 example uses the documented Kenneth French snapshot.
+For banking returns, the two coefficients are the intercept
+$\beta_{0t}$ and market exposure $\beta_{1t}$. Use
+$x_t=(1,r_{m,t}^{e})^\top$ and the observation equation
+$$r_{b,t}^e=\beta_{0t}+\beta_{1t}r_{m,t}^e+\varepsilon_t.$$
 
-The observation equation is
-$r_{b,t}^e=a_t^{\rm CAPM}+b_t^{\rm CAPM}r_{m,t}^e+\varepsilon_t$.
+Both coefficients follow random walks with covariance $Q$.
+The following 2000–2024 example uses the documented Kenneth French snapshot.
 Returns are decimals: a market return of 0.02 means 2%.
 If the intercept is zero and beta is 1.2, the conditional expected
 banking excess return is $1.2(0.02)=0.024$, or 2.4%.
@@ -455,11 +421,10 @@ increments with standard deviations 0.0005 for the intercept and 0.03
 for beta. These are declared illustrative settings, not full-sample
 estimates masquerading as real-time inputs.
 
-Here $T=I$ denotes the transition matrix, not the sample length.
-The function below specialises to that identity transition. Its predicted
-covariance grows by $Q$ before each observation; the observed market
-return then determines how informative that month's bank return is
-about each coefficient.
+The code calls the same filter used in the simulation. The input
+design has one row per month, containing an intercept and the observed
+market return. The function propagates the coefficients, predicts the
+bank return, and corrects the coefficient distribution in that order.
 
 ```{python}
 #| label: tvp-filter
@@ -470,13 +435,13 @@ panel = pd.merge(ff[["mkt_rf", "rf"]], industry[["banks"]],
                  left_index=True, right_index=True).loc["2000":"2024"].dropna()
 y = (panel["banks"]-panel["rf"]).to_numpy()
 market = panel["mkt_rf"].to_numpy()
-H = .04**2
+sigma2 = .04**2
 Q = np.diag([.0005**2, .03**2])
 a0 = np.array([0., 1.])
 P0 = np.diag([.01**2, .5**2])
 design = np.column_stack([np.ones(len(y)), market])
 predicted_mean, predicted_cov, filtered_mean, filtered_cov, log_likelihood = (
-    kalman_filter(y, design, Q, H, a0, P0)
+    kalman_filter(y, design, Q, sigma2, a0, P0)
 )
 ```
 
@@ -487,7 +452,7 @@ beta change; it can also be observation noise.
 
 ```{python}
 #| label: fig-tvp-banking-beta
-#| fig-cap: "Filtered banking beta with pointwise 95% intervals, conditional on fixed Q and H. Each date uses only observations through that date."
+#| fig-cap: "Filtered banking beta with pointwise 95% intervals, conditional on fixed evolution and observation variances. Each date uses only observations through that date."
 #| code-fold: true
 import matplotlib.dates as mdates
 
@@ -504,17 +469,24 @@ plt.tight_layout()
 plt.show()
 ```
 
-The displayed intervals omit uncertainty about $Q,H$ because those were fixed
+The displayed intervals omit uncertainty about $Q,\sigma^2$ because those were fixed
 for teaching. They should not be described as a complete posterior under
 estimated volatility dynamics. Increase and decrease the beta element of $Q$:
 a larger value permits faster movement but also more state uncertainty.
 
-### Compare filtering with historical smoothing
+### Extension: what changes if we use later observations?
+
+Filtering estimates $\beta_t$ using only observations through date $t$.
+Smoothing estimates that same historical coefficient using the full
+sample, including later observations. Later returns can help us distinguish
+a persistent exposure change from a temporary noisy observation. The
+smoother is useful for historical analysis, but its estimates were not
+available for a trading decision at date $t$.
 
 The backward pass below starts from the final filtered distribution.
 At every earlier date it uses the stored prediction for the next date,
-not a new forward estimate. The gain $J_t=P_t(P_{t+1}^-)^{-1}$ uses
-the identity transition of this application.
+not a new forward estimate. The gain $J_t=P_{t|t}(P_{t+1|t})^{-1}$ uses
+the random-walk evolution of this application.
 
 ```{python}
 #| label: fig-tvp-filter-smoother
@@ -566,7 +538,7 @@ although our estimate of that constant can still change as we learn.
 fig, ax = plt.subplots()
 for beta_drift_sd, color in zip([0., 0.03, 0.10], [GREY, BLUE, BROWN]):
     candidate_Q = np.diag([0.0005**2, beta_drift_sd**2])
-    _, _, candidate_mean, _, _ = kalman_filter(y, design, candidate_Q, H, a0, P0)
+    _, _, candidate_mean, _, _ = kalman_filter(y, design, candidate_Q, sigma2, a0, P0)
     ax.plot(panel.index, candidate_mean[:, 1], color=color,
             label=f"Monthly beta-drift SD = {beta_drift_sd:g}")
 ax.set(xlabel="Date", ylabel="Filtered market beta")
@@ -588,10 +560,10 @@ selection step.
 ### What can we forecast with these states?
 
 Conditional on a specified next-month market return $x_*$, set
-$z_*=(1,x_*)$. The next banking return has distribution
+$x_{\rm new}=(1,x_*)^\top$. The next banking return has distribution
 
-$$r_{b,*}^e\mid y_{1:T},x_*,Q,H
-\sim N\left(z_*a_T,\ z_*(P_T+Q)z_*^\top+H\right).$$
+$$r_{b,*}^e\mid y_{1:T},x_*,Q,\sigma^2
+\sim N\left(x_{\rm new}^\top\widehat\beta_{T|T},\ x_{\rm new}^\top(P_{T|T}+Q)x_{\rm new}+\sigma^2\right).$$
 
 The extra $Q$ allows exposure to change before the next observation.
 The remaining terms account for current state uncertainty and new return
@@ -604,6 +576,59 @@ factor returns. The model describes changing historical exposure, not
 a causal effect of changing a bank's business strategy. The latent state
 is inferred under the assumed observation and transition equations.
 
+### Extensions after mastering the filter
+
+The core exercise is to reproduce the forward recursion and explain the
+gain. Two further uses connect this calculation to later Bayesian models.
+
+First, the filter produces a predictive likelihood automatically.
+For fixed $Q$ and $\sigma^2$, the forecast errors and their variances give
+$$\log p(y_{1:T}\mid Q,\sigma^2)
+=-\frac12\sum_{t=1}^T
+\left[\log(2\pi)+\log f_t+\frac{v_t^2}{f_t}\right].$$
+Large forecast errors reduce the score, but predicting everything with
+enormous variance is also penalised through $\log f_t$. This is the
+bridge to next lecture's predictive evaluation.
+
+Second, joint Bayesian inference can learn the evolution and observation
+variances rather than treating them as known. Alternate a joint state-path
+draw with variance draws conditional on that path. This extends the Gibbs
+logic from Lecture 4; it is not required to implement the filter itself.
+
+::: {.callout-note collapse="true"}
+## Supplement: state-path sampling and variance updates {.unnumbered}
+
+In the random-walk model, the cross-covariance of $\beta_t$ and
+$\beta_{t+1}$ given data through $t$ is $P_{t|t}$. Therefore define
+$J_t=P_{t|t}(P_{t+1|t})^{-1}$. Backward conditioning gives
+$$\beta_t\mid\beta_{t+1},y_{1:t}\sim
+N\left(\widehat\beta_{t|t}
++J_t(\beta_{t+1}-\widehat\beta_{t+1|t}),\
+P_{t|t}-J_tP_{t+1|t}J_t^\top\right).$$
+Draw $\beta_T$ from its final filtered distribution and draw backwards
+using this conditional. The resulting path preserves dependence across
+dates; independent draws from smoothed marginal distributions would not.
+
+For diagonal $Q=\operatorname{diag}(q_1,\ldots,q_d)$, take independent
+priors $q_j\sim IG(a_{qj},d_{qj})$ and
+$\sigma^2\sim IG(a_\sigma,d_\sigma)$, with an initial-state prior
+independent of them. Conditional on a path including $\beta_0$,
+$$q_j\mid\beta_{0:T},y\sim
+IG\left(a_{qj}+\frac T2,\
+d_{qj}+\frac12\sum_{t=1}^T(\beta_{jt}-\beta_{j,t-1})^2\right),$$
+$$\sigma^2\mid\beta_{0:T},y\sim
+IG\left(a_\sigma+\frac T2,\
+d_\sigma+\frac12\sum_{t=1}^T(y_t-x_t^\top\beta_t)^2\right).$$
+State increments inform evolution variances; observation residuals
+inform observation variance. The initial-state draw is needed to include
+the first increment. These formulas use the inverse-Gamma convention
+$p(v)\propto v^{-(a+1)}e^{-d/v}$.
+
+An estimated mean path must not replace the random path in a Gibbs update.
+Small evolution variances can also be sensitive to their priors. That is
+why the classroom filtering exercise first conditions on declared values.
+:::
+
 ## Discussion and connection to the exercises {#sec-discussion}
 
 The [Week 8 lab](../exercise-sessions/08-state-space-tvp.qmd) first simulates
@@ -613,7 +638,7 @@ path with the generating path before using real data.
 1. Reproduce the scalar update and explain each variance.
 2. Distinguish state noise from measurement noise.
 3. Explain why a smoother is unsuitable as an unqualified real-time trading signal.
-4. State which uncertainty is omitted when $Q,H$ are fixed.
+4. State which uncertainty is omitted when $Q,\sigma^2$ are fixed.
 
 The next lecture evaluates predictive distributions and averages across models.
 Both require respecting what was known at the forecast date.

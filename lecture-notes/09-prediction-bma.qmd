@@ -23,30 +23,31 @@ format:
 
 ## Motivation and the central question {#sec-motivation}
 
-One analyst forecasts returns using a constant mean; another adds a lagged
-predictor. Both have posterior uncertainty about their coefficients. Choosing
-one model and forgetting the alternative adds a further unacknowledged assumption.
+We have a posterior for the regression coefficients. An investor now asks:
+“What might next month's return be, and how likely is a negative return?”
+A central bank asks the same kind of question about inflation. A coefficient
+estimate alone does not answer either question.
 
-**How can a forecast represent uncertainty about parameters and about which
-model to use?** Bayesian model averaging (BMA) applies Bayes' theorem to a
-discrete model index and then averages the models' predictive distributions.
+**How do we turn what we have learned into a forecast, and judge whether
+that forecast was useful?** This is the main goal of the lecture.
+We first forecast with one familiar regression,
+$$y_{t+1}=x_{t+1}^\top\beta+\varepsilon_{t+1}.$$
 
-The object we want is a distribution for an observation that has not yet
-arrived. An investor may need a probability of a negative return, while
-a central bank may need a probability that inflation exceeds a threshold.
-Neither question is answered by a coefficient estimate alone.
+Here $\beta$ contains the unknown coefficients, $x_{t+1}$ contains
+predictors known at the forecast date, and $\varepsilon_{t+1}$ is a new
+disturbance. A posterior draw of $\beta$ gives a possible conditional mean.
+Adding a new disturbance gives a possible future outcome. Repeating those
+two steps produces a predictive distribution.
 
-There are three layers of uncertainty. Even with known parameters, a new
-observation contains new noise. Our parameters are uncertain because
-the sample is finite. Finally, different plausible models may imply
-different predictive distributions. We will add these layers in that order.
+Only after constructing that forecast do we introduce a second plausible
+model. Model averaging retains both predictive distributions instead of
+pretending we know which model is right. The final application follows a
+strict sequence: **forecast, observe, score, then update**.
 
-This lecture brings together earlier calculations rather than introducing
-a new sampler. Within each model, we use the posterior predictive
-distribution from conjugate regression. Across models, we apply the same
-Bayes' theorem used for parameters. In the exercise, we evaluate each
-forecast before allowing the realised outcome to update the models.
-
+Throughout, lowercase $\beta$ denotes coefficients, $b_n$ their posterior
+mean, and $V_n$ a relative coefficient covariance matrix. Uppercase
+$M_j$ names a model, not a parameter. We introduce these objects as they
+become necessary, rather than starting with a general model-selection problem.
 
 ```{python}
 #| label: setup-bma
@@ -94,12 +95,47 @@ both the uncertain mean and the next period's unpredictable disturbance.
 The posterior distribution of $\mu$ alone would be narrower still,
 and is not an appropriate interval for next period's realised growth.
 
+### Generate future outcomes before doing any more algebra
+
+For the worked example, take three illustrative posterior mean draws:
+$\mu^{(1)}=0.8$, $\mu^{(2)}=1.2$, $\mu^{(3)}=1.0$.
+Pair them with new disturbance draws $0.4,-1.5,0.2$.
+The resulting future growth draws are $1.2,-0.3,1.2$.
+One out of three is negative, so these three draws estimate its probability
+as one third. That tiny sample explains the procedure, not an accurate answer.
+
+The code repeats the calculation 10,000 times. It never adds new observations
+to the estimation sample; it generates possible futures under the same
+posterior. The analytical answer provides a benchmark.
+
+```{python}
+#| label: predictive-simulation-example
+#| code-fold: true
+N_PREDICTIVE = 10000
+mean_draws = rng.normal(1, 0.5, N_PREDICTIVE)
+new_disturbances = rng.normal(0, 1, N_PREDICTIVE)
+future_growth = mean_draws + new_disturbances
+print("Simulated probability of negative growth:", np.mean(future_growth < 0))
+print("Analytical probability:", stats.norm.cdf(0, loc=1, scale=np.sqrt(1.25)))
+print("Simulated central 95% predictive interval:",
+      np.quantile(future_growth, [0.025, 0.975]))
+```
+
+Notice why adding observation noise matters. A plausible mean of one
+does not rule out negative growth next period. Using the posterior of the
+mean itself as the outcome forecast would understate that possibility.
+When the noise variance is also unknown, first draw it from its posterior,
+then draw the coefficients conditional on it, and use its square root
+to scale the new disturbance.
+
 ```{python}
 #| label: fig-predictive-uncertainty
 #| fig-cap: "Three different objects: uncertainty about the mean, a plug-in outcome forecast, and the predictive distribution integrating over the mean."
 #| code-fold: true
 growth_grid = np.linspace(-3, 5, 500)
 fig, ax = plt.subplots()
+ax.hist(future_growth, bins=60, density=True, color=BLUE, alpha=0.15,
+        label="Simulated future outcomes")
 for sd, color, name in [
     (0.5, GREY, "Posterior of mean"),
     (1., BROWN, "Plug-in outcome forecast"),
@@ -114,7 +150,83 @@ plt.tight_layout()
 plt.show()
 ```
 
-### Add disagreement between models
+## Formal framework and derivation {#sec-methodology}
+
+### Write down what the predictive simulation averages
+
+Let $y$ denote the observations available at the forecast date. In a
+Normal regression, the conditional future density is
+$p(y_*\mid\beta,\sigma^2,x_*)=N(y_*;x_*^\top\beta,\sigma^2)$.
+The posterior supplies probabilities for the different parameter values.
+Averaging the conditional density over them gives
+
+$$p(y_*\mid y,x_*)=
+\int\!\!\int p(y_*\mid\beta,\sigma^2,x_*)
+p(\beta,\sigma^2\mid y)\,d\beta\,d\sigma^2.$$
+
+The integral does exactly what our simulation does. It considers plausible
+parameters, obtains the outcome distribution for each, and averages.
+The result is a density for an observation, not a density for a coefficient.
+
+With posterior draws $(\beta^{(s)},\sigma^{2(s)})$, generate
+$$y_*^{(s)}=x_*^\top\beta^{(s)}+\sigma^{(s)}z^{(s)},
+\qquad z^{(s)}\sim N(0,1).$$
+
+Use paired parameter draws from the same iteration if they came from MCMC.
+The fraction of outcomes below zero estimates a loss probability, their
+quantiles give a predictive interval, and their mean estimates the point
+forecast appropriate under squared-error loss. Quantiles of
+$x_*^\top\beta^{(s)}$ alone concern the conditional mean and leave out
+future residual risk.
+
+### The same forecast has an analytical Student-t distribution
+
+Recall the scaled Normal–Inverse-Gamma posterior:
+
+$$\beta\mid\sigma^2,y\sim
+N(b_n,\sigma^2 V_n),\qquad
+\sigma^2\mid y\sim IG(a_n,d_n).$$
+
+For a known predictor vector $x_*$, the future outcome is
+$y_*=x_*^\top\beta+\varepsilon_*$ with new residual variance
+$\sigma^2$. First integrate the Normal coefficient distribution:
+
+$$y_*\mid\sigma^2,y,x_*\sim
+N\left(x_*^\top b_n,\ \sigma^2(1+x_*^\top V_nx_*)\right).$$
+
+The coefficient contribution is $x_*^\top(\sigma^2V_n)x_*$.
+The independent new residual contributes the extra $\sigma^2$.
+Integrating the remaining inverse-Gamma variance mixes Normal
+distributions with different spreads, producing Student-$t$ tails.
+
+Chapter 2 supplies
+$y_*\mid y,x_*\sim t_{2a_n}(x_*^\top b_n,
+\text{scale}=\sqrt{(d_n/a_n)(1+x_*^\top V_nx_*)})$.
+The 1 represents new observation noise and the quadratic term coefficient
+uncertainty. For now there is only one model; both uncertainties already belong in its forecast.
+
+The Student-$t$ **scale is not its standard deviation**. When $a_n>1$,
+its predictive variance is
+$d_n(1+x_*^\top V_nx_*)/(a_n-1)$.
+The additional factor relative to the squared scale reflects uncertainty
+about the observation variance. A plug-in Gaussian forecast would omit
+this tail behaviour as well as potentially ignoring coefficient uncertainty.
+
+### Introduce a second plausible forecasting model
+
+For returns, one model may use a constant expected return; another may
+include last month's return. We have just learned how to construct a
+predictive distribution under either regression. If we are unsure which
+model to use, the new task is to combine those already-defined forecasts.
+
+Let $w_j$ be the current probability of model $M_j$, with weights summing
+to one. The law of total probability gives
+$$p(y_*\mid y)=\sum_j w_j\,p(y_*\mid y,M_j).$$
+Choose a model according to its probability, then consider its possible
+future outcomes. Summing over the possible model choices gives the mixture.
+We will explain how the data update the weights after seeing its meaning.
+
+### Work through an average of two forecasts
 
 Suppose two models predict growth with means 1% and 3%, each with standard
 deviation 1 percentage point. Give them probabilities 0.6 and 0.4.
@@ -155,9 +267,28 @@ plt.tight_layout()
 plt.show()
 ```
 
-## Formal framework and derivation {#sec-methodology}
+Write $m_j$ and $v_j$ for the predictive mean and variance within model
+$j$. These include parameter uncertainty. The total-variance identity
+explains the worked example:
 
-### Treat the model index as another unknown
+$$\operatorname{Var}(y_*\mid y)=
+\sum_jw_j v_j+\sum_jw_j(m_j-\bar m)^2,\qquad
+\bar m=\sum_jw_jm_j.$$
+
+This follows by writing $y_*-\bar m=(y_*-m_j)+(m_j-\bar m)$
+within each model. Squaring gives a within-model term, a between-model
+term and a cross term. The conditional expectation of the cross term is
+zero because $E[y_*-m_j\mid y,M_j]=0$. Summing over models yields
+the displayed expression.
+
+For a future-event probability, average the component probabilities:
+$P(y_*<0\mid y)=\sum_jw_jP(y_*<0\mid y,M_j)$.
+For simulated predictive draws, first draw the model index using the
+weights, then draw parameters from that model's posterior and an outcome
+conditional on those parameters. Do not average one simulated outcome
+from each model: that would create the distribution of a different object.
+
+### Update model weights with the next observation
 
 A model specifies a likelihood and a parameter prior. We also assign
 probabilities to the candidate models themselves. These two levels of
@@ -197,19 +328,25 @@ plt.tight_layout()
 plt.show()
 ```
 
-### First integrate parameters, then sum over models
+### Accumulated predictive evidence gives model probabilities
 
-For model $M_j$,
+The chain rule supplies a useful bridge between evidence and prediction:
 
-the joint distribution of the future observation and parameters factorises
-as $p(y_*,\theta_j\mid y,M_j)=
-p(y_*\mid\theta_j,y,M_j)p(\theta_j\mid y,M_j)$.
-Summing over possible parameter values means integrating this joint
-distribution. For observations conditionally independent of the training
-sample given the parameters and known predictors, this gives
+$$p(y_{1:T}\mid M_j)=
+\prod_{t=1}^T p(y_t\mid y_{1:t-1},M_j).$$
 
-$$p(y_*\mid y,M_j)=\int p(y_*\mid\theta_j,M_j)
-p(\theta_j\mid y,M_j)\,d\theta_j.$$
+For a time-series model this is conditional on the common initial history.
+Evidence is the accumulated product of forecasts issued before each
+observation, with parameters updated between forecasts. Consequently,
+
+$$w_{j,t}=
+\frac{w_{j,t-1}p(y_t\mid y_{1:t-1},M_j)}
+{\sum_\ell w_{\ell,t-1}p(y_t\mid y_{1:t-1},M_\ell)}.$$
+
+In log odds, each new observation adds the difference between the models'
+log predictive scores. Recomputing marginal likelihoods from the beginning
+and updating weights sequentially give the same result when the priors,
+data and initial conditioning information are identical.
 
 The likelihood of the observed sample under a model also integrates its
 parameters, but against their **prior**:
@@ -227,16 +364,10 @@ Marginal likelihood asks how much density the model assigned to $y$
 **before that learning**. Substituting the posterior into the second
 integral would use the observations twice.
 
-Bayes' theorem for the model index gives
+Normalising accumulated evidence gives the same model probabilities:
 
 $$w_j=p(M_j\mid y)=\frac{p(y\mid M_j)p(M_j)}
-{\sum_\ell p(y\mid M_\ell)p(M_\ell)},\qquad
-p(y_*\mid y)=\sum_jw_jp(y_*\mid y,M_j).$$
-
-To derive the second expression, partition the possible future outcomes
-by the mutually exclusive model index. The joint predictive contribution
-from model $j$ is $p(y_*\mid y,M_j)p(M_j\mid y)$; adding these
-contributions eliminates the index.
+{\sum_\ell p(y\mid M_\ell)p(M_\ell)}.$$
 
 For two models, posterior odds equal prior odds times a Bayes factor:
 
@@ -249,58 +380,6 @@ make the posterior probability two thirds unless the prior odds were one.
 The probabilities remain conditional on the models being compared.
 A high weight can mean “better among these candidates” even when all
 of them omit important features.
-
-The total-variance identity explains the worked example:
-
-$$\operatorname{Var}(y_*\mid y)=
-\sum_jw_j V_j+\sum_jw_j(m_j-\bar m)^2,\qquad
-\bar m=\sum_jw_jm_j.$$
-
-This follows by writing $y_*-\bar m=(y_*-m_j)+(m_j-\bar m)$
-within each model. Squaring gives a within-model term, a between-model
-term and a cross term. The conditional expectation of the cross term is
-zero because $E[y_*-m_j\mid y,M_j]=0$. Summing over models yields
-the displayed expression.
-
-For a future-event probability, average the component probabilities:
-$P(y_*<0\mid y)=\sum_jw_jP(y_*<0\mid y,M_j)$.
-For simulated predictive draws, first draw the model index using the
-weights, then draw parameters from that model's posterior and an outcome
-conditional on those parameters. Do not average one simulated outcome
-from each model: that would create the distribution of a different object.
-
-### The conjugate regression forecast
-
-Recall the scaled Normal–Inverse-Gamma posterior:
-
-$$\beta_j\mid\sigma_j^2,y,M_j\sim
-N(b_j,\sigma_j^2 B_j),\qquad
-\sigma_j^2\mid y,M_j\sim IG(a_j,d_j).$$
-
-For a known predictor vector $x_*$, the future outcome is
-$y_*=x_*^\top\beta_j+\varepsilon_*$ with new residual variance
-$\sigma_j^2$. First integrate the Normal coefficient distribution:
-
-$$y_*\mid\sigma_j^2,y,M_j,x_*\sim
-N\left(x_*^\top b_j,\ \sigma_j^2(1+x_*^\top B_jx_*)\right).$$
-
-The coefficient contribution is $x_*^\top(\sigma_j^2B_j)x_*$.
-The independent new residual contributes the extra $\sigma_j^2$.
-Integrating the remaining inverse-Gamma variance mixes Normal
-distributions with different spreads, producing Student-$t$ tails.
-
-Chapter 2 supplies
-$y_*\mid y,M_j,x_*\sim t_{2a_j}(x_*^\top b_j,
-\text{scale}=\sqrt{(d_j/a_j)(1+x_*^\top B_jx_*)})$.
-The 1 represents new observation noise and the quadratic term coefficient
-uncertainty. Model averaging adds a further layer rather than replacing either.
-
-The Student-$t$ **scale is not its standard deviation**. When $a_j>1$,
-its predictive variance is
-$d_j(1+x_*^\top B_jx_*)/(a_j-1)$.
-The additional factor relative to the squared scale reflects uncertainty
-about the observation variance. A plug-in Gaussian forecast would omit
-this tail behaviour as well as potentially ignoring coefficient uncertainty.
 
 ### Why model evidence depends on prior spread
 
@@ -324,12 +403,14 @@ comparison more interpretable than a supposedly harmless “very diffuse” prio
 ::: {.callout-note collapse="true"}
 ## Optional calculation: the NIG marginal likelihood {.unnumbered}
 
-The likelihood normalising constant is $(2\pi)^{-n/2}$. Integrating the
+Within model $j$, write $V_j,a_j,d_j$ for the posterior covariance
+scale and inverse-Gamma parameters, with subscript $0j$ for their prior
+counterparts. The likelihood contributes a factor $(2\pi)^{-n/2}$. Integrating the
 completed Normal square contributes the determinant ratio; integrating variance
 contributes the Gamma-function ratio:
 
 $$p(y\mid M_j)=(2\pi)^{-n/2}
-\frac{|B_j|^{1/2}}{|B_{0j}|^{1/2}}
+\frac{|V_j|^{1/2}}{|V_{0j}|^{1/2}}
 \frac{d_{0j}^{a_{0j}}}{d_j^{a_j}}
 \frac{\Gamma(a_j)}{\Gamma(a_{0j})}.$$
 
@@ -345,25 +426,7 @@ scale ratios. Keeping these constants is essential for an evidence
 calculation, even though we could drop them when locating a posterior mode.
 :::
 
-### Forecast evaluation is sequential
-
-The chain rule supplies a useful bridge between evidence and prediction:
-
-$$p(y_{1:T}\mid M_j)=
-\prod_{t=1}^T p(y_t\mid y_{1:t-1},M_j).$$
-
-For a time-series model this is conditional on the common initial history.
-Evidence is the accumulated product of forecasts issued before each
-observation, with parameters updated between forecasts. Consequently,
-
-$$w_{j,t}=
-\frac{w_{j,t-1}p(y_t\mid y_{1:t-1},M_j)}
-{\sum_\ell w_{\ell,t-1}p(y_t\mid y_{1:t-1},M_\ell)}.$$
-
-In log odds, each new observation adds the difference between the models'
-log predictive scores. Recomputing marginal likelihoods from the beginning
-and updating weights sequentially give the same result when the priors,
-data and initial conditioning information are identical.
+### Evaluate the forecast before updating it
 
 At date $t-1$, issue each predictive density and the mixture using
 $w_{j,t-1}$. After observing $y_t$, record
@@ -464,22 +527,22 @@ frame = frame.loc["1990":"2024"].dropna()
 y = frame["y"].to_numpy()
 designs = [np.ones((len(y), 1)), np.column_stack([np.ones(len(y)), frame["lag"]])]
 
-def nig_fit(y: np.ndarray, X: np.ndarray, b0: np.ndarray, B0: np.ndarray,
+def nig_fit(y: np.ndarray, X: np.ndarray, b0: np.ndarray, V0: np.ndarray,
             a0: float, d0: float) -> tuple:
     """Return NIG posterior parameters and the log marginal likelihood."""
     k = X.shape[1]
-    P0 = np.linalg.inv(B0)
+    P0 = np.linalg.inv(V0)
     P1 = P0 + X.T@X
-    B = np.linalg.solve(P1, np.eye(k))
+    V = np.linalg.solve(P1, np.eye(k))
     b = np.linalg.solve(P1, P0 @ b0 + X.T@y)
     residual = y-X@b
     displacement = b - b0
     a = a0 + len(y)/2
     d = d0 + (residual@residual + displacement @ P0 @ displacement)/2
     log_evidence = (-len(y)/2*np.log(2*np.pi)
-                    + .5*np.linalg.slogdet(B)[1] - .5*np.linalg.slogdet(B0)[1]
+                    + .5*np.linalg.slogdet(V)[1] - .5*np.linalg.slogdet(V0)[1]
                     + a0*np.log(d0)-a*np.log(d)+gammaln(a)-gammaln(a0))
-    return b, B, a, d, log_evidence
+    return b, V, a, d, log_evidence
 
 A0, D0, INITIAL_OBSERVATIONS = 3., 32., 60
 prior_means = [np.zeros(1), np.zeros(2)]
@@ -493,10 +556,10 @@ for t in range(INITIAL_OBSERVATIONS, len(y)):
     log_evidence = np.array([fit[-1] for fit in fitted])
     log_weights = log_evidence-logsumexp(log_evidence)
     log_scores = []
-    for design, (b, B, a, d, _) in zip(designs, fitted):
+    for design, (b, V, a, d, _) in zip(designs, fitted):
         x = design[t]
         log_scores.append(stats.t.logpdf(y[t], 2*a, loc=x@b,
-                          scale=np.sqrt(d/a*(1+x@B@x))))
+                          scale=np.sqrt(d/a*(1+x@V@x))))
     score_gains.append(logsumexp(log_weights+log_scores)-log_scores[0])
     weights_history.append(np.exp(log_weights))
 ```
@@ -569,10 +632,10 @@ last_fits = [
 last_log_evidence = np.array([fit[-1] for fit in last_fits])
 last_weights = np.exp(last_log_evidence - logsumexp(last_log_evidence))
 components = []
-for design, (b, B, a, d, _) in zip(designs, last_fits):
+for design, (b, V, a, d, _) in zip(designs, last_fits):
     x = design[t]
     components.append(stats.t(2 * a, loc=x @ b,
-                              scale=np.sqrt(d / a * (1 + x @ B @ x))))
+                              scale=np.sqrt(d / a * (1 + x @ V @ x))))
 return_grid = np.linspace(min(component.ppf(0.005) for component in components),
                           max(component.ppf(0.995) for component in components), 600)
 fig, ax = plt.subplots()
