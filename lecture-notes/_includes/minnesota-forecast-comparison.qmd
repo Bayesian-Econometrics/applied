@@ -1,4 +1,4 @@
-~~~{python}
+```{python}
 #| label: fig-minnesota-forecast-comparison
 #| fig-cap: "One-month-ahead inflation forecast RMSE, 2010–2019. Smaller variance multipliers mean stronger shrinkage. The three settings are fixed in advance; lower RMSE is better."
 #| code-fold: true
@@ -93,4 +93,4 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3, frameon=False
 plt.tight_layout()
 plt.show()
 print(forecast_rmse.rename("RMSE").round(4).to_string())
-~~~
+```

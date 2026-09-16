@@ -134,7 +134,7 @@ the provisional variance. These curves are **different full conditionals**,
 not competing marginal posteriors. Gibbs will visit many variances and use
 the corresponding conditional each time.
 
-~~~{python}
+```{python}
 #| label: fig-gibbs-mean-conditionals
 #| fig-cap: "With the same observations, a smaller observation variance makes the conditional distribution of the mean narrower and closer to the sample mean."
 #| code-fold: true
@@ -154,7 +154,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ### Conditional moves, joint uncertainty
 
@@ -181,7 +181,7 @@ coordinate fixed; the vertical move uses the new horizontal coordinate.
 After a complete sweep we retain the pair. Individual coordinates are not
 drawn independently of one another.
 
-~~~{python}
+```{python}
 #| label: fig-gibbs-conditional-moves
 #| fig-cap: "Gibbs updates one coordinate at a time. Contours show the joint Normal target; the path shows the first 20 sweeps from a deliberately distant start."
 #| code-fold: true
@@ -204,7 +204,7 @@ ax.set(xlabel="First coordinate", ylabel="Second coordinate")
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ## Formal framework and derivation {#sec-methodology}
 
@@ -362,7 +362,7 @@ autocorrelation is therefore $\rho^{2\ell}$. The figure shows why a chain
 can have the correct target but provide fewer independent pieces of
 information than its length suggests.
 
-~~~{python}
+```{python}
 #| label: fig-gibbs-theoretical-autocorrelation
 #| fig-cap: "Theoretical autocorrelation after complete sweeps of the bivariate Normal Gibbs sampler. Stronger posterior association leads to more persistent draws."
 #| code-fold: true
@@ -376,7 +376,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False, ncol=3
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 For example, with $\rho=0.8$, the variance inflation for the sample mean is
 $(1+\rho^2)/(1-\rho^2)\approx4.56$. Under stationary long-run conditions,
@@ -412,7 +412,7 @@ coefficients and one variance. The two starting variances correspond to
 residual standard deviations of 2% and 10% per month. They provide different
 initial positions for the same model.
 
-~~~{python}
+```{python}
 #| label: gibbs-bank-regression
 #| code-fold: true
 ff = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
@@ -441,13 +441,13 @@ for start in [0.0004, 0.01]:
 kept = np.concatenate([chain[BURN:] for chain in chains])
 print("Market beta: mean and 95% interval",
       kept[:, 1].mean(), np.quantile(kept[:, 1], [0.025, 0.975]))
-~~~
+```
 
 The code uses the Gamma generator's **scale**, the reciprocal of the
 Inverse-Gamma scale parameter. The variance draw uses residuals at the newly
 drawn coefficients. Reversing either detail changes the target.
 
-~~~{python}
+```{python}
 #| label: fig-gibbs-bank-output
 #| fig-cap: "Two market-beta traces and pooled post-warm-up density. Visual agreement is a useful check, not a complete convergence assessment."
 #| code-fold: true
@@ -462,7 +462,7 @@ for ax in axes:
     ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 Data come from the documented [Kenneth French snapshot](../data/SOURCES.md).
 The model describes constant historical exposures; it does not establish that
@@ -489,7 +489,7 @@ indicates that the observed returns favour different loadings from our prior
 centres. Alpha is plotted in percentage points; the other coefficients are
 dimensionless. Density heights therefore should not be compared across panels.
 
-~~~{python}
+```{python}
 #| label: fig-gibbs-factor-learning
 #| fig-cap: "Prior and marginal posterior distributions for the banking regression. Each panel uses the units appropriate to its coefficient."
 #| code-fold: true
@@ -513,7 +513,7 @@ fig.legend(handles, labels, loc="lower center", ncol=2, frameon=False)
 plt.tight_layout(rect=(0, 0.06, 1, 1))
 plt.show()
 print("Posterior probability market beta exceeds one:", np.mean(kept[:, 1] > 1))
-~~~
+```
 
 ### How accurate is the simulation?
 
@@ -523,7 +523,7 @@ autocorrelation within each chain, rather than across a concatenation boundary.
 Here we illustrate it for market beta; other coefficients, the variance and
 tail-probability indicators can have different dependence.
 
-~~~{python}
+```{python}
 #| label: fig-gibbs-bank-autocorrelation
 #| fig-cap: "Within-chain sample autocorrelations for market beta. Dependence determines the numerical precision of posterior averages."
 #| code-fold: true
@@ -548,7 +548,7 @@ plt.tight_layout()
 plt.show()
 pooled_mcse = np.sqrt(np.sum(np.square(chain_mcse))) / len(chains)
 print("Approximate MCSE of pooled market-beta mean:", pooled_mcse)
-~~~
+```
 
 The batch-means calculation splits each retained chain into 40 consecutive
 batches of 100 draws. If batches are long enough relative to the dependence,
@@ -579,7 +579,7 @@ contains the unpredictable monthly residual, so its interval is generally
 wider. This is the posterior predictive simulation introduced in Lecture 3,
 now driven by dependent posterior draws.
 
-~~~{python}
+```{python}
 #| label: fig-gibbs-bank-prediction
 #| fig-cap: "Banking-return scenarios with size and value factors fixed at zero. The inner band describes the conditional mean; the outer band includes monthly residual risk."
 #| code-fold: true
@@ -601,7 +601,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 These are conditional scenarios, not an unconditional forecast of banking
 returns. A forecast made before next month's factors are known must also

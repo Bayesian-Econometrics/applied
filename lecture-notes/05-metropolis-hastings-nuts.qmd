@@ -108,7 +108,7 @@ Nevertheless, evaluating $\ell$ at any proposed log odds is straightforward.
 The next figure normalises the curves numerically on a wide grid solely to
 display them. An MH sampler will not need that normalisation.
 
-~~~{python}
+```{python}
 #| label: fig-mh-logit-posterior
 #| fig-cap: "A Normal prior on log odds combines with a Bernoulli likelihood to give a non-Normal posterior. The likelihood is rescaled to have unit area for comparison."
 #| code-fold: true
@@ -128,7 +128,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=3, frameon=False
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ### Propose, compare, accept or stay
 
@@ -167,7 +167,7 @@ a prior standard deviation. Changing it should change efficiency but not
 the posterior being estimated. The next figure uses a standard Normal
 target so that proposal behaviour is visible without model complications.
 
-~~~{python}
+```{python}
 #| label: fig-mh-proposal-width
 #| fig-cap: "Two random-walk chains targeting the same standard Normal. Tiny steps move slowly; very large steps often repeat the current value after rejection."
 #| code-fold: true
@@ -186,7 +186,7 @@ for ax, step in zip(axes, [0.08, 4.0]):
 axes[-1].set_xlabel("Iteration")
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ## Formal framework and derivation {#sec-methodology}
 
@@ -350,7 +350,7 @@ circles in position–momentum space when $M=1$. It isolates the numerical
 approximation. These are paths within **one proposal**, not successive
 retained posterior draws.
 
-~~~{python}
+```{python}
 #| label: fig-hmc-energy-trajectory
 #| fig-cap: "Leapfrog trajectories for a standard Normal target. Smaller numerical steps follow the constant-energy contour more closely."
 #| code-fold: true
@@ -374,7 +374,7 @@ for ax, step_size, steps in zip(axes, [0.15, 0.9], [40, 7]):
     ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 #### What NUTS automates
 
@@ -447,7 +447,7 @@ standardisation or the posterior. In this exercise we keep the estimated
 posterior fixed during the evaluation period and update only the observed
 lagged-return predictor.
 
-~~~{python}
+```{python}
 #| label: logistic-mh-example
 #| code-fold: true
 ff = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
@@ -479,7 +479,7 @@ mh_seconds = perf_counter() - mh_start
 kept = draws[BURN:]
 print("Acceptance:", accepted / N_ITER)
 print("Coefficient means:", kept.mean(axis=0))
-~~~
+```
 
 The code stores a state at every iteration. The function
 uses NumPy's stable log-sum-exp calculation for $\log(1+e^\eta)$;
@@ -495,7 +495,7 @@ It refreshes a two-dimensional momentum at every iteration, takes 15
 leapfrog steps with $M=I$, and accepts using the change in joint energy.
 The coefficient gradient is the expression derived above.
 
-~~~{python}
+```{python}
 #| label: logistic-hmc-example
 #| code-fold: true
 def gradient(beta: np.ndarray, X: np.ndarray, y: np.ndarray, tau: float) -> np.ndarray:
@@ -537,7 +537,7 @@ for iteration in range(N_ITER):
 hmc_seconds = perf_counter() - hmc_start
 hmc_kept = hmc_draws[BURN:]
 print("HMC acceptance:", hmc_accepted / N_ITER)
-~~~
+```
 
 The finite-difference check perturbs one coefficient at a time and compares
 the resulting log-density slope with the analytic gradient. It catches
@@ -551,7 +551,7 @@ rapidly the algorithm moves; overlapping density estimates examine whether
 the two methods represent similar posterior distributions. Agreement is
 expected up to simulation error because the target is identical.
 
-~~~{python}
+```{python}
 #| label: fig-logistic-sampler-comparison
 #| fig-cap: "Random-walk MH and fixed-length HMC target the same slope posterior. Movement through iterations and the marginal distribution are separate aspects of the comparison."
 #| code-fold: true
@@ -567,7 +567,7 @@ for ax in axes:
     ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ### Compare information and computational cost
 
@@ -576,7 +576,7 @@ uses one new log-density evaluation in our implementation. Equal iteration
 counts therefore do not imply equal effort. The next block measures sample
 dependence and uses batches to approximate MCSEs for the slope mean.
 
-~~~{python}
+```{python}
 #| label: fig-logistic-sampler-autocorrelation
 #| fig-cap: "Autocorrelations of the slope draws from the same logistic target. Lower dependence per iteration must be weighed against computation time."
 #| code-fold: true
@@ -606,7 +606,7 @@ ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
 print(pd.DataFrame(comparison).set_index("Sampler").round(4))
-~~~
+```
 
 This batch-based ESS is an elementary approximation for the **slope mean**.
 It assumes a representative stationary run and sufficiently long batches.
@@ -625,7 +625,7 @@ not a comparison of economic models.
 The same training data and priors can be passed to PyMC's NUTS sampler; this
 optional code is shown for the session and is not executed by the chapter build.
 
-~~~{python}
+```{python}
 #| label: logistic-nuts-example
 #| eval: false
 #| code-fold: true
@@ -639,7 +639,7 @@ with pm.Model() as logistic_model:
                            target_accept=0.9, random_seed=SEED)
 print(az.summary(nuts_draws, var_names=["beta"]))
 print("Divergences:", int(nuts_draws.sample_stats["diverging"].sum()))
-~~~
+```
 
 The four chains allow a between-chain assessment as well as within-chain
 dependence checks. Read $\widehat R$, bulk and tail ESS, MCSE and
@@ -664,7 +664,7 @@ binary outcomes, draw $y_*^{(s)}\sim\operatorname{Bernoulli}(p_*^{(s)})$.
 Uncertainty about the probability and unpredictability of the realised
 zero-or-one outcome are different concepts.
 
-~~~{python}
+```{python}
 #| label: fig-logistic-probability
 #| fig-cap: "Posterior uncertainty about the conditional probability of a negative next-month return. These bands concern a probability, not the binary realised outcome."
 #| code-fold: true
@@ -684,7 +684,7 @@ X_test = np.column_stack([np.ones(len(test)), (test["lag"] - center) / scale])
 predicted = expit(kept @ X_test.T).mean(axis=0)
 outcomes = (test["mkt_rf"] < 0).to_numpy()
 print("Held-out Brier score:", np.mean((outcomes - predicted)**2))
-~~~
+```
 
 A coefficient's posterior uncertainty does not establish forecasting usefulness.
 Compare the held-out probabilities with a constant-probability benchmark.
@@ -697,7 +697,7 @@ The Brier score averages squared errors in probabilities; lower is better.
 A richer model must earn its additional complexity through performance,
 not simply through a more sophisticated sampling algorithm.
 
-~~~{python}
+```{python}
 #| label: fig-logistic-heldout-score
 #| fig-cap: "Held-out cumulative Brier-score difference: logistic model minus a constant-probability benchmark. Negative values favour the logistic forecasts over this evaluation period."
 #| code-fold: true
@@ -715,7 +715,7 @@ ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
 print("Constant benchmark Brier score:", np.mean((outcomes - baseline_probability)**2))
-~~~
+```
 
 An improvement over this one held-out period is descriptive evidence, not
 a guarantee of persistent predictability. The data are the documented

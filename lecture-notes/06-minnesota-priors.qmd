@@ -136,7 +136,7 @@ The density plot displays the entire update, not just its mean. A narrow
 posterior can partly reflect a strong prior: it should not automatically
 be described as precise information supplied by the data.
 
-~~~{python}
+```{python}
 #| label: fig-minnesota-scalar-densities
 #| fig-cap: "The same likelihood with a tight and a loose prior. Posterior concentration and movement depend on both sources of information."
 #| code-fold: true
@@ -157,7 +157,7 @@ axes[-1].set_xlabel("Lagged-inflation coefficient")
 axes[-1].legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=3, frameon=False)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ### Shrinkage is a compromise, not a variable-selection rule
 
@@ -174,7 +174,7 @@ it is not a theorem that every prior or every tightness choice improves
 every forecast. Later in the course, we distinguish this graded shrinkage
 from priors that explicitly select variables.
 
-~~~{python}
+```{python}
 #| label: fig-minnesota-scalar
 #| fig-cap: "The same sample estimate receives more weight as the prior becomes less concentrated. The horizontal lines mark the prior centre and sample estimate."
 #| code-fold: true
@@ -188,7 +188,7 @@ ax.set(xlabel="Prior standard deviation", ylabel="Posterior mean")
 ax.grid(axis="y", alpha=.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ## Formal framework and derivation {#sec-methodology}
 
@@ -244,7 +244,7 @@ Our intercept prior is loose enough for the data to inform that mean.
 Similarly, a random-walk coefficient centre combined with a nonzero
 intercept allows drift.
 
-~~~{python}
+```{python}
 #| label: fig-minnesota-baseline
 #| fig-cap: "Illustrative baseline forecasts after a last observed value of two, with intercept fixed at zero. Prior centres determine the baseline; variances determine how strongly we favour it."
 #| code-fold: true
@@ -263,7 +263,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False, ncol=3
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 These lines are forecasts at illustrative coefficient centres, not posterior
 forecasts or averages over the prior. A Normal prior centred at an own-lag
@@ -354,7 +354,7 @@ The heatmap excludes the intercept so its deliberately large variance
 does not hide the lag structure. Dividing each coefficient's prior
 standard deviation by $s_i/s_j$ displays its spread in comparable units.
 
-~~~{python}
+```{python}
 #| label: fig-minnesota-manual-covariance
 #| fig-cap: "Scale-adjusted prior standard deviations in the two-variable example. Own lags have more room than cross lags, and lag-two standard deviations are half those at lag one."
 #| code-fold: true
@@ -381,7 +381,7 @@ for i in range(2):
 fig.colorbar(im, ax=ax, label="Scale-adjusted prior standard deviation")
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ### The posterior remains a regression update
 
@@ -471,7 +471,7 @@ more variables or lags repeats the same construction. The scales $s_i$
 come from separate AR(1) residuals, so they measure remaining variation
 after a simple own-history model rather than raw series dispersion.
 
-~~~{python}
+```{python}
 #| label: minnesota-covariance
 #| code-fold: true
 macro = pd.read_parquet(DATA / "fred_macro_monthly.parquet")
@@ -507,7 +507,7 @@ for i in range(3):
     posterior_means.append(np.linalg.solve(precision, X.T @ Y[:, i] / scales[i]**2))
     posterior_covariances.append(np.linalg.solve(precision, np.eye(X.shape[1])))
 posterior_means = np.array(posterior_means)
-~~~
+```
 
 The zero prior mean means the information-vector term
 $V_{0i}^{-1}b_{0i}$ is zero in this code. A random-walk coefficient
@@ -515,7 +515,7 @@ centre would require adding that term; changing the prose alone would
 not change the model. Solving a linear system implements the posterior
 formula without explicitly inverting its precision for the mean.
 
-~~~{python}
+```{python}
 #| label: fig-minnesota-macro-series
 #| fig-cap: "The training observations used in the three-equation system. All series are changes, making a zero-lag baseline interpretable."
 #| code-fold: true
@@ -531,14 +531,14 @@ axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
 axes[-1].set_xlabel("Month")
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 The code orders coefficients by lag and then regressor, with the intercept first.
 The full independent prior covariance across three equations is block diagonal,
 with 39 entries on its diagonal. The exercise extends this bookkeeping to five
 variables and four lags.
 
-~~~{python}
+```{python}
 #| label: fig-minnesota-lag-variances
 #| fig-cap: "Prior variances by lag for the output equation. Distant lags are more concentrated. Differences between series include the measurement-scale adjustment."
 #| code-fold: true
@@ -551,7 +551,7 @@ ax.grid(axis="y", alpha=.3)
 ax.legend(loc="upper center", bbox_to_anchor=(.5, -.15), ncol=3, frameon=False)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 Read this plot as prior information, not estimated economic transmission.
 To choose tightness for forecasting, use a training/validation split and
@@ -566,7 +566,7 @@ intervals for the output-growth equation. Each interval uses the relevant
 diagonal element of $V_{1i}$. The posterior covariance itself is generally
 not diagonal: correlated lagged regressors couple the coefficient estimates.
 
-~~~{python}
+```{python}
 #| label: fig-minnesota-posterior-coefficients
 #| fig-cap: "Output-growth equation: OLS estimates and Minnesota posterior means with marginal 95% credible intervals, conditional on the fixed innovation variance. The intercept is omitted."
 #| code-fold: true
@@ -588,7 +588,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), frameon=False)
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 Read each row as an association conditional on all the other included lags.
 An interval overlapping zero indicates uncertainty about that particular
@@ -624,7 +624,7 @@ from the law of total variance: average the conditional variance and add
 the variance of the conditional expectation. A tight prior can reduce the
 second term; it does not remove next month's innovation.
 
-~~~{python}
+```{python}
 #| label: minnesota-one-step-prediction
 #| code-fold: true
 x_next = np.concatenate([np.ones(1)] + [values[-lag] for lag in range(1, P + 1)])
@@ -641,7 +641,7 @@ forecast_summary = pd.DataFrame({
     "95% upper": forecast_mean + 1.96 * predictive_sd,
 }, index=transformed.columns)
 print(forecast_summary.round(3))
-~~~
+```
 
 These intervals are conditional on our estimated scales and diagonal
 innovation covariance assumption. They are not full-BVAR intervals allowing

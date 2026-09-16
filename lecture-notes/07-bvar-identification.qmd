@@ -120,7 +120,7 @@ covariance. Under Gaussian shocks, they also imply the same reduced-form
 likelihood. More observations can estimate that covariance more accurately
 without choosing between these structural interpretations.
 
-~~~{python}
+```{python}
 #| label: fig-identification-impacts
 #| fig-cap: "Two impact matrices generate the same innovation covariance. Choosing a structural interpretation requires restrictions beyond the reduced-form covariance."
 #| code-fold: true
@@ -137,7 +137,7 @@ ax.grid(axis="y", alpha=.3)
 ax.legend(loc="upper center", bbox_to_anchor=(.5, -.15), ncol=2, frameon=False)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ### See the whole family, not just two choices
 
@@ -157,7 +157,7 @@ and the second rises. Shading marks angles consistent with that information.
 The signs exclude some interpretations but still leave a range of admissible
 impacts. That is the basic idea of **set identification**.
 
-~~~{python}
+```{python}
 #| label: fig-identification-rotation-set
 #| fig-cap: "The same covariance allows many impact vectors. Shading retains rotations with a negative first-variable response and a positive second-variable response."
 #| code-fold: true
@@ -176,7 +176,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 A sign restriction is an inequality, not a precise value. If we require
 the first response to be negative, observing a negative response among
@@ -315,7 +315,7 @@ then responds by $-0.2$ after one period and $-0.26$ after two.
 The rate response is $1,0.8,0.64,\ldots$. A delayed output response can
 therefore arise even with a zero contemporaneous impact.
 
-~~~{python}
+```{python}
 #| label: fig-bvar-toy-propagation
 #| fig-cap: "An illustrative rate shock propagates through lagged dynamics. Zero impact on output growth does not imply zero responses at later horizons."
 #| code-fold: true
@@ -333,7 +333,7 @@ for j, ax in enumerate(axes):
 axes[-1].set_xlabel("Periods after the shock")
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 ### Recursive identification: state the timing assumption
 
@@ -427,7 +427,7 @@ candidate policy shock to raise the rate on impact. It checks the
 restrictions at horizons 0–2 and separately checks a relaxed version
 that leaves output unrestricted. Both use the same candidate path.
 
-~~~{python}
+```{python}
 #| label: bvar-sign-restrictions
 #| code-fold: true
 macro = pd.read_parquet(DATA / "fred_macro_monthly.parquet")
@@ -502,7 +502,7 @@ coefficient_draws = np.array(coefficient_draws)
 covariance_draws = np.array(covariance_draws)
 print("Accepted rotations:", len(responses), "of", N_ITER-BURN)
 print("Accepted without output restriction:", len(relaxed_responses))
-~~~
+```
 
 The QR diagonal-sign correction makes the proposed orthogonal rotation
 uniform. Orienting its first column to give a positive rate impact fixes
@@ -518,7 +518,7 @@ labels. A positive correlation would mean that unexpectedly high inflation
 and unexpectedly high rates tend to occur together, conditional on the
 included lags. It would not establish either direction of causation.
 
-~~~{python}
+```{python}
 #| label: fig-bvar-covariance-posterior
 #| fig-cap: "Reduced-form posterior draws of the inflation–rate innovation correlation. The trace and marginal histogram describe covariance learning before any sign restrictions."
 #| code-fold: true
@@ -539,7 +539,7 @@ spectral_radii = np.array([
 ])
 print("Share of reduced-form draws with all roots inside unit circle:",
       np.mean(spectral_radii < 1))
-~~~
+```
 
 The eigenvalues of the VAR(1) transition matrix determine whether shocks
 eventually die out. If every eigenvalue has modulus below one, powers
@@ -560,7 +560,7 @@ back to the original variable labels before propagating the response.
 Both are normalised to a **0.25-percentage-point impact increase** in the
 rate, so their scale is comparable.
 
-~~~{python}
+```{python}
 #| label: fig-bvar-recursive-ordering
 #| fig-cap: "Recursive policy responses under two orderings, each normalised to a 25-basis-point impact increase. Lines and bands are pointwise medians and central 68% intervals."
 #| code-fold: true
@@ -581,7 +581,7 @@ axes[-1].set_xlabel("Months after shock")
 axes[-1].legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=2, frameon=False)
 plt.tight_layout()
 plt.show()
-~~~
+```
 
 Any difference in these paths comes from the identifying assumptions,
 not from refitting a different reduced-form VAR. With the rate last,
@@ -596,7 +596,7 @@ Its scale is different from the fixed-rate-increase normalisation in the
 recursive comparison. Compare identifying assumptions only after checking
 both shock definition and normalisation.
 
-~~~{python}
+```{python}
 #| label: fig-bvar-sign-responses
 #| fig-cap: "Pointwise response bands conditional on the stated signs and prior over rotations. The first three horizons were restricted. Output is growth, not the cumulative output level."
 #| code-fold: true
@@ -615,7 +615,7 @@ if responses:
     plt.show()
 else:
     print("No accepted rotations: increase draws or review restrictions before summarising.")
-~~~
+```
 
 Few accepted draws mean poor numerical precision. Run and diagnose multiple
 chains before interpreting bands. Pointwise medians need not form one internally
@@ -643,7 +643,7 @@ contains the original set because both use exactly the same proposed
 parameter–rotation pairs. Compare output responses, especially in the
 shaded period where the original restriction applied.
 
-~~~{python}
+```{python}
 #| label: fig-bvar-output-restriction
 #| fig-cap: "Output-growth response with and without its sign restriction. Shading marks horizons 0–2. Removing a restriction changes the admissible interpretations; it need not widen every pointwise interval."
 #| code-fold: true
@@ -666,7 +666,7 @@ if responses and relaxed_responses:
     plt.show()
 else:
     print("Too few admissible draws for the restriction comparison; inspect acceptance.")
-~~~
+```
 
 If the unrestricted output response remains negative, that is a more
 informative finding than its negativity under an imposed sign. It is
