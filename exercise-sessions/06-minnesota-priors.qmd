@@ -156,6 +156,60 @@ their own unit-aware scale rather than the coefficient scale ratio.
 
 Which result reflects the economic model, which reflects the prior, and which could change simply because a new simulation seed was used?
 
+## Forecasting extension: does shrinkage help?
+
+Keep the manual covariance construction as the core assignment. This
+extension asks whether the same prior logic improves **one-month-ahead
+inflation forecasts**, rather than assuming that shrinkage must work.
+Allow approximately 25–30 minutes with the reference code available.
+
+Use the documented [FRED snapshot](../data/SOURCES.md) and the lecture's
+three variables: monthly industrial-production log growth, monthly CPI
+log inflation (both multiplied by 100), and the change in the federal
+funds rate (percentage points). This application uses zero lag-coefficient
+prior means because the variables are changes. The earlier covariance
+exercise illustrates the different random-walk centre for levels.
+
+1. Estimate initially on 1990–2009 and forecast January 2010. Expand the
+   sample one month at a time through the December 2019 forecast.
+2. Keep four lags and compare OLS with Minnesota variance multipliers
+   $\lambda_1=0.004,0.04,0.4$, holding $\lambda_2=0.5$ fixed.
+   Recalculate the AR(1) residual scales using only each origin's history.
+3. Add the historical mean of inflation, updated using that same history.
+4. Compute RMSE over identical forecast months. Plot the three Minnesota
+   scores against tightness with horizontal lines for the two benchmarks.
+5. Explain whether shrinkage helps relative to OLS, whether tighter is always
+   better, and whether any VAR beats the simple historical mean.
+
+**Before running:** identify which observations enter the design matrix
+for the January 2010 forecast. Why must January's actual inflation be used
+for scoring but excluded from coefficient and scale estimation?
+
+Because this is a one-step forecast with known lagged predictors and a
+diagonal fixed innovation covariance, estimating only the inflation equation
+produces the same inflation forecast as fitting all three equations.
+Keep all three variables' lagged predictors in that equation.
+
+### Reference implementation and comparison figure
+
+The code is shared with the lecture so both pages use exactly the same
+forecast experiment. Inspect the chronological split and prior construction
+before modifying settings. No future observations enter residual-scale
+estimates or the historical-mean benchmark.
+
+{{< include ../lecture-notes/_includes/minnesota-forecast-comparison.qmd >}}
+
+Submit the figure and a short interpretation, including one month for which
+you manually trace the information available at the forecast origin.
+Explain any failure to beat the benchmark rather than changing the settings
+until the desired ranking appears.
+
+These are three settings declared before evaluation. Selecting their winner
+using 2010–2019 would require a further untouched period to evaluate the
+selection. RMSE differences in one period do not prove a general advantage.
+The downloaded macroeconomic snapshot includes revisions, so this is a
+chronological backtest, not a reconstruction of real-time data releases.
+
 ## Additional practice from the lecture
 
 The following questions extend the Minnesota covariance construction above.

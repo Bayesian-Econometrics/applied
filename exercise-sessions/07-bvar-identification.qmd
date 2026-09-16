@@ -49,7 +49,7 @@ b0 = np.zeros(K*M)
 Vdiag = np.tile([10.,.3,.3,.3],M)
 P0 = np.diag(1/Vdiag)
 nu0, S0, Sigma = M+2, np.eye(M), np.eye(M)
-accepted, covariance_draws = [], []
+accepted, proposed_paths, recursive_paths = [], [], []
 for s in range(ITER):
     inv_sigma = np.linalg.inv(Sigma)
     precision = P0 + np.kron(inv_sigma,X.T @ X)
@@ -61,31 +61,33 @@ for s in range(ITER):
     Sigma = stats.invwishart.rvs(nu0+T, S0+residual.T @ residual, random_state=rng)
     if s < BURN:
         continue
-    covariance_draws.append(Sigma.copy())
     rotation, triangular = np.linalg.qr(rng.standard_normal((M,M)))
     rotation *= np.sign(np.diag(triangular))
     impact = np.linalg.cholesky(Sigma) @ rotation
     responses = np.array([np.linalg.matrix_power(B[1:].T,h) @ impact[:,0]
                           for h in range(H+1)])
-    for sign in [1.,-1.]:
-        candidate = sign*responses
-        if (candidate[:3,:2] < 0).all() and (candidate[:3,2] > 0).all():
-            accepted.append(candidate)
-            break
+    candidate = responses if responses[0, 2] > 0 else -responses
+    proposed_paths.append(candidate)
+    if (candidate[:3, :2] < 0).all() and (candidate[:3, 2] > 0).all():
+        accepted.append(candidate)
+    recursive_paths.append(np.array([
+        np.linalg.matrix_power(B[1:].T, h) @ np.linalg.cholesky(Sigma)[:, 2]
+        for h in range(H + 1)
+    ]))
 accepted = np.asarray(accepted)
 assert len(accepted) > 0
 band = np.quantile(accepted,[.16,.5,.84],axis=0)
 print(f'Accepted rotations: {len(accepted)}/{ITER-BURN}')
 
-recursive = np.array([np.linalg.matrix_power(B[1:].T,h) @ np.linalg.cholesky(Sigma)[:,0]
-                      for h in range(H+1)])
+recursive = np.median(np.array(recursive_paths), axis=0)
 
 fig, axes = plt.subplots(1,3,figsize=(11,3.2))
 for j,name in enumerate(['output','inflation','rate']):
     axes[j].plot(range(H+1),band[1,:,j],color='steelblue',label='sign-restricted median')
     axes[j].fill_between(range(H+1),band[0,:,j],band[2,:,j],alpha=.2,color='steelblue',
                          label='68% band')
-    axes[j].plot(range(H+1),recursive[:,j],color='darkorange',ls='--',label='recursive (Cholesky)')
+    axes[j].plot(range(H+1),recursive[:,j],color='darkorange',ls='--',
+                 label='recursive policy-shock median')
     axes[j].axhline(0,color='grey',lw=.7)
     axes[j].set(title=name,xlabel='horizon',ylabel='response')
 axes[0].legend(fontsize=8)
@@ -100,28 +102,24 @@ interpretation. One proposed rotation per draw gives a joint parameter/rotation
 sample conditioned on admissibility; repeatedly searching until every parameter
 draw has an admissible rotation changes the implied weighting.
 
-The chunk below reuses the stored posterior draws to ask how sensitive the accepted
+The recursive policy shock is the third Cholesky column because the rate is
+ordered last. Its curve is a median over paired coefficient/covariance draws,
+not a path from the final Gibbs iteration. Both schemes use unit-variance
+structural shocks; their rate impacts need not have the same magnitude.
+
+The chunk below reuses the stored candidate paths to ask how sensitive the accepted
 share is to the restriction horizon: imposing the signs at horizons 0–2 only, versus
 extending them to horizons 0–4.
 
 ```{python}
-def acceptance_share(horizon_span, n_check=400):
-    hits = 0
-    for Sigma_draw in covariance_draws[:n_check]:
-        rotation, triangular = np.linalg.qr(rng.standard_normal((M,M)))
-        rotation *= np.sign(np.diag(triangular))
-        impact = np.linalg.cholesky(Sigma_draw) @ rotation
-        responses = np.array([np.linalg.matrix_power(B[1:].T,h) @ impact[:,0]
-                              for h in range(horizon_span+1)])
-        for sign in [1.,-1.]:
-            candidate = sign*responses
-            if (candidate[:,:2] < 0).all() and (candidate[:,2] > 0).all():
-                hits += 1
-                break
-    return hits/min(n_check,len(covariance_draws))
-
-spans = [1,2,4]
-shares = [acceptance_share(h) for h in spans]
+candidate_paths = np.array(proposed_paths)
+spans = [0, 2, 4]
+shares = []
+for last_horizon in spans:
+    window = candidate_paths[:, :last_horizon + 1]
+    admissible = (window[:, :, :2] < 0).all(axis=(1, 2))
+    admissible &= (window[:, :, 2] > 0).all(axis=1)
+    shares.append(admissible.mean())
 print('Acceptance share by restriction horizon:',
       {f'0-{h}':round(s,3) for h,s in zip(spans,shares)})
 
@@ -134,10 +132,12 @@ plt.tight_layout()
 plt.show()
 ```
 
-Extending the restriction to more horizons is a stronger joint requirement, so it
-mechanically accepts a smaller share of proposed rotations: this is the identification
-uncertainty referred to above, made visible as a shrinking admissible set rather than
-a change in the underlying parameter posterior.
+Extending the restriction to more horizons is a stronger joint requirement,
+so the accepted share cannot increase for this common set of candidate paths.
+Each path preserves the coefficient/covariance pairing from its Gibbs draw.
+The reduced-form draws are unchanged, but conditioning on acceptance can
+change their relative representation in the restricted sample.
+
 :::
 
 ## Discuss the results
@@ -158,7 +158,7 @@ The following questions extend the sign-restricted BVAR lab above.
    horizons 0–2) and again at horizons 0–4. Report the acceptance share in each case
    alongside the ones already printed, and describe how the width of the output band
    changes as the restriction window grows.
-2. Multiply the prior standard deviations `Vdiag` by ten (a much looser Minnesota prior)
+2. Multiply the prior variances `Vdiag` by ten (a looser Normal coefficient prior)
    and rerun the sampler. Report the new acceptance share and the posterior median
    response of output at horizon 2, and explain why a looser coefficient prior changes
    how often a randomly rotated shock satisfies the signs.

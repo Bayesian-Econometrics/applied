@@ -1,1029 +1,708 @@
 ---
-title: "Structural identification in BVARs"
+title: "BVARs and identification"
 subtitle: "Lecture 7"
+format:
+  html:
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img, .cell figure img, figure img {
+          width: 100%; max-width: 100%; height: auto;
+        }
+        </style>
 ---
 
-## Overview
+::: {.callout-tip icon=false}
+## Key takeaways {.unnumbered}
 
-By the end of this lecture you can take a well-forecasting vector autoregression and
-ask it what an unexpected policy tightening does, and say precisely which part of the
-answer came from the data and which part you assumed.
-
-::: {.callout-important}
-## The result of this chapter
-
-Reduced-form innovations $u_t$ with covariance $\Sigma$ are linear combinations of
-uncorrelated unit-variance structural shocks $\varepsilon_t$ through an impact matrix,
-
-$$
-u_t = B_0\varepsilon_t, \qquad \Sigma = B_0B_0^\top,
-$$
-
-and the impulse response of the system at horizon $h$ is $\Psi_h B_0$, with $\Psi_h$ the
-reduced-form moving-average coefficients. The difficulty is that the second equation has
-more unknowns than equations: the likelihood fixes $\Sigma$ and leaves an entire
-orthogonal group of impact matrices to choose from, so the map from reduced form to
-structural form must be closed by an assumption that no amount of data can supply.
+- **A BVAR is a joint probability model for several time series.** Its posterior includes uncertainty about coefficients and innovation covariance.
+- **A reduced-form surprise is not automatically an economic shock.** Identification adds assumptions connecting observed innovations to structural disturbances.
+- **Recursive restrictions and sign restrictions express different information.** They need not produce the same impulse responses.
+- **Response bands reflect both parameter uncertainty and the chosen identification scheme.** Imposed signs are assumptions, not empirical discoveries.
 :::
 
-After working through this chapter you can
+## Motivation and the central question {#sec-motivation}
 
-1. diagnose why the reduced-form likelihood leaves the impact matrix undetermined, and
-   count the free dimensions;
-2. derive the recursive identification scheme as the unique triangular square root of
-   the covariance, and show how a reordering changes it;
-3. derive the accept-reject rotation sampler for sign restrictions, including why the
-   rotation must be drawn uniformly on the orthogonal group;
-4. implement both schemes on posterior draws from a Bayesian vector autoregression in
-   Python, and produce impulse responses with credible bands;
-5. compare the answers the two schemes give on identical reduced-form estimates, and
-   interpret the difference as the price of an assumption;
-6. interpret a sign-restricted band as set identification, distinguishing the part that
-   shrinks with the sample from the part that does not.
+A central bank raises its policy rate while inflation is increasing. Did the rate
+increase cause inflation, or did the bank react to inflation? A multivariate
+forecasting model describes co-movement but does not resolve that distinction.
 
-Week 7 of 15, paired with the [Week 7 exercise
-session](../exercise-sessions/07-bvar-identification.qmd). The chapter assumes the
-Minnesota prior and the shrinkage results of Lecture 6, the Gibbs sampler of Lecture 4
-and the accept-reject argument of Lecture 3.
+**What would happen after an unexpected policy tightening, holding other
+structural shocks at zero?** To answer, we need both a posterior for the
+dynamic system and an interpretation of its innovations.
 
-## Motivation: the forecast is good and no shock has a name {#sec-motivation}
+Lecture 6 asked whether shrinkage improves a forecast. Here we ask a
+different economic question. A forecast uses past information to predict
+what is likely to happen. A structural analysis asks how the system
+responds to a particular disturbance, separated from the other disturbances
+occurring at the same time. A good forecasting model does not automatically
+provide that separation.
 
-Lecture 6 left a vector autoregression in industrial production growth, consumer price
-inflation and the federal funds rate that forecasts better than least squares at every
-horizon and better than a random walk almost everywhere. A central bank now asks the
-question it actually has: if we raise the rate by a quarter point for reasons unrelated
-to what we already know about output and prices, what happens to output and prices?
+There are two tasks. First, estimate the joint posterior of the VAR
+coefficients and the covariance of its forecast errors. Second, add
+assumptions that give those errors an economic interpretation. Keeping
+the tasks distinct helps us recognise which conclusions are learned from
+observations and which conclusions follow from the restrictions we impose.
 
-The model appears to contain the answer and does not. The difficulty is visible in the
-raw data before any estimation. Inflation and the policy rate rise together and fall
-together, which is exactly what one would see if tightening caused inflation, and also
-exactly what one would see if the central bank raised rates in response to inflation.
-The estimated system does not adjudicate, because it was never asked to: each equation
-is a forecasting regression, and the residuals of the three equations are correlated
-with one another, so a surprise in the rate equation arrives in the same month as
-surprises in the other two. The chunk below estimates the reduced form on the panel of
-@sec-data and looks at those residuals.
+We use a small production–inflation–interest-rate system. The aim is not
+to identify monetary policy once and for all with three variables.
+It is to understand the steps needed to make a structural claim and
+how posterior draws carry uncertainty through those steps.
+
+::: {.callout-note collapse="true"}
+## A route through the 90-minute lecture
+
+Allow 10 minutes for the economic question, 15 for the two-variable
+identification example, 25 for the joint posterior and Gibbs updates,
+20 for impulse responses and identifying restrictions, 15 for the
+three-variable application, and 5 for discussion. The vectorisation
+identities and implementation can be revisited in the exercise session.
+:::
+
 
 ```{python}
+#| label: setup-bvar
+#| include: false
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 import matplotlib.pyplot as plt
+from scipy import stats
 
+SEED = 2026
+rng = np.random.default_rng(SEED)
+plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
+                     "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": False})
+BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
-rng = np.random.default_rng(2026)
-plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
-                     "grid.alpha": 0.3, "font.size": 11})
-
-fred = pd.read_parquet(DATA / "fred_macro_monthly.parquet")
-mac = pd.DataFrame({
-    "ip_growth": 100 * np.log(fred["industrial_prod"]).diff(),
-    "inflation": 100 * np.log(fred["cpi"]).diff(),
-    "fed_funds": fred["fed_funds"],
-}).dropna().loc["1960-02":"2019-12"]
-var_names, m_var, p_var = list(mac.columns), 3, 12
-
-def build_var_xy(data, p):                 # stacked regression form of a VAR(p)
-    T, m = data.shape
-    Y = data[p:]
-    X = np.ones((T - p, 1 + m * p))
-    for ell in range(1, p + 1):
-        X[:, 1 + (ell - 1) * m: 1 + ell * m] = data[p - ell: T - ell]
-    return X, Y
-
-D_var = mac.to_numpy()
-X_var, Y_var = build_var_xy(D_var, p_var)
-T_eff, k_var = X_var.shape
-B_ols = np.linalg.solve(X_var.T @ X_var, X_var.T @ Y_var)
-U_ols = Y_var - X_var @ B_ols
-Sigma_ols = U_ols.T @ U_ols / (T_eff - k_var)
-corr_u = np.corrcoef(U_ols.T)
-
-fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.0))
-roll = mac[["inflation", "fed_funds"]].rolling(12).mean().dropna()
-axes[0].plot(roll.index, 12 * roll["inflation"], color="firebrick",
-             label="inflation, annualised 12-month mean")
-axes[0].plot(roll.index, roll["fed_funds"], color="steelblue", label="federal funds rate")
-axes[0].axhline(0, color="black", lw=0.7)
-axes[0].set_ylabel("percent"); axes[0].legend(fontsize=8)
-axes[0].set_title("They move together, and nothing says why")
-
-axes[1].scatter(U_ols[:, 2], U_ols[:, 0], s=9, alpha=0.5)
-axes[1].axhline(0, color="black", lw=0.7); axes[1].axvline(0, color="black", lw=0.7)
-axes[1].set_xlabel("funds rate equation residual")
-axes[1].set_ylabel("output equation residual")
-axes[1].set_title(f"Correlated surprises, r = {corr_u[0, 2]:.3f}")
-plt.tight_layout(); plt.show()
-
-print(f"{len(mac)} months, {mac.index[0]:%Y-%m} to {mac.index[-1]:%Y-%m}")
-print(f"T_eff = {T_eff}, k = {k_var} per equation, {k_var * m_var} in the system")
-print("residual standard deviations:", np.round(np.sqrt(np.diag(Sigma_ols)), 4))
-print("reduced-form residual correlations:")
-print(pd.DataFrame(corr_u, index=var_names, columns=var_names).round(3))
 ```
 
-The left panel is the identification problem as an economist meets it. The annualised
-twelve-month mean of inflation and the federal funds rate trace nearly the same path for
-sixty years: both climb through the 1970s, both collapse after 1982, both sit near zero
-after 2009. A correlation of that size between a policy instrument and a policy target
-is consistent with an aggressive central bank that causes inflation and with a
-responsive central bank that chases it, and the series alone cannot separate them.
+## Intuition: a simple worked example {#sec-intuition}
 
-The right panel is the same problem as a statistician meets it. The one-step forecast
-errors of the output equation and the funds rate equation correlate at $0.180$; inflation
-and the funds rate at $0.053$; output and inflation at $0.016$. These are not
-independent surprises that can be labelled one per equation. A month in which the funds
-rate came in above its forecast is a month in which output tended to come in above its
-forecast too, and no reduced-form quantity says whether the rate moved because output
-did, or output moved because the rate did, or a third thing moved both.
+### A forecast error is a surprise, not yet a named shock
 
-It is worth being precise about what is being asked for, because the phrase monetary
-policy shock is doing a lot of work. The federal funds rate moves for two kinds of reason.
-Most of its variation is systematic: the committee follows a rule, explicit or not, that
-responds to the state of the economy, and that response is already inside the estimated
-coefficients of the funds rate equation. What is left over is the part of this month's
-rate that the rule and the history do not explain, and only that part is a candidate for a
-shock. The question the central bank asked is about the second kind of movement, and the
-reduced form does contain a residual that is the right size. What it does not contain is
-any reason to believe that residual is a policy surprise rather than a mixture of the
-three surprises hitting the economy that month.
+Suppose the model forecasts a policy rate of 2.0% and the realised rate
+is 2.2%. The reduced-form rate innovation is 0.2 percentage points.
+That surprise might reflect an unexpected policy decision, new inflation
+information to which the central bank responds, or another disturbance
+affecting both inflation and the policy rate.
 
-That is the breakdown. The shrunk system of Lecture 6 is an excellent description of the
-joint forecast distribution and contains no object called a monetary policy shock. The
-next section shows that this is not a matter of estimating something more carefully: the
-missing object is not weakly identified but completely unidentified, and the sample size
-is irrelevant to it.
+Subtracting a forecast removes the predictable component. It does not
+separate the simultaneous sources of unexpected movement. The covariance
+between forecast errors is the empirical clue that these sources may
+be shared.
 
-## The problem: the covariance does not determine the impact matrix {#sec-problem}
+Suppose two reduced-form innovations have covariance
+$\Sigma=\left(\begin{smallmatrix}1&0.6\\0.6&1\end{smallmatrix}\right)$.
+They could arise from independent unit-variance shocks through
+$C=\left(\begin{smallmatrix}1&0\\0.6&0.8\end{smallmatrix}\right)$ because
+$CC^\top=\Sigma$. But rotating the two shocks with an orthogonal matrix $Q$
+gives $(CQ)(CQ)^\top=\Sigma$ too.
 
-Structural shocks $\varepsilon_t$ are defined to be mutually uncorrelated with unit
-variance, so they can be interpreted one at a time. They are linked to the innovations
-by an impact matrix, $u_t = B_0\varepsilon_t$, and taking the covariance of both sides
-gives $\Sigma = B_0B_0^\top$. Everything the likelihood knows about $B_0$ is in that
-equation, and it is not enough.
+The data covariance is unchanged while the impact of the first named shock
+changes. Identification is therefore a statement about which impacts represent
+the economic intervention of interest.
 
-### Result R-7.1: the rotation ambiguity
+Write the innovations as
+$u_1=\varepsilon_1$ and $u_2=0.6\varepsilon_1+0.8\varepsilon_2$,
+where the two structural shocks are independent standard Normals.
+Then $\operatorname{Var}(u_1)=1$,
+$\operatorname{Var}(u_2)=0.6^2+0.8^2=1$, and
+$\operatorname{Cov}(u_1,u_2)=0.6$. The off-diagonal covariance arises
+because both innovations contain the first structural shock.
 
-Let $\Sigma$ be an $m \times m$ symmetric positive definite matrix and let $B_0$ satisfy
-$\Sigma = B_0B_0^\top$. Then for every orthogonal $Q$, that is every $Q$ with $QQ^\top =
-I_m$,
+Now use a 45-degree rotation. The first column of $CQ$ is approximately
+$(0.707,0.990)^\top$, rather than $(1,0.6)^\top$.
+Both impact vectors are consistent with exactly the same reduced-form
+covariance. Under Gaussian shocks, they also imply the same reduced-form
+likelihood. More observations can estimate that covariance more accurately
+without choosing between these structural interpretations.
 
-$$
-(B_0Q)(B_0Q)^\top = B_0QQ^\top B_0^\top = B_0B_0^\top = \Sigma ,
-$$
-
-so $B_0Q$ is also an impact matrix, and conversely every matrix $\tilde B_0$ with
-$\tilde B_0\tilde B_0^\top = \Sigma$ is of that form. The set of solutions is therefore
-exactly one orbit of the orthogonal group, of dimension
-
-$$
-m^2 - \frac{m(m+1)}{2} = \frac{m(m-1)}{2},
-$$
-
-which is three for $m = 3$. The likelihood $L(B,\Sigma \mid Y)$ does not involve $B_0$ at
-all, so it is constant along the orbit, while the structural impulse responses
-$\Psi_h B_0 Q$ are not. No sample size changes this: as $T \to \infty$ the posterior for
-$\Sigma$ concentrates on a point and the orbit above that point stays exactly as large as
-it was.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-The forward direction is the display above. For the converse, suppose $B_1$ and $B_2$
-both satisfy $B_iB_i^\top = \Sigma$. Since $\Sigma$ is positive definite each $B_i$ is
-invertible, so set $Q = B_1^{-1}B_2$. Then
-
-$$
-QQ^\top = B_1^{-1}B_2B_2^\top B_1^{-\top} = B_1^{-1}\Sigma B_1^{-\top}
-= B_1^{-1}B_1B_1^\top B_1^{-\top} = I_m ,
-$$
-
-so $Q$ is orthogonal and $B_2 = B_1Q$. The solution set is thus $\{B_1Q : QQ^\top = I_m\}$,
-a single orbit.
-
-For the count, $\Sigma$ is symmetric and so has $m(m+1)/2$ distinct entries, giving that
-many equations, while $B_0$ has $m^2$ unknowns. The shortfall is $m^2 - m(m+1)/2 =
-m(m-1)/2$, which is precisely the dimension of the orthogonal group $O(m)$: an orthogonal
-matrix has $m$ columns constrained to unit length and $m(m-1)/2$ pairwise orthogonality
-constraints, leaving $m^2 - m - m(m-1)/2 = m(m-1)/2$ free parameters. The two counts agree
-because the map $Q \mapsto B_0Q$ is a bijection from $O(m)$ onto the solution set.
-
-Why the likelihood cannot help. Write the model as $Y = XB + U$ with the rows of $U$
-independent $\mathcal{N}(0,\Sigma)$. The likelihood is
-
-$$
-L(B,\Sigma \mid Y, X) \propto |\Sigma|^{-T_{\text{eff}}/2}
-\exp\left\{-\tfrac12\operatorname{tr}\left[\Sigma^{-1}(Y-XB)^\top(Y-XB)\right]\right\},
-$$
-
-a function of $(B,\Sigma)$ only. The symbol $B_0$ does not appear, because the data are
-the $y_t$ and the $y_t$ depend on the structural shocks only through $u_t = B_0\varepsilon_t$,
-whose distribution is $\mathcal{N}(0, B_0B_0^\top)$ and therefore depends on $B_0$ only
-through $\Sigma$. In the language of identification, $(B,\Sigma)$ is the identified
-parameter and $B_0$ is a function of it only after a further restriction is imposed; the
-likelihood is flat in the three remaining directions, so the posterior in those directions
-is exactly the prior, whatever prior is placed there. This is the sense in which the
-problem is not weak identification. Weak identification means a likelihood with a shallow
-but genuine peak, improved by more data. Here there is no peak at all.
-
-One structural consequence is worth recording now, because R-7.3 depends on it. Since
-every $B_0Q$ fits equally well, restricting attention to a subset of the orbit is not a
-statistical estimate but a choice of subset, and the honest report is both the subset and
-what remains inside it. The two schemes of the next section differ in exactly this: one
-chooses a single point of the orbit, the other a region of it.
-:::
-
-The result is checkable, so the chunk below checks it. It takes the least-squares
-reduced-form estimate, draws two hundred rotations at random, and traces the implied
-response of output growth to the first structural shock.
-
-```{python}
-#| label: fig-orbit
-#| fig-cap: "Two hundred impact matrices, all reproducing the same estimated residual covariance exactly, and the responses of output growth they imply for the first structural shock."
-def companion(B, m, p):
-    C = np.zeros((m * p, m * p))
-    for ell in range(p):
-        C[:m, ell * m:(ell + 1) * m] = B[1 + ell * m: 1 + (ell + 1) * m, :].T
-    if p > 1:
-        C[m:, :m * (p - 1)] = np.eye(m * (p - 1))
-    return C
-
-def irf(B, impact, H, m, p):
-    C = companion(B, m, p)
-    out = np.zeros((H + 1, m, m))
-    Ch = np.eye(m * p)
-    for h in range(H + 1):
-        out[h] = Ch[:m, :m] @ impact
-        Ch = Ch @ C
-    return out
-
-def haar_rotation(m, rng):
-    Qm, Rm = np.linalg.qr(rng.standard_normal((m, m)))
-    return Qm * np.sign(np.diag(Rm))               # uniform on the orthogonal group
-
-H_orbit = 36
-P_chol = np.linalg.cholesky(Sigma_ols)
-paths, fit_err, imp0 = [], [], []
-for _ in range(200):
-    Bq = P_chol @ haar_rotation(m_var, rng)
-    fit_err.append(np.abs(Bq @ Bq.T - Sigma_ols).max())
-    imp0.append(Bq[0, 0])
-    paths.append(np.cumsum(irf(B_ols, Bq, H_orbit, m_var, p_var)[:, 0, 0]))
-paths = np.array(paths)
-
+~~~{python}
+#| label: fig-identification-impacts
+#| fig-cap: "Two impact matrices generate the same innovation covariance. Choosing a structural interpretation requires restrictions beyond the reduced-form covariance."
+#| code-fold: true
+C = np.array([[1., 0.], [.6, .8]])
+angle = np.pi / 4
+rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
 fig, ax = plt.subplots()
-for row in paths:
-    ax.plot(np.arange(H_orbit + 1), row, color="steelblue", lw=0.6, alpha=0.35)
-ax.axhline(0, color="black", lw=0.9)
-ax.set_xlabel("horizon (months)"); ax.set_ylabel("IP level response (%)")
-ax.set_title("One reduced form, two hundred structural answers")
-plt.tight_layout(); plt.show()
-
-print(f"largest |B0 B0' - Sigma| over the 200 rotations: {max(fit_err):.3e}")
-print(f"impact response of IP growth, range over rotations: "
-      f"[{min(imp0):.4f}, {max(imp0):.4f}]")
-print(f"IP level response at h = 12, range over rotations: "
-      f"[{paths[:, 12].min():.4f}, {paths[:, 12].max():.4f}]")
-print(f"share of rotations with a negative IP level at h = 12: "
-      f"{(paths[:, 12] < 0).mean():.3f}")
-```
-
-Every one of the two hundred impact matrices reproduces the estimated covariance to
-$4.996 \times 10^{-16}$, which is machine precision, so all two hundred fit the data
-identically and the likelihood cannot rank them. The responses they imply do not agree at
-all. The impact effect on output growth runs from $-0.6608$ to $0.6498$, and the level of
-industrial production one year after the shock ranges from $-1.3770$ percent to $1.3586$
-percent, with $56.0$ percent of the rotations giving a fall and the rest a rise. The
-figure is that set drawn: a fan covering both signs at every horizon, every line of which
-is an exactly equally good description of sixty years of monthly data.
-
-This is worth being clear about, because it is easy to mistake for a small-sample
-complaint. The bundle of lines above would not thin out with a thousand years of data. It
-is the identified object, $\Sigma$, mapping onto an unidentified one. The repair cannot
-therefore be statistical, and the next section supplies two versions of the only kind of
-repair available.
-
-## Methodology: two ways to cut the orbit down {#sec-methodology}
-
-Identification means adding restrictions that select a subset of $\{B_0Q\}$. The two
-schemes below differ in how much they select and in what kind of economics they use.
-Recursive identification picks out exactly one point, using a claim about the timing of
-decisions within the period. Sign restrictions pick out a region, using a claim about the
-direction of responses.
-
-### Result R-7.2: recursive identification and the role of the ordering
-
-Let $\Sigma$ be symmetric positive definite. There is exactly one lower triangular matrix
-$P$ with strictly positive diagonal such that $\Sigma = PP^\top$, the Cholesky factor, and
-setting $B_0 = P$ leaves no rotational freedom. Reading $u_t = P\varepsilon_t$ row by row,
-
-$$
-u_{1t} = P_{11}\varepsilon_{1t},\qquad
-u_{2t} = P_{21}\varepsilon_{1t} + P_{22}\varepsilon_{2t},\qquad
-u_{3t} = P_{31}\varepsilon_{1t} + P_{32}\varepsilon_{2t} + P_{33}\varepsilon_{3t},
-$$
-
-so the first variable responds within the period to its own shock alone and the last
-responds to everything. Let $\Pi$ be a permutation matrix reordering the variables and
-$\tilde P$ the Cholesky factor of $\Pi\Sigma\Pi^\top$. The impact matrix implied by the
-reordering, expressed in the original variable order, is $B_0^{(\Pi)} =
-\Pi^\top\tilde P\,\Pi$, which satisfies $B_0^{(\Pi)}B_0^{(\Pi)\top} = \Sigma$ and equals
-$P$ only when $\Sigma$ is diagonal. The two are linked by the rotation $Q =
-P^{-1}\Pi^\top\tilde P\Pi$, so the ordering is not a labelling convention but a selection
-of a different point on the orbit of R-7.1.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-Existence and uniqueness. Write the $(i,j)$ entry of $PP^\top$ for $j \leq i$,
-remembering that $P_{ab} = 0$ whenever $b > a$, so the sum truncates at $\min(i,j) = j$:
-
-$$
-\Sigma_{ij} = \sum_{s=1}^{m} P_{is}P_{js} = P_{ij}P_{jj} + \sum_{s=1}^{j-1}P_{is}P_{js}.
-$$
-
-Solve for the unknowns in the order $(1,1), (2,1), (2,2), (3,1), \dots$, column by column
-within each row. For $i = j$,
-
-$$
-P_{jj} = \sqrt{\Sigma_{jj} - \sum_{s=1}^{j-1}P_{js}^2},
-$$
-
-and for $i > j$,
-
-$$
-P_{ij} = \frac{1}{P_{jj}}\left(\Sigma_{ij} - \sum_{s=1}^{j-1}P_{is}P_{js}\right).
-$$
-
-Every quantity on the right has already been determined when it is needed, so the
-recursion determines $P$ completely. The square root is the only place a choice appears
-and the positive diagonal requirement removes it; the quantity under the root is positive
-precisely because $\Sigma$ is positive definite, being the conditional variance of the
-$j$-th variable given the first $j-1$, that is the Schur complement of the leading
-$(j-1)\times(j-1)$ block. No rotational freedom survives: if $PQ$ is lower triangular then
-$Q = P^{-1}(PQ)$ is a product of lower triangular matrices and so lower triangular, and a
-lower triangular orthogonal matrix is diagonal with entries $\pm 1$, which the positive
-diagonal requirement fixes at $+1$. So $Q = I_m$.
-
-What the triangularity assumes. The recursion says the first variable's innovation is
-driven by the first structural shock alone, so that variable does not react within the
-period to anything else, while the last variable loads on every shock and so is assumed to
-see everything and respond immediately. This is a claim about which decisions are made
-before which others inside one observation period. Putting a policy rate last says the
-central bank observes this month's output and prices before setting the rate, and that
-output and prices cannot respond to the rate until next month. Putting it first says the
-opposite on both counts.
-
-Why the ordering changes the answer. With $\Pi$ the permutation and $\tilde P$ the
-Cholesky factor of $\Pi\Sigma\Pi^\top$,
-
-$$
-B_0^{(\Pi)}B_0^{(\Pi)\top} = \Pi^\top\tilde P\Pi\Pi^\top\tilde P^\top\Pi
-= \Pi^\top\tilde P\tilde P^\top\Pi = \Pi^\top\Pi\Sigma\Pi^\top\Pi = \Sigma,
-$$
-
-using $\Pi^\top\Pi = I_m$, so the reordered scheme fits exactly as well. But
-$\Pi^\top\tilde P\Pi$ is not lower triangular in the original order, so by the uniqueness
-just proved it cannot equal $P$ unless it happens to be triangular, which for a
-permutation that actually moves something requires $\Sigma$ diagonal. The linking matrix
-$Q = P^{-1}\Pi^\top\tilde P\Pi$ is orthogonal because $QQ^\top = P^{-1}\Sigma P^{-\top} =
-I_m$.
-
-How large the disagreement is. The two-variable case is explicit. For
-
-$$
-\Sigma = \begin{pmatrix}\sigma_1^2 & \rho\sigma_1\sigma_2\\
-\rho\sigma_1\sigma_2 & \sigma_2^2\end{pmatrix},
-\qquad
-P = \begin{pmatrix}\sigma_1 & 0\\ \rho\sigma_2 & \sigma_2\sqrt{1-\rho^2}\end{pmatrix},
-$$
-
-the impact effect of the second shock on the first variable is zero by construction.
-Reversing the order makes that same impact effect $\rho\sigma_1$. Nothing in the
-likelihood distinguishes $0$ from $\rho\sigma_1$: both reproduce $\Sigma$ to the last
-digit. The disagreement is therefore governed by how far $\Sigma$ is from diagonal. With
-uncorrelated innovations every ordering gives the same diagonal $P$ and the question
-evaporates; with strongly correlated innovations the orderings can imply opposite signs on
-impact.
-:::
-
-Recursive identification buys a point estimate at the price of a timing assumption that
-is often hard to defend and always consequential. The alternative weakens the assumption
-and accepts a weaker conclusion.
-
-### Result R-7.3: sign restrictions and the accepted set
-
-Fix a reduced-form draw $(B,\Sigma)$, let $P$ be any matrix with $PP^\top = \Sigma$, and
-let $\mathcal{S}$ be a finite list of inequality restrictions on the responses
-$\Psi_hPq$ of the system to a candidate impact vector $q$, imposed over a finite set of
-horizons. Define
-
-$$
-\mathcal{Q}(B,\Sigma) = \left\{q : \|q\| = 1,\; \Psi_hPq \text{ satisfies } \mathcal{S}
-\text{ at every restricted } h\right\}.
-$$
-
-Draw $q$ as the first column of a rotation $Q$ that is uniform on the orthogonal group,
-keep the draw when $q \in \mathcal{Q}(B,\Sigma)$ and discard it otherwise. The retained
-draws are a sample from
-
-$$
-p(B,\Sigma,q \mid Y, \mathcal{S}) \;\propto\;
-p(B,\Sigma \mid Y)\,\mu(q)\,\mathbb{1}\{q \in \mathcal{Q}(B,\Sigma)\},
-$$
-
-with $\mu$ the Haar measure, and the acceptance rate estimates
-$\Pr(\mathcal{S}\mid Y) = \mathbb{E}_{B,\Sigma}[\mu(\mathcal{Q}(B,\Sigma))]$, the
-posterior probability that a structural explanation drawn at random satisfies the imposed
-economics. Generically $\mathcal{Q}$ has positive measure rather than being a single
-point, so the restrictions deliver set identification: the spread of the accepted
-responses does not vanish as $T \to \infty$.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-The rotation must be uniform, and a QR decomposition delivers that. Let $Z$ be $m \times
-m$ with independent standard Normal entries and $Z = QR$ its QR decomposition with $R$
-upper triangular. The density of $Z$ is $p(Z) \propto \exp(-\tfrac12\operatorname{tr}
-Z^\top Z)$, which depends on $Z$ only through $Z^\top Z$. Replacing $Z$ by $ZO$ for a
-fixed orthogonal $O$ gives $(ZO)^\top(ZO) = O^\top Z^\top ZO$, whose trace is unchanged,
-so $p(ZO) = p(Z)$; and $Z \mapsto ZO$ has Jacobian determinant $|\det O|^m = 1$ and so
-preserves Lebesgue measure. Hence $Z$ and $ZO$ have the same distribution for every
-orthogonal $O$. That right-invariance transfers to the factor $Q$, and the only
-probability measure on the orthogonal group invariant under right multiplication is the
-Haar measure, which is what uniform means here.
-
-One detail spoils this if ignored. The QR decomposition is not unique: for any diagonal
-$D$ with entries $\pm 1$, $(QD)(DR)$ is another valid factorisation with $DR$ still upper
-triangular. Numerical routines return whichever sign convention the underlying Householder
-algorithm produces, which is not the uniform one. The fix is to impose the convention
-explicitly by forcing the diagonal of $R$ to be positive,
-
-$$
-D = \operatorname{diag}\!\left(\operatorname{sign}(R_{11}),\dots,\operatorname{sign}(R_{mm})\right),
-\qquad Q \leftarrow QD,
-$$
-
-which is the single line `Qm = Qm * np.sign(np.diag(Rm))` in the code below. Without it
-the draws are still orthogonal and still reproduce $\Sigma$, but they are not uniform, so
-the accepted set would be weighted in a way nobody intended.
-
-Why any $q$ is admissible before the restriction. By R-7.1, $Pq$ for a unit vector $q$ is
-the first column of some $PQ$ with $PQ(PQ)^\top = \Sigma$, so every unit $q$ gives an
-impact vector consistent with the reduced form. The likelihood is constant over the
-sphere, which is the identification problem stated as a group action, and the restriction
-cuts the sphere down.
-
-What the accepted sample is. Three cases can occur for a given draw. If $\mathcal{Q}$ is
-empty the reduced-form draw is incompatible with the restrictions and contributes nothing.
-If $\mathcal{Q}$ is a single point the shock is point identified for that draw, which
-essentially never happens with inequality restrictions. Generically $\mathcal{Q}$ has
-positive Haar measure. Proposing one $q$ per reduced-form draw and discarding failures is
-accept-reject sampling from the displayed joint distribution, exactly as in Lecture 3 with
-an indicator playing the role of the envelope, and the acceptance probability conditional
-on $(B,\Sigma)$ is $\mu(\mathcal{Q}(B,\Sigma))$. Averaging over the posterior gives the
-unconditional acceptance rate, which is therefore an estimate of $\Pr(\mathcal{S}\mid Y)$
-and a number worth reporting rather than a diagnostic: an acceptance rate of one fifth says
-four fifths of the structural explanations the data cannot rule out were ruled out by the
-economics.
-
-Two consequences deserve emphasis. First, the quantiles of the accepted responses mix two
-kinds of uncertainty. Even if $(B,\Sigma)$ were known exactly the spread over
-$\mathcal{Q}$ would remain, so the bands do not shrink to a line as $T$ grows. Reading such
-a band as a credible interval about a single true response is a mistake; it is a credible
-interval about a set. Second, redrawing $Q$ repeatedly until every reduced-form draw yields
-an acceptance would give each $(B,\Sigma)$ equal weight regardless of how large its
-admissible set is, effectively dividing by $\mu(\mathcal{Q}(B,\Sigma))$, which is a
-different and generally unintended posterior. Keep one proposal per draw. Finally, the
-uniform measure on rotations is itself a prior. It is conventional rather than innocuous,
-and there is a literature on how much the resulting bands depend on it.
-:::
-
-The two results are not alternatives on a scale of sophistication. R-7.2 makes a strong
-assumption and returns a number; R-7.3 makes a weak assumption and returns a set. Which is
-preferable depends on whether the timing claim or the sign claim is easier to defend in
-the application at hand, and @sec-empirical runs both so the difference can be priced.
-
-## Data: output, prices and the policy rate, 1960 to 2019 {#sec-data}
-
-The chapter's dataset is the monthly FRED macroeconomic snapshot,
-`data/fred_macro_monthly.parquet`, the same file and the same three series used in Lecture
-6: industrial production, the consumer price index and the effective federal funds rate.
-The two index levels enter as one hundred times the monthly log difference, so a unit
-reads as one percent per month, and the funds rate enters in percentage points. No other
-series is used anywhere in this chapter.
-
-The window is February 1960 to December 2019, $719$ months, of which $707$ are usable once
-twelve lags are consumed. The sample stops before the pandemic deliberately. The April 2020
-observation is a fourteen percent monthly fall in industrial production, more than fourteen
-standard deviations from the mean, and a Gaussian system fitted through it would inflate
-the whole residual covariance and therefore every impulse response in the chapter. That is
-a modelling choice worth stating rather than hiding, and Lecture 12 supplies the
-stochastic-volatility machinery that would let the sample include it.
-
-```{python}
-#| label: fig-macro-panel
-#| fig-cap: "The three series of the chapter over the estimation window. Output growth and inflation are monthly log changes in percent; the funds rate is in percentage points."
-fig, axes = plt.subplots(3, 1, figsize=(7.5, 6.2), sharex=True)
-for ax, nm, lab in zip(axes, var_names,
-                       ["IP growth (% per month)", "CPI inflation (% per month)",
-                        "federal funds rate (%)"]):
-    ax.plot(mac.index, mac[nm], lw=0.7, color="steelblue")
-    ax.axhline(0, color="black", lw=0.6)
-    ax.set_ylabel(lab, fontsize=9)
-axes[0].set_title("Output, prices and the policy rate, 1960-2019")
-axes[-1].set_xlabel("date")
-plt.tight_layout(); plt.show()
-
-print(mac.describe().loc[["mean", "std", "min", "max"]].round(3).to_string())
-print(f"first-order autocorrelations: "
-      f"{np.round([mac[c].autocorr(1) for c in var_names], 3)}")
-```
-
-Industrial production grows by $0.200$ percent a month on average with a standard
-deviation of $0.744$, and inflation averages $0.303$ percent a month, about $3.6$ percent
-a year, with a standard deviation of $0.312$. The funds rate averages $4.996$ percent and
-ranges from $0.07$ to $19.1$, the upper end being the Volcker disinflation of 1981. The
-first-order autocorrelations, $0.342$, $0.627$ and $0.990$, explain why the funds rate
-dominates the persistence of the system and why the impulse responses below are still some
-way from their long-run values after three years.
-
-The asymmetry in those three transformations is deliberate and has consequences later. A
-monthly policy rate in levels is close to a unit root over a sixty-year sample containing
-one long disinflation and two long spells at the zero lower bound, which is why the
-Minnesota prior mean on its own first lag is one while the two differenced series take
-zero. It is also why the impulse responses of @sec-empirical are reported as levels for
-output and prices, obtained by cumulating the growth-rate responses, and in percentage
-points for the rate: a cumulated fall of half a percent in the level of industrial
-production is the quantity a policy discussion is about, while a response of monthly
-output growth of $-0.05$ at horizon six is not.
-
-## Empirical analysis: what does a rate surprise do? {#sec-empirical}
-
-### The reduced-form posterior
-
-The reduced-form model is the Minnesota-shrunk system of Lecture 6, estimated here by
-simulation rather than at its posterior mean, because the identification exercises need
-draws of $\Sigma$ as well as of $B$. The prior is the Normal-diffuse pair: the Minnesota
-Normal prior of Result R-6.3 on $\operatorname{vec}B$, and an independent inverse-Wishart
-$\Sigma \sim \mathcal{IW}(I_m, m+2)$ on the covariance. The two full conditionals are
-
-$$
-\operatorname{vec}B \mid \Sigma, Y \sim \mathcal{N}(b_n, P_n^{-1}),
-\qquad
-P_n = V_0^{-1} + \Sigma^{-1}\otimes X^\top X,
-\qquad
-b_n = P_n^{-1}\!\left[V_0^{-1}b_0 + (\Sigma^{-1}\otimes X^\top)\operatorname{vec}Y\right],
-$$
-
-$$
-\Sigma \mid B, Y \sim \mathcal{IW}\!\left(S_0 + (Y-XB)^\top(Y-XB),\; \nu_0 + T_{\text{eff}}\right),
-$$
-
-the first by completing the square in $\operatorname{vec}B$ against the generalised
-least-squares quadratic, the second by adding the residual cross-product to the prior
-scale and the sample size to the prior degrees of freedom. Cycling between them is the
-two-block Gibbs sampler of Lecture 4 applied to a system, and it is needed rather than a
-closed form because the Minnesota prior variance does not factor as a Kronecker product
-with $\Sigma$, as the end of the R-6.3 derivation explained. The prior mean on own first
-lags is $(0,0,1)$, zero for the two differenced series and one for the funds rate.
-
-```{python}
-def minn_prior_pieces(m, p, sig, lam1, lam2, lam_c, rw_mean):
-    k = 1 + m * p
-    B0, V = np.zeros((k, m)), np.zeros((k, m))
-    V[0, :] = lam_c
-    for ell in range(1, p + 1):
-        for j in range(m):
-            row = 1 + (ell - 1) * m + j
-            for i in range(m):
-                V[row, i] = (lam1 / ell**2 if i == j else
-                             lam1 * lam2 / ell**2 * sig[i]**2 / sig[j]**2)
-            if ell == 1:
-                B0[row, j] = rw_mean[j]
-    return B0, V
-
-sig_var = D_var.std(axis=0, ddof=1)
-B0_p, V0_p = minn_prior_pieces(m_var, p_var, sig_var, 0.05, 0.5, 100.0,
-                               np.array([0.0, 0.0, 1.0]))
-prec0 = np.diag(1.0 / V0_p.ravel(order="F"))
-b0 = B0_p.ravel(order="F")
-XtX, XtY = X_var.T @ X_var, X_var.T @ Y_var
-nu0, S0 = m_var + 2, np.eye(m_var)
-
-n_sweep, burn = 3000, 500
-Sigma_state = Sigma_ols.copy()
-B_draws = np.empty((n_sweep - burn, k_var, m_var))
-S_draws = np.empty((n_sweep - burn, m_var, m_var))
-for r in range(n_sweep):
-    inv_sigma = np.linalg.inv(Sigma_state)
-    Vpost = np.linalg.inv(prec0 + np.kron(inv_sigma, XtX))
-    bpost = Vpost @ (prec0 @ b0 + (XtY @ inv_sigma).ravel(order="F"))
-    Lp = np.linalg.cholesky((Vpost + Vpost.T) / 2)
-    Bd = (bpost + Lp @ rng.standard_normal(k_var * m_var)).reshape(k_var, m_var, order="F")
-    res_d = Y_var - X_var @ Bd
-    Sigma_state = stats.invwishart.rvs(df=nu0 + T_eff, scale=S0 + res_d.T @ res_d,
-                                       random_state=rng)
-    if r >= burn:
-        B_draws[r - burn], S_draws[r - burn] = Bd, Sigma_state
-
-B_mean = B_draws.mean(axis=0)
-eig_post = np.abs(np.linalg.eigvals(companion(B_mean, m_var, p_var))).max()
-print(f"{len(B_draws)} retained sweeps")
-print(f"sum of |lag coefficients|: OLS {np.abs(B_ols[1:]).sum():.3f}, "
-      f"posterior mean {np.abs(B_mean[1:]).sum():.3f}")
-print(f"largest |posterior mean - OLS|: {np.abs(B_mean - B_ols).max():.4f}")
-print(f"largest companion eigenvalue at the posterior mean: {eig_post:.4f}, "
-      f"half-life {np.log(0.5) / np.log(eig_post):.1f} months")
-print("posterior mean of Sigma:")
-print(pd.DataFrame(S_draws.mean(axis=0), index=var_names, columns=var_names).round(4))
-```
-
-With $707$ usable observations for $37$ coefficients per equation the prior is present but
-no longer decisive, which is the honest situation for a sixty-year sample: the total
-absolute lag-coefficient mass falls from $8.352$ under least squares to $5.168$ under the
-posterior mean, a real compression but nothing like the fourfold reduction the ten-year
-window of Lecture 6 produced. The posterior mean of $\Sigma$ is close to the least-squares
-residual covariance, as it must be with a prior contributing five degrees of freedom
-against a sample of seven hundred. The largest companion eigenvalue is $0.9821$, a
-half-life of $38.3$ months, so the three-year horizon used below is the medium run rather
-than the end of the story.
-
-The sampler is doing more here than producing a point estimate. Every identification
-exercise below needs a draw of $\Sigma$, because the impact matrix is a function of
-$\Sigma$ and nothing else, so the posterior uncertainty in the responses comes from the
-coefficient draws and the covariance draws jointly. Reporting a Cholesky factor of the
-posterior mean covariance and a response computed at the posterior mean coefficient would
-give a line with no band and would understate the uncertainty twice over, once by
-discarding the spread of $(B,\Sigma)$ and once, as R-7.3 makes precise, by ignoring the
-spread across rotations that no amount of sampling removes.
-
-### Recursive identification, with the rate last and then first
-
-The two orderings compared are the two standard ones. Ordering the funds rate last says
-the Federal Reserve sets this month's rate having seen this month's output and inflation,
-while output and prices cannot respond until next month. This is what most of the recursive
-monetary literature assumes and it is defensible at monthly frequency, since production and
-price-setting decisions are largely made before the month's policy meeting. Ordering it
-first says the reverse. By R-7.2 both reproduce $\Sigma$ exactly, and the data are silent
-between them. Responses of the two differenced variables are cumulated into responses of
-their levels, because a response of output growth of $-0.05$ at horizon six is hard to
-read while a cumulated fall of half a percent in the level of industrial production is
-exactly what a policy discussion is about.
-
-```{python}
-def chol_impact(Sigma, order, m):
-    P = np.linalg.cholesky(Sigma[np.ix_(order, order)])
-    B = np.zeros((m, m))
-    B[np.ix_(order, order)] = P                     # undo the permutation
-    return B
-
-def to_level(ir):
-    out = ir.copy()
-    out[:, 0, :] = np.cumsum(ir[:, 0, :], axis=0)   # level of industrial production
-    out[:, 1, :] = np.cumsum(ir[:, 1, :], axis=0)   # price level
-    return out
-
-H_r = 36
-order_last, order_first = np.array([0, 1, 2]), np.array([2, 0, 1])
-lvl_last = np.zeros((len(B_draws), H_r + 1, m_var))
-lvl_first = np.zeros_like(lvl_last)
-for i in range(len(B_draws)):
-    lvl_last[i] = to_level(irf(B_draws[i], chol_impact(S_draws[i], order_last, m_var),
-                               H_r, m_var, p_var))[:, :, 2]
-    lvl_first[i] = to_level(irf(B_draws[i], chol_impact(S_draws[i], order_first, m_var),
-                                H_r, m_var, p_var))[:, :, 2]
-
-q_last = np.quantile(lvl_last, [0.16, 0.5, 0.84], axis=0)
-q_first = np.quantile(lvl_first, [0.16, 0.5, 0.84], axis=0)
-row_lab = ["IP level (%)", "price level (%)", "funds rate (pp)"]
-print("posterior median response to the recursively identified policy shock")
-for tag, qq in [("rate ordered last", q_last), ("rate ordered first", q_first)]:
-    print(f"  {tag}:")
-    print(pd.DataFrame(qq[1, [0, 6, 12, 24, 36]].T, index=row_lab,
-                       columns=[f"h={h}" for h in (0, 6, 12, 24, 36)]).round(3))
-print(f"impact response of the IP level, 68% band, ordered last: "
-      f"[{q_last[0, 0, 0]:.3f}, {q_last[2, 0, 0]:.3f}]")
-print(f"impact response of the IP level, 68% band, ordered first: "
-      f"[{q_first[0, 0, 0]:.3f}, {q_first[2, 0, 0]:.3f}]")
-```
-
-```{python}
-#| label: fig-orderings
-#| fig-cap: "Responses to a recursively identified policy shock, with the funds rate ordered last (left) and first (right). Shaded areas are 68% posterior bands. The first two rows cumulate the growth-rate responses into level responses."
-fig, axes = plt.subplots(3, 2, figsize=(10, 7.2), sharex=True)
-for col, (qq, ttl) in enumerate([(q_last, "funds rate ordered last"),
-                                 (q_first, "funds rate ordered first")]):
-    for row in range(3):
-        ax = axes[row, col]
-        hor = np.arange(H_r + 1)
-        ax.fill_between(hor, qq[0, :, row], qq[2, :, row], color="steelblue", alpha=0.25)
-        ax.plot(hor, qq[1, :, row], color="steelblue", lw=1.6)
-        ax.axhline(0, color="black", lw=0.8)
-        if col == 0:
-            ax.set_ylabel(row_lab[row], fontsize=9)
-        if row == 0:
-            ax.set_title(ttl, fontsize=10)
-        if row == 2:
-            ax.set_xlabel("horizon (months)")
-fig.suptitle("The same policy shock under two timing assumptions")
-plt.tight_layout(); plt.show()
-```
-
-The two columns are R-7.2 made visible on real data. With the rate ordered last the
-response of the industrial production level is zero on impact by construction, turns
-negative and drifts down to $-0.346$ percent after three years. With the rate ordered
-first output rises by $0.117$ percent on impact, keeps rising to $0.166$ percent at six
-months, and crosses zero only in the third year, ending at $-0.168$ percent. One ordering
-says a surprise tightening cuts output; the other says it raises output for a year and a
-half. The 68 percent bands do not overlap on impact, $[0.000, 0.000]$ against $[0.092,
-0.143]$, so this is not a difference the sample size could resolve. It is the identifying
-assumption talking, exactly as R-7.2 predicts from a residual correlation of $0.180$.
-
-The middle row is worse, and instructively so. Under both orderings the price level rises
-after a contractionary shock, by $0.422$ percent at three years ordered last and $0.547$
-percent ordered first. This is the price puzzle of Sims (1992), one of the best-known
-failures of the recursive monetary VAR: a shock identified as a tightening is followed by
-higher inflation. The standard explanation is that the funds-rate innovation in a
-three-variable system is not a clean policy surprise but is contaminated by the central
-bank's reaction to information about future inflation that the three variables do not
-contain, so the shock is partly an inflation forecast. The bottom row shows the shock
-itself: the rate jumps $0.442$ percentage points on impact ordered last and decays to
-$0.218$ by three years, a persistent but not permanent tightening under either ordering.
-
-The honest summary of this subsection is that recursive identification on this panel
-produces one response that depends entirely on the ordering and one that is puzzling under
-every ordering. Neither is a failure of estimation. Both schemes reproduced $\Sigma$
-exactly, both used the same posterior draws, and the bands around each are perfectly
-ordinary posterior bands. What differs is a claim about what the Federal Reserve saw
-before it acted, and R-7.2 says that claim selects a point on the orbit rather than
-estimating one. An economist who prefers the rate-last ordering is entitled to the
-left-hand column, but must say out loud that the number came from the assumption and not
-from the sixty years of data.
-
-### Sign restrictions on the impact month
-
-The alternative replaces the timing assumption with a statement about direction. A
-contractionary monetary policy shock is one that, on impact, raises the federal funds rate
-and does not raise either output or the price level. We impose exactly that, no more, and
-in particular nothing at all about any later horizon, so whatever the responses do after
-the first month is an implication of the estimated dynamics rather than of the
-restriction. The algorithm is the accept-reject rotation sampler of R-7.3.
-
-```{python}
-def sign_accepted(B_draws, S_draws, n_horizon, H, m, p, rng):
-    kept, n_try = [], 0
-    for i in range(len(B_draws)):
-        P = np.linalg.cholesky(S_draws[i])
-        cand = irf(B_draws[i], P @ haar_rotation(m, rng), H, m, p)
-        n_try += 1
-        for s in (1.0, -1.0):
-            probe = s * cand[:n_horizon, :, 0]      # first column = candidate policy shock
-            if (probe[:, 2] > 0).all() and (probe[:, 1] <= 0).all() and (probe[:, 0] <= 0).all():
-                kept.append(to_level(s * cand)[:, :, 0])
-                break
-    return np.array(kept), n_try
-
-acc_impact, n_try_impact = sign_accepted(B_draws, S_draws, 1, H_r, m_var, p_var, rng)
-acc_three, n_try_three = sign_accepted(B_draws, S_draws, 3, H_r, m_var, p_var, rng)
-fan_q = np.quantile(acc_impact, [0.05, 0.16, 0.5, 0.84, 0.95], axis=0)
-
-print(f"restrictions on impact only:     accepted {len(acc_impact)}/{n_try_impact} "
-      f"= {len(acc_impact)/n_try_impact:.3f}")
-print(f"restrictions over three months:  accepted {len(acc_three)}/{n_try_three} "
-      f"= {len(acc_three)/n_try_three:.3f}")
-print("\nposterior median of the accepted set, impact restrictions only")
-print(pd.DataFrame(fan_q[2, [0, 6, 12, 24, 36]].T, index=row_lab,
-                   columns=[f"h={h}" for h in (0, 6, 12, 24, 36)]).round(3))
-print(f"IP level trough: {fan_q[2, :, 0].min():.3f} percent at horizon "
-      f"{int(fan_q[2, :, 0].argmin())}")
-print(f"price level at h=36: {fan_q[2, 36, 1]:.3f} percent, "
-      f"90% band [{fan_q[0, 36, 1]:.3f}, {fan_q[4, 36, 1]:.3f}]")
-print(f"IP level at h=12: 68% band [{fan_q[1, 12, 0]:.3f}, {fan_q[3, 12, 0]:.3f}], "
-      f"90% band [{fan_q[0, 12, 0]:.3f}, {fan_q[4, 12, 0]:.3f}]")
-print(f"share of accepted draws with a negative IP level at h=12: "
-      f"{(acc_impact[:, 12, 0] < 0).mean():.3f}")
-```
-
-```{python}
-#| label: fig-sign-fan
-#| fig-cap: "Fan chart of the accepted set of responses to a contractionary monetary policy shock identified by sign restrictions on the impact month only. Dark band 68%, light band 90%, line the median of the accepted draws."
-fig, axes = plt.subplots(1, 3, figsize=(11, 3.9))
-hor = np.arange(H_r + 1)
-for row, (ax, lab) in enumerate(zip(axes, row_lab)):
-    ax.fill_between(hor, fan_q[0, :, row], fan_q[4, :, row], color="firebrick", alpha=0.15)
-    ax.fill_between(hor, fan_q[1, :, row], fan_q[3, :, row], color="firebrick", alpha=0.32)
-    ax.plot(hor, fan_q[2, :, row], color="firebrick", lw=1.8)
-    ax.axhline(0, color="black", lw=0.8)
-    ax.set_xlabel("horizon (months)"); ax.set_title(lab, fontsize=10)
-fig.suptitle("Sign-restricted responses to a contractionary policy shock")
-plt.tight_layout(); plt.show()
-```
-
-The restrictions bite hard. Only about one rotation in five satisfies three inequalities
-on the impact month, and extending the same restrictions over the first three months
-roughly halves the acceptance rate again. By R-7.3 that acceptance rate is itself an
-estimate: it is the posterior probability, under a uniform prior over rotations, that a
-structural explanation of these data drawn at random is a contractionary policy shock of
-this kind. Reporting it is part of reporting the result: a scheme that accepts nine
-rotations in ten has barely restricted anything, and a scheme that accepts one in a
-thousand is either imposing a great deal or is in conflict with the reduced form, and the
-difference between those two cases is not visible in the bands alone.
-
-What comes out is the textbook monetary transmission that the recursive schemes failed to
-deliver. The industrial production level falls, reaching a trough of $-0.680$ percent at
-eleven months, and recovers only partially, to $-0.577$ percent, by three years. The
-median price level falls steadily to $-0.459$ percent at three years, so the price puzzle
-is gone from the median: it was an artefact of forcing the
-policy shock to be the funds-rate innovation, and once we ask only for a shock that raises
-the rate and does not raise prices in the impact month, the admissible rotations imply a
-disinflation. Honesty requires adding that the 90 percent band on the price level at three
-years runs from $-1.004$ to $+0.135$ percent, so a rising long-run price level has been
-made unlikely rather than excluded. Over the same accepted set $97.1$ percent of draws
-have a negative output level at one year, with a 68 percent band from $-1.095$ to
-$-0.238$ percent, so the direction survives even though nothing was imposed past the
-impact month.
-
-The bands are the point of the exercise. They are wider than the recursive ones and should
-be, because they carry two kinds of uncertainty at once. Part is posterior uncertainty
-about $B$ and $\Sigma$, which shrinks with the sample. The rest is the spread across
-admissible rotations, which does not: with an infinite sample, three sign restrictions on
-impact would still leave a set of observationally equivalent structural models, and the
-fan would settle at the width of that set rather than collapsing to a line.
-
-```{python}
-#| label: fig-three-schemes
-#| fig-cap: "The response of the industrial production level to a contractionary policy shock under three identification schemes on identical reduced-form draws. Only the identifying assumption differs."
+positions = np.arange(2)
+ax.bar(positions-.18, C[:, 0], width=.36, color=BLUE, label="Triangular impact")
+ax.bar(positions+.18, (C @ rotation)[:, 0], width=.36, color=BROWN, label="Rotated impact")
+ax.set(xticks=positions, xticklabels=["Variable 1", "Variable 2"],
+       ylabel="Response to the first structural shock")
+ax.grid(axis="y", alpha=.3)
+ax.legend(loc="upper center", bbox_to_anchor=(.5, -.15), ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
+~~~
+
+### See the whole family, not just two choices
+
+For an angle $\varphi$, an orthogonal rotation is
+
+$$Q(\varphi)=
+\begin{pmatrix}\cos\varphi&-\sin\varphi\\
+\sin\varphi&\cos\varphi\end{pmatrix},\qquad Q Q^\top=I.$$
+
+The first shock's impact is
+$CQe_1=(\cos\varphi,\ 0.6\cos\varphi+0.8\sin\varphi)^\top$.
+Changing the angle changes the impacts but leaves the covariance unchanged,
+because $CQQ^\top C^\top=CC^\top$.
+
+The next figure uses an illustrative sign pattern: the first variable falls
+and the second rises. Shading marks angles consistent with that information.
+The signs exclude some interpretations but still leave a range of admissible
+impacts. That is the basic idea of **set identification**.
+
+~~~{python}
+#| label: fig-identification-rotation-set
+#| fig-cap: "The same covariance allows many impact vectors. Shading retains rotations with a negative first-variable response and a positive second-variable response."
+#| code-fold: true
+angles = np.linspace(-np.pi, np.pi, 800)
+first_impact = np.cos(angles)
+second_impact = 0.6 * np.cos(angles) + 0.8 * np.sin(angles)
+admissible = (first_impact < 0) & (second_impact > 0)
 fig, ax = plt.subplots()
-ax.plot(hor, q_last[1, :, 0], "-", color="steelblue", lw=1.8,
-        label="recursive, rate ordered last")
-ax.plot(hor, q_first[1, :, 0], "--", color="seagreen", lw=1.8,
-        label="recursive, rate ordered first")
-ax.plot(hor, fan_q[2, :, 0], "-", color="firebrick", lw=1.8,
-        label="sign restrictions on impact")
-ax.fill_between(hor, fan_q[1, :, 0], fan_q[3, :, 0], color="firebrick", alpha=0.18)
-ax.axhline(0, color="black", lw=0.8)
-ax.set_xlabel("horizon (months)"); ax.set_ylabel("response of the IP level (%)")
-ax.set_title("One reduced form, three identifying assumptions, three answers")
-ax.legend(fontsize=8)
-plt.tight_layout(); plt.show()
+ax.plot(angles, first_impact, color=BLUE, label="First variable")
+ax.plot(angles, second_impact, color=BROWN, label="Second variable")
+ax.fill_between(angles, -1.1, 1.1, where=admissible, color=GREY, alpha=0.15)
+ax.axhline(0, color=GREY, lw=0.8)
+ax.set(xlabel="Rotation angle (radians)", ylabel="Impact of the first shock",
+       ylim=(-1.1, 1.1))
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False)
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+~~~
 
-print(f"IP level at h=12: ordered last {q_last[1, 12, 0]:.3f}, "
-      f"ordered first {q_first[1, 12, 0]:.3f}, sign-restricted {fan_q[2, 12, 0]:.3f}")
-print(f"IP level at h=36: ordered last {q_last[1, 36, 0]:.3f}, "
-      f"ordered first {q_first[1, 36, 0]:.3f}, sign-restricted {fan_q[2, 36, 0]:.3f}")
-```
+A sign restriction is an inequality, not a precise value. If we require
+the first response to be negative, observing a negative response among
+accepted draws is not evidence that the data discovered that sign.
+The interesting questions concern the magnitude, persistence and responses
+we did not restrict.
 
-Three lines, one data set, one posterior for $(B,\Sigma)$. At twelve months the recursive
-scheme with the rate last says output is $0.122$ percent below trend, the same scheme with
-the rate first says it is $0.107$ percent above, and the sign-restricted median says
-$0.670$ percent below. The spread across the three lines is not sampling error and would
-not shrink with more data. It is the price of the identifying assumption, and the only way
-to argue about it is in economic terms.
+## Formal framework and derivation {#sec-methodology}
 
-## Discussion: the fit is the same, the shocks are not {#sec-discussion}
+### Estimate a joint system
 
-The central bank asked what an unexpected tightening does, and the chapter's answer is
-that the data narrow the question without answering it. Three schemes applied to one
-posterior gave a twelve-month output response of $-0.122$, $+0.107$ and $-0.670$ percent.
-Only the third is the textbook answer, and the third is the one whose assumption is
-weakest, which is the reverse of the usual relationship between assumption and conclusion
-and worth sitting with.
+Stack the VAR as $Y=XB+U$, with $Y$ of dimension $T\times m$ and $B$ of
+dimension $k\times m$. Independent time innovations have covariance $\Sigma$.
+With $b=\operatorname{vec}(B)$ stacked **by columns**,
 
-The check that the machinery is doing what R-7.1 says, rather than quietly fitting the
-data differently under each scheme, is direct. Every scheme must reproduce the same
-$\Sigma$ and therefore the same reduced-form residuals, which means the same likelihood
-and the same forecasts; what must differ is the structural shock series
-$\varepsilon_t = B_0^{-1}u_t$ recovered from them.
+the first $k$ entries contain all coefficients of equation one, the next
+$k$ contain equation two, and so on. For a three-variable VAR(1), $k=4$:
+one intercept and three lag coefficients. Thus $b$ has 12 entries.
+The covariance matrix $\Sigma$ has three variances and three distinct
+off-diagonal covariances.
 
-```{python}
-#| label: fig-shock-series
-#| fig-cap: "The monetary policy shock series implied by three identification schemes, recovered from identical reduced-form residuals. Twelve-month moving averages for legibility."
-schemes = {"ordered last": chol_impact(S_draws.mean(axis=0), order_last, m_var),
-           "ordered first": chol_impact(S_draws.mean(axis=0), order_first, m_var)}
-P_mean = np.linalg.cholesky(S_draws.mean(axis=0))
-for _ in range(2000):                               # one admissible rotation, impact signs
-    Qc = haar_rotation(m_var, rng)
-    cand = irf(B_mean, P_mean @ Qc, 1, m_var, p_var)
-    hit = [s for s in (1.0, -1.0)
-           if s * cand[0, 2, 0] > 0 and s * cand[0, 1, 0] <= 0 and s * cand[0, 0, 0] <= 0]
-    if hit:
-        schemes["sign restricted"] = hit[0] * (P_mean @ Qc)
-        break
+Conditional on the initial observations, each row has distribution
+$y_t\mid B,\Sigma,x_t\sim N_m(B^\top x_t,\Sigma)$. Its density contributes
+$|\Sigma|^{-1/2}$ and the quadratic
+$(y_t-B^\top x_t)^\top\Sigma^{-1}(y_t-B^\top x_t)$.
+Multiplying over $T$ dates adds these quadratics and produces
 
-U_post = Y_var - X_var @ B_mean
-dates = mac.index[p_var:]
-eps = {}
-for lab, B0 in schemes.items():
-    col = 2 if lab.startswith("ordered") else 0     # policy shock column
-    eps[lab] = (U_post @ np.linalg.inv(B0).T)[:, col]
-    print(f"{lab:>16}: max |B0 B0' - Sigma| = "
-          f"{np.abs(B0 @ B0.T - S_draws.mean(axis=0)).max():.3e}, "
-          f"shock sd {eps[lab].std():.4f}")
+$$p(Y\mid B,\Sigma)\propto|\Sigma|^{-T/2}
+\exp\{-\tfrac12\operatorname{tr}[\Sigma^{-1}(Y-XB)^\top(Y-XB)]\}.$$
 
-fig, ax = plt.subplots()
-for lab, e in eps.items():
-    ax.plot(dates, pd.Series(e, index=dates).rolling(12).mean(), lw=1.1, label=lab)
-ax.axhline(0, color="black", lw=0.8)
-ax.set_ylabel("identified policy shock, 12-month mean"); ax.legend(fontsize=8)
-ax.set_title("Identical residuals, three different histories")
-plt.tight_layout(); plt.show()
+Use independent priors $b\sim N(b_0,V_0)$ and
+$\Sigma\sim IW(\nu_0,S_0)$, whose density has kernel
+$|\Sigma|^{-(\nu_0+m+1)/2}\exp[-\operatorname{tr}(S_0\Sigma^{-1})/2]$.
 
-labs = list(eps)
-print("correlations between the implied shock series:")
-print(pd.DataFrame(np.corrcoef(np.array([eps[l] for l in labs])),
-                   index=labs, columns=labs).round(3))
-```
+The inverse-Wishart is a distribution over positive-definite covariance
+matrices, playing the role that the inverse-Gamma played for a scalar
+variance. Under this convention its mean is
+$S_0/(\nu_0-m-1)$ when $\nu_0>m+1$. Its covariance draws allow equations
+to have correlated innovations rather than fixing those correlations to zero.
 
-All three impact matrices reproduce the posterior mean covariance to machine precision, so
-the reduced-form residuals, the likelihood and every forecast are identical under the
-three schemes. The recovered shock histories are not. The two recursive series correlate
-at $0.983$, so with residual correlations as mild as these the ordering moves the shock
-history only a little; the sign-restricted series correlates with them at $0.335$ and
-$0.250$, sharing about a tenth of its variance with the first and less with the second.
-It is a substantially
-different linear combination of the same residuals, and it attributes the tightening
-episodes of the sample to different months. The identification problem is not an
-abstraction about matrices. It decides which month in 1981 counts as a policy surprise.
+### Derive the coefficient conditional
 
-What should a practitioner report? Not a single impulse response function. The minimum
-honest output of a structural vector autoregression is the reduced-form posterior, the
-identifying restrictions stated before the responses were looked at, the acceptance rate
-when the scheme is an inequality one, and a band that is labelled as set identification
-where it is set identification. The three figures of @sec-empirical are all computed from
-one posterior sample, and the difference between them is a fact about assumptions that a
-reader cannot recover from any one of them alone.
+Vectorisation turns the system into an ordinary regression with a structured
+error covariance:
 
-Two limitations follow, and the second is the binding one. The first is that sign
-restrictions on three variables are weak, and the honest report is the acceptance rate
-together with the band: about one rotation in five survived, so four fifths of the
-observationally equivalent explanations were excluded by three inequalities, and the rest
-remain. Adding variables, a commodity price index in particular, or restrictions at more
-horizons, narrows the set at the cost of stronger assumptions, and Lecture 10 asks the
-prior question of what the restrictions have to say in order to license a causal claim at
-all.
+$$\operatorname{vec}(Y)=(I_m\otimes X)b+\operatorname{vec}(U),
+\qquad
+\operatorname{Var}[\operatorname{vec}(U)]=\Sigma\otimes I_T.$$
 
-The second limitation is that every result above assumed one set of coefficients for sixty
-years. The window contains the Volcker disinflation, the Great Moderation and two spells at
-the zero lower bound, and the estimated system averages a monetary policy rule across all
-of them. A coefficient is not a constant of nature: the responsiveness of the policy rate to
-inflation in 1980 is not its responsiveness in 2015, just as a bank's market beta in 2008 is
-not its beta in 2000. A structural response computed from an average rule describes no
-period in the sample. Lecture 8 drops the assumption, writing the coefficients themselves as
-a latent state that evolves over time, and estimating them with the Kalman filter and
-forward filtering backward sampling.
+The symbol $\otimes$ denotes the Kronecker product. For two equations,
+the error covariance is a block matrix with diagonal blocks
+$\sigma_{11}I_T,\sigma_{22}I_T$ and off-diagonal blocks
+$\sigma_{12}I_T$. It links errors across equations at the same date.
 
-## Exercises
+Holding $\Sigma$ fixed, expanding the likelihood quadratic gives the
+coefficient precision contribution
 
-These are the chapter's practice questions; the [Week 7 exercise
-session](../exercise-sessions/07-bvar-identification.qmd) works through them and adds the
-lab.
+$$(I_m\otimes X)^\top(\Sigma^{-1}\otimes I_T)(I_m\otimes X)
+=\Sigma^{-1}\otimes X^\top X.$$
 
-1. By hand. For $m = 2$ write the general orthogonal matrix as a rotation by angle
-   $\theta$ possibly composed with a reflection, and show directly that the one-dimensional
-   family $P(\theta)$ traces every solution of $\Sigma = B_0B_0^\top$. Then impose one sign
-   restriction on the impact response of the first variable and describe the admissible set
-   of $\theta$ as an arc, giving its length as a function of the correlation $\rho$. State
-   what happens to that length as $\rho \to \pm 1$.
+The corresponding linear term is
+$(\Sigma^{-1}\otimes X^\top)\operatorname{vec}(Y)
+=\operatorname{vec}(X^\top Y\Sigma^{-1})$, using symmetry of
+$\Sigma^{-1}$. Adding the Normal prior contributes precision $V_0^{-1}$
+and information vector $V_0^{-1}b_0$, exactly as in Lecture 4.
+Completing the square gives
 
-2. Computational. Take the Gibbs draws of @sec-empirical and compute the forecast error
-   variance decomposition under the recursive scheme with the rate ordered last, using
-   $\text{FEVD}_{ij}(h)$ equal to the cumulated squared responses of variable $i$ to shock
-   $j$ divided by the same sum over all shocks. Report the policy shock's share of the
-   funds rate, output and inflation variance at horizons $0$, $12$ and $36$ with 68 percent
-   bands, then repeat under the reverse ordering and say which cells change and why.
+$$V_1^{-1}=V_0^{-1}+\Sigma^{-1}\otimes X^\top X,\qquad
+b_1=V_1[V_0^{-1}b_0+\operatorname{vec}(X^\top Y\Sigma^{-1})].$$
 
-3. On real data. Add the ten-year Treasury yield from the same file as a fourth variable and
-   rerun the sign-restricted exercise, requiring in addition that the long yield does not
-   fall on impact. Report the new acceptance rate, compare it with the three-variable one
-   using the interpretation of R-7.3, and say in one paragraph whether the extra restriction
-   or the extra variable did more to narrow the identified set.
+Thus $b\mid\Sigma,Y\sim N(b_1,V_1)$. All these distributions also
+condition on the observed lagged regressors $X$, suppressed to keep the
+notation readable. The result updates all equations together; the current
+cross-equation covariances enter the coefficient precision.
 
-Exercise 1 is the one to attempt before the session, since it makes the orbit of R-7.1
-concrete in the only case where it can be drawn. Exercises 2 and 3 are written for the
-session itself and reuse the code of @sec-empirical.
+### Derive the covariance conditional
 
-## Reading and references
+Holding $B$ fixed makes the residual matrix $E=Y-XB$ known. Multiply
+the inverse-Wishart prior by the likelihood:
 
-The reduced-form system posterior, the matricvariate Normal likelihood and the
-Normal-diffuse prior behind the two full conditionals of @sec-empirical follow Bauwens
-(2013), Chapter 4, and SGPE Lecture 4, pages 3 to 23; the derivations of the
-inverse-Wishart posterior and of the conjugate alternative are worked in the Week 7
-exercise session. The Cholesky argument of R-7.2 and the ordering dependence are standard;
-Koop, Chapter 6, states them in the notation used here. R-7.3 follows Rubio-Ramírez,
-Waggoner and Zha (2010), which supplies the Haar-uniform rotation argument and the
-algorithm, and the set-identification reading of the accepted band follows the same paper's
-discussion. The price puzzle is Sims (1992). The data are the monthly FRED series
-distributed with this course as a repository snapshot.
+$$p(\Sigma\mid B,Y)\propto
+|\Sigma|^{-(\nu_0+T+m+1)/2}
+\exp\left[-\frac12\operatorname{tr}\{(S_0+E^\top E)\Sigma^{-1}\}\right].$$
 
-The explanations and exercises are adapted to this course's notation and weekly structure;
-consult the cited originals for the full treatments.
+The determinant powers add, as did the powers of $\sigma^2$ in Lecture 4.
+The trace terms add the prior scale to the residual cross-products.
+Recognising the inverse-Wishart kernel gives
 
-Bańbura, Giannone and Reichlin (2010), "Large Bayesian Vector Auto Regressions," *Journal
-of Applied Econometrics*. Rubio-Ramírez, Waggoner and Zha (2010), "Structural Vector
-Autoregressions: Theory of Identification and Algorithms for Inference," *Review of
-Economic Studies*. Sims (1992), "Interpreting the Macroeconomic Time Series Facts,"
-*European Economic Review*. Koop, *Bayesian Econometrics*, ch. 6. Chan, Koop, Poirier and
-Tobias, *Bayesian Econometric Methods* (2nd ed.), ch. 18.
+$$\Sigma\mid B,Y\sim IW(\nu_0+T,S_0+(Y-XB)^\top(Y-XB)).$$
+
+These are the two Gibbs blocks from the exercise. A coefficient prior scaled by
+$\Sigma$ would give a different conjugate matrix-Normal formulation.
+
+In particular, the independent Normal prior contributes no extra determinant
+power to this covariance conditional. Borrowing a degrees-of-freedom update
+from a different prior would change the model.
+
+The sampler is now familiar:
+
+1. Start with a positive-definite covariance $\Sigma^{(0)}$.
+2. Compute $b_1,V_1$ using the current covariance and draw the coefficient vector.
+3. Reshape that draw into $B$ using the same column order as before.
+4. Calculate residuals and draw a new $\Sigma$ from its inverse-Wishart conditional.
+5. Store the **paired** coefficient and covariance draw, then repeat.
+
+This generalises Lecture 4 from one regression variance to a full covariance
+matrix. Identification comes afterwards; it does not replace the posterior
+calculation.
+
+### From innovations to impulse responses
+
+Write $u_t=C\varepsilon_t$, $E[\varepsilon_t\varepsilon_t^\top]=I$.
+Then $\Sigma=CC^\top$. In a VAR(1), a unit shock has impact $C$,
+one-period response $A_1C$ and horizon-$h$ response $A_1^hC$.
+For a VAR with $p$ lags, define $\Psi_0=I$ and
+
+$$\Psi_h=\sum_{\ell=1}^{\min(p,h)}A_\ell\Psi_{h-\ell},\qquad IRF_h=\Psi_hC.$$
+
+Why do these powers appear? Compare two paths starting from the same history.
+At date zero, one receives a structural shock and the other does not.
+Their difference is $Ce_j$, the shock's impact column. One period later,
+the difference is $A_1Ce_j$, because the same transition equation propagates
+the original difference. Iterating gives $A_1^hCe_j$. The intercept cancels
+when we subtract the two paths.
+
+These are responses to one initial shock with future structural shocks
+held at zero, or equivalently differences in conditional expectations
+when future shocks have mean zero. They are not predictive intervals for
+the future realised path, which would also include future disturbances.
+
+As a numerical example, take a two-variable system with
+$A=\left(\begin{smallmatrix}0.5&-0.2\\0&0.8\end{smallmatrix}\right)$
+and an impact vector $(0,1)^\top$. Interpret the variables illustratively
+as output growth and a policy rate. Output does not move on impact,
+then responds by $-0.2$ after one period and $-0.26$ after two.
+The rate response is $1,0.8,0.64,\ldots$. A delayed output response can
+therefore arise even with a zero contemporaneous impact.
+
+~~~{python}
+#| label: fig-bvar-toy-propagation
+#| fig-cap: "An illustrative rate shock propagates through lagged dynamics. Zero impact on output growth does not imply zero responses at later horizons."
+#| code-fold: true
+toy_A = np.array([[0.5, -0.2], [0., 0.8]])
+toy_impact = np.array([0., 1.])
+toy_response = np.array([
+    np.linalg.matrix_power(toy_A, h) @ toy_impact for h in range(13)
+])
+fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+for j, ax in enumerate(axes):
+    ax.plot(np.arange(13), toy_response[:, j], color=BLUE, marker="o")
+    ax.axhline(0, color=GREY, lw=0.8)
+    ax.set_ylabel(["Output growth", "Policy rate"][j])
+    ax.grid(axis="y", alpha=0.3)
+axes[-1].set_xlabel("Periods after the shock")
+plt.tight_layout()
+plt.show()
+~~~
+
+### Recursive identification: state the timing assumption
+
+A recursive scheme chooses a triangular $C$ and therefore imposes contemporaneous
+zero restrictions. Ordering the policy rate last allows it to react within
+the period to earlier variables, while those variables do not react immediately
+to its shock. That timing claim must be economically defended.
+
+For the ordering output, inflation, rate, a lower-triangular impact
+matrix has the form
+
+$$C=
+\begin{pmatrix}
+c_{11}&0&0\\
+c_{21}&c_{22}&0\\
+c_{31}&c_{32}&c_{33}
+\end{pmatrix}.$$
+
+The policy shock is the **third column**, $(0,0,c_{33})^\top$.
+Its effect on output and inflation is zero in the impact month, while
+their lagged responses can be nonzero. Moving the rate first changes
+which responses are constrained to zero. Ordering is thus an economic
+assumption, not a cosmetic rearrangement of the data.
+
+For any positive-definite $\Sigma$, the Cholesky factor supplies one
+such triangular matrix with positive diagonal. This gives a unique
+recursive decomposition for a chosen ordering and sign convention.
+The data still do not choose the ordering for us.
+
+### Sign restrictions: retain a set of interpretations
+
+Sign restrictions instead retain rotations satisfying specified inequalities.
+For a tightening shock, one possible teaching restriction lowers output growth
+and inflation and raises the rate at horizons 0–2. The resulting negative
+responses at those horizons are imposed. Responses beyond them contain information
+from the dynamics as well as the restrictions.
+
+The restriction table makes this explicit:
+
+| Response to a tightening shock | Horizons 0, 1 and 2 | Later horizons |
+|:--|:--|:--|
+| Output growth | Negative by assumption | Unrestricted |
+| Inflation | Negative by assumption | Unrestricted |
+| Policy rate | Positive by assumption | Unrestricted |
+
+These are deliberately strong teaching restrictions. In particular,
+restricting **growth** below zero is not the same as restricting the
+output **level** below its no-shock path. With growth measured as 100
+times a log difference, summing its responses gives the approximate
+percentage response of the output level. A level may remain below its
+baseline after growth has recovered.
+
+Given a posterior draw, calculate a Cholesky factor $P$ and propose
+$C=PQ$ with orthogonal $Q$. The Cholesky factor here is a starting
+factorisation, not a recursive identifying assumption: random rotations
+remove its triangular form. Propagate the candidate column through the
+VAR and retain it only when every stated inequality holds.
+
+Uniform orthogonal rotations supply a particular distribution over candidate
+directions. Sign inequalities by themselves do not specify how to weight
+the admissible set. Our numerical summaries therefore reflect both
+the restrictions and that explicit rotation distribution.
+
+## Economic application and interpretation {#sec-empirical}
+
+Use industrial production growth, inflation and the policy rate from the FRED
+snapshot, 1990–2019. The small VAR(1) below keeps matrix dimensions transparent.
+Unlike Lecture 6's forecasting illustration, the policy rate is kept in
+**levels**, because the economic intervention is naturally described as a
+rate increase. Its first own-lag prior mean is therefore one; the growth
+and inflation lag-coefficient prior means remain zero. This is an explicit
+change of specification, not an unnoticed change of units.
+
+### Specify the prior and preserve paired draws
+
+Use the Minnesota variance rules from Lecture 6 with $\lambda_1=0.04$,
+$\lambda_2=0.5$ and loose intercept variances. Initial AR(1) residual
+variances set the measurement scales. They enter the coefficient prior
+as fixed empirical-Bayes hyperparameters, while the actual innovation
+covariance $\Sigma$ is now unknown and sampled.
+
+Set $\nu_0=m+2$ and $S_0$ equal to the diagonal matrix of those residual
+variances. The inverse-Wishart prior mean is then $S_0$ under our convention.
+Its diagonal mean does not force posterior covariances to vanish.
+This is a transparent teaching specification; a substantive policy study
+would examine lag length, sample choice and prior sensitivity.
+
+The code stores coefficient and covariance draws before identification.
+For each retained draw, it also proposes one rotation, orienting the
+candidate policy shock to raise the rate on impact. It checks the
+restrictions at horizons 0–2 and separately checks a relaxed version
+that leaves output unrestricted. Both use the same candidate path.
+
+~~~{python}
+#| label: bvar-sign-restrictions
+#| code-fold: true
+macro = pd.read_parquet(DATA / "fred_macro_monthly.parquet")
+series = pd.DataFrame({
+    "Output growth": 100*np.log(macro["industrial_prod"]).diff(),
+    "Inflation": 100*np.log(macro["cpi"]).diff(),
+    "Policy rate": macro["fed_funds"],
+}).loc["1990":"2019"].dropna()
+values = series.to_numpy()
+Y = values[1:]
+X = np.column_stack([np.ones(len(Y)), values[:-1]])
+T, m = Y.shape
+k = X.shape[1]
+residual_variances = np.empty(m)
+for j in range(m):
+    ar_design = np.column_stack([np.ones(T), values[:-1, j]])
+    ar_beta = np.linalg.lstsq(ar_design, Y[:, j], rcond=None)[0]
+    ar_residual = Y[:, j] - ar_design @ ar_beta
+    residual_variances[j] = np.mean(ar_residual**2)
+prior_mean_matrix = np.zeros((k, m))
+prior_mean_matrix[3, 2] = 1.
+b0 = prior_mean_matrix.reshape(-1, order="F")
+prior_diagonal = []
+for i in range(m):
+    prior_diagonal.append(100 * residual_variances[i])
+    for j in range(m):
+        variance = 0.04
+        if i != j:
+            variance *= 0.5 * residual_variances[i] / residual_variances[j]
+        prior_diagonal.append(variance)
+P0 = np.diag(1 / np.array(prior_diagonal))
+S0 = np.diag(residual_variances)
+nu0 = m+2
+Sigma = np.cov(Y.T)
+responses = []
+relaxed_responses = []
+coefficient_draws, covariance_draws = [], []
+recursive_last, recursive_first = [], []
+N_ITER, BURN, H = 5000, 1000, 12
+for iteration in range(N_ITER):
+    Sigma_inv = np.linalg.inv(Sigma)
+    V = np.linalg.solve(P0 + np.kron(Sigma_inv, X.T@X), np.eye(k*m))
+    mean = V @ (P0@b0 + (X.T@Y@Sigma_inv).reshape(-1, order="F"))
+    B = rng.multivariate_normal(mean, V).reshape(k, m, order="F")
+    residual = Y-X@B
+    Sigma = stats.invwishart.rvs(nu0+T, S0+residual.T@residual, random_state=rng)
+    if iteration >= BURN:
+        coefficient_draws.append(B.copy())
+        covariance_draws.append(Sigma.copy())
+        Q, R = np.linalg.qr(rng.normal(size=(m, m)))
+        Q = Q @ np.diag(np.sign(np.diag(R)))
+        impact = np.linalg.cholesky(Sigma) @ Q[:, 0]
+        if impact[2] < 0:
+            impact = -impact
+        A = B[1:].T
+        response = np.array([np.linalg.matrix_power(A, h)@impact for h in range(H+1)])
+        if (response[:3, 1] < 0).all() and (response[:3, 2] > 0).all():
+            relaxed_responses.append(response)
+            if (response[:3, 0] < 0).all():
+                responses.append(response)
+        last_impact = np.linalg.cholesky(Sigma)[:, 2]
+        order = np.array([2, 0, 1])
+        first_impact = np.empty(m)
+        first_impact[order] = np.linalg.cholesky(Sigma[np.ix_(order, order)])[:, 0]
+        recursive_last.append(np.array([
+            np.linalg.matrix_power(A, h) @ last_impact for h in range(H + 1)
+        ]) * (0.25 / last_impact[2]))
+        recursive_first.append(np.array([
+            np.linalg.matrix_power(A, h) @ first_impact for h in range(H + 1)
+        ]) * (0.25 / first_impact[2]))
+coefficient_draws = np.array(coefficient_draws)
+covariance_draws = np.array(covariance_draws)
+print("Accepted rotations:", len(responses), "of", N_ITER-BURN)
+print("Accepted without output restriction:", len(relaxed_responses))
+~~~
+
+The QR diagonal-sign correction makes the proposed orthogonal rotation
+uniform. Orienting its first column to give a positive rate impact fixes
+the shock's sign convention before testing the remaining inequalities.
+The sign-restricted shock has unit structural variance; its impact on
+the policy rate differs across accepted draws.
+
+### What is learned before identification?
+
+The first empirical figure examines a reduced-form quantity: the correlation
+between inflation and rate innovations. It requires no structural shock
+labels. A positive correlation would mean that unexpectedly high inflation
+and unexpectedly high rates tend to occur together, conditional on the
+included lags. It would not establish either direction of causation.
+
+~~~{python}
+#| label: fig-bvar-covariance-posterior
+#| fig-cap: "Reduced-form posterior draws of the inflation–rate innovation correlation. The trace and marginal histogram describe covariance learning before any sign restrictions."
+#| code-fold: true
+correlation_draws = covariance_draws[:, 1, 2] / np.sqrt(
+    covariance_draws[:, 1, 1] * covariance_draws[:, 2, 2]
+)
+fig, axes = plt.subplots(2, 1, figsize=(9, 7))
+axes[0].plot(correlation_draws, color=BLUE, lw=0.6)
+axes[0].set(xlabel="Retained iteration", ylabel="Innovation correlation")
+axes[1].hist(correlation_draws, bins=40, density=True, color=BLUE, alpha=0.5)
+axes[1].set(xlabel="Inflation–rate innovation correlation", ylabel="Posterior density")
+for ax in axes:
+    ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+spectral_radii = np.array([
+    np.max(np.abs(np.linalg.eigvals(draw[1:].T))) for draw in coefficient_draws
+])
+print("Share of reduced-form draws with all roots inside unit circle:",
+      np.mean(spectral_radii < 1))
+~~~
+
+The eigenvalues of the VAR(1) transition matrix determine whether shocks
+eventually die out. If every eigenvalue has modulus below one, powers
+of that matrix converge to zero. We report the fraction meeting this
+condition but do not silently discard other draws. Finite-horizon responses
+can be calculated without a stability truncation; a stationary long-run
+interpretation needs a clearly stated stability assumption.
+
+The trace illustrates one chain, not a completed convergence assessment.
+In the exercise, use dispersed chains and examine numerical precision
+before interpreting structural bands, especially when few rotations survive.
+
+### Compare recursive assumptions on the same posterior
+
+For every paired posterior draw, compute a recursive policy shock with
+the rate last and another with the rate first. Map the second ordering
+back to the original variable labels before propagating the response.
+Both are normalised to a **0.25-percentage-point impact increase** in the
+rate, so their scale is comparable.
+
+~~~{python}
+#| label: fig-bvar-recursive-ordering
+#| fig-cap: "Recursive policy responses under two orderings, each normalised to a 25-basis-point impact increase. Lines and bands are pointwise medians and central 68% intervals."
+#| code-fold: true
+fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
+for paths, name, color in [
+    (recursive_last, "Rate last", BLUE), (recursive_first, "Rate first", BROWN)
+]:
+    lower, middle, upper = np.quantile(np.array(paths), [0.16, 0.5, 0.84], axis=0)
+    for j, ax in enumerate(axes):
+        ax.plot(np.arange(H + 1), middle[:, j], color=color, label=name)
+        ax.fill_between(np.arange(H + 1), lower[:, j], upper[:, j],
+                        color=color, alpha=0.15)
+for j, ax in enumerate(axes):
+    ax.axhline(0, color=GREY, lw=0.8)
+    ax.set_ylabel(series.columns[j])
+    ax.grid(axis="y", alpha=0.3)
+axes[-1].set_xlabel("Months after shock")
+axes[-1].legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
+~~~
+
+Any difference in these paths comes from the identifying assumptions,
+not from refitting a different reduced-form VAR. With the rate last,
+the output and inflation impact responses are exactly zero by construction.
+With the rate first they need not be zero. Neither result by itself tells
+us which timing assumption is economically credible.
+
+### Interpret the sign-restricted distribution
+
+The next figure uses the accepted unit-variance structural shocks.
+Its scale is different from the fixed-rate-increase normalisation in the
+recursive comparison. Compare identifying assumptions only after checking
+both shock definition and normalisation.
+
+~~~{python}
+#| label: fig-bvar-sign-responses
+#| fig-cap: "Pointwise response bands conditional on the stated signs and prior over rotations. The first three horizons were restricted. Output is growth, not the cumulative output level."
+#| code-fold: true
+if responses:
+    response_draws = np.array(responses)
+    low, median, high = np.quantile(response_draws, [.16, .5, .84], axis=0)
+    fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
+    for j, ax in enumerate(axes):
+        ax.plot(np.arange(H+1), median[:, j], color=BLUE)
+        ax.fill_between(np.arange(H+1), low[:, j], high[:, j], color=BLUE, alpha=.2)
+        ax.axhline(0, color=GREY, lw=.8)
+        ax.set_ylabel(series.columns[j])
+        ax.grid(axis="y", alpha=.3)
+    axes[-1].set_xlabel("Months after shock")
+    plt.tight_layout()
+    plt.show()
+else:
+    print("No accepted rotations: increase draws or review restrictions before summarising.")
+~~~
+
+Few accepted draws mean poor numerical precision. Run and diagnose multiple
+chains before interpreting bands. Pointwise medians need not form one internally
+consistent structural model. No stability restriction is imposed in this
+short-horizon illustration; a stationary interpretation requires assessing
+stability and stating any additional conditioning explicitly.
+
+The bands are **pointwise** central 68% intervals: at each horizon they
+retain the middle 68% of the accepted response distribution. They are not
+a 68% simultaneous region for the entire path. A median path combines
+separate quantiles at different horizons and need not correspond to any
+single posterior draw.
+
+The spread combines coefficient and covariance uncertainty with ambiguity
+across accepted rotations. It is conditional on the coefficient prior,
+covariance prior, sign restrictions and rotation distribution. Structural
+uncertainty is therefore not exhausted by reporting a posterior mean
+coefficient matrix.
+
+### Relax a restriction to see what was assumed
+
+Keep negative inflation and positive rate responses at horizons 0–2,
+but stop imposing a negative output-growth response. The relaxed set
+contains the original set because both use exactly the same proposed
+parameter–rotation pairs. Compare output responses, especially in the
+shaded period where the original restriction applied.
+
+~~~{python}
+#| label: fig-bvar-output-restriction
+#| fig-cap: "Output-growth response with and without its sign restriction. Shading marks horizons 0–2. Removing a restriction changes the admissible interpretations; it need not widen every pointwise interval."
+#| code-fold: true
+if responses and relaxed_responses:
+    fig, ax = plt.subplots()
+    ax.axvspan(0, 2, color=GREY, alpha=0.1)
+    for paths, name, color in [
+        (responses, "Output sign imposed", BLUE),
+        (relaxed_responses, "Output unrestricted", BROWN),
+    ]:
+        lower, middle, upper = np.quantile(np.array(paths)[:, :, 0],
+                                           [0.16, 0.5, 0.84], axis=0)
+        ax.plot(np.arange(H + 1), middle, color=color, label=name)
+        ax.fill_between(np.arange(H + 1), lower, upper, color=color, alpha=0.18)
+    ax.axhline(0, color=GREY, lw=0.8)
+    ax.set(xlabel="Months after shock", ylabel="Output-growth response")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Too few admissible draws for the restriction comparison; inspect acceptance.")
+~~~
+
+If the unrestricted output response remains negative, that is a more
+informative finding than its negativity under an imposed sign. It is
+still conditional on the retained inflation and rate restrictions and
+the model. If positive responses become plausible, the stronger negative
+claim depended on the output restriction.
+
+Our algorithm proposes one orientation per retained parameter draw
+and conditions jointly on acceptance. Parameter draws with a larger
+admissible share of rotations are consequently represented more often
+in the restricted sample. Repeatedly searching until every parameter
+draw supplies one accepted rotation would apply a different weighting.
+Neither scheme should be described without stating its implied treatment
+of identification uncertainty.
+
+These data come from the documented [FRED snapshot](../data/SOURCES.md).
+The deliberately small VAR and monthly timing assumptions omit information
+that matters in policy analysis. This application teaches how to construct
+and qualify an identified response, not a definitive estimate of the
+monetary transmission mechanism.
+
+## Discussion and connection to the exercises {#sec-discussion}
+
+The [Week 7 lab](../exercise-sessions/07-bvar-identification.qmd) uses a simulated
+three-variable system so the sampling and identification steps can be checked.
+
+1. Verify $CC^\top=\Sigma$ before and after a rotation.
+2. Derive the two Gibbs blocks and check column-wise vectorisation.
+3. Remove the output sign restriction. Which response was previously assumed?
+4. Separate uncertainty in $B,\Sigma$ from uncertainty across admissible rotations.
+
+Good forecasts do not validate identifying restrictions. Next chapter changes
+another modelling assumption: coefficients or latent states can evolve over time.
+
+### Reading guide
+
+Bauwens, Lubrano and Richard (1999), *Bayesian Inference in Dynamic Econometric
+Models*, on VAR posteriors; Koop (2003), *Bayesian Econometrics*, on multivariate
+models. The scheduled structural-identification papers supplement these foundations.
