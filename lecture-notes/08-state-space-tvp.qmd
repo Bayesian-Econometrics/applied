@@ -1,770 +1,626 @@
 ---
 title: "State space and time-varying parameter models"
 subtitle: "Lecture 8"
+format:
+  html:
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img, .cell figure img, figure img {
+          width: 100%; max-width: 100%; height: auto;
+        }
+        </style>
 ---
 
-## Overview
+::: {.callout-tip icon=false}
+## Key takeaways {.unnumbered}
 
-By the end of this lecture you can stop assuming that a coefficient estimated last
-week still holds this week, and instead carry a belief about it forward through time,
-updating it by exactly as much as each new observation warrants.
-
-::: {.callout-important}
-## The result of this chapter
-
-For a linear Gaussian state space model, an unobserved state $\alpha_t$ that evolves
-by $\alpha_{t+1} = T_t\alpha_t + R_t\eta_t$ and is measured through
-$y_t = Z_t\alpha_t + \varepsilon_t$, the distribution of the state given the data seen
-so far is produced by a single recursive update,
-
-$$
-a_{t\mid t} = a_{t\mid t-1} + K_t\big(y_t - Z_t a_{t\mid t-1}\big),
-\qquad K_t = P_{t\mid t-1}Z_t^\top F_t^{-1},
-$$
-
-so today's belief is yesterday's forecast plus a gain times the surprise it did not
-predict. The difficulty is that the gain requires an entire covariance matrix to be
-carried forward through time rather than a single number, and the same recursion, run
-backward instead of forward, is what lets an entire latent history be drawn from its
-posterior rather than merely summarised at each date.
+- **A state-space model separates an evolving quantity from its noisy observations.** Market beta, trend growth and latent activity are examples.
+- **The Kalman filter is repeated Bayesian updating.** Predict the state, then correct that prediction using the new observation.
+- **The gain balances two uncertainties.** A noisy observation receives less weight; an uncertain state prediction receives more correction.
+- **Filtering and smoothing use different information sets.** A smoothed historical path must not be presented as a real-time estimate.
 :::
 
-After working through this chapter you can
+## Motivation and the central question {#sec-motivation}
 
-1. diagnose why a coefficient estimated once and held fixed cannot represent a
-   relationship that genuinely drifts, and recognise the symptom in the residuals;
-2. derive the Kalman filter recursions from the conditional Normal distribution, and
-   the model's log-likelihood as a by-product of the same recursion;
-3. derive the forward-filtering backward-sampling recursion that turns the filter into
-   a block of a Gibbs sampler;
-4. implement the filter and the sampler in Python and apply both to a market beta that
-   is allowed to move;
-5. compare filtered, smoothed and rolling-window estimates of the same coefficient
-   path and say what each can and cannot claim to know;
-6. interpret a posterior probability attached to a change in the path, rather than
-   only a point estimate at a single date.
+An exposure estimated from past returns may change as a firm's business changes.
+A macroeconomic trend is also not necessarily constant over decades. We want
+to describe gradual evolution without treating every period as an unrelated
+parameter.
 
-Week 8 of 15, paired with the [Week 8 exercise
-session](../exercise-sessions/08-state-space-tvp.qmd). The chapter assumes the Normal
-linear regression posterior of Lecture 2 and the Gibbs sampling logic of Lecture 4;
-the Minnesota-prior shrinkage of Lecture 6 is not needed, because nothing here is
-solved by regularising a single fixed coefficient.
+**How should a new observation update our belief about an unobserved, evolving
+state?** A state equation describes evolution and an observation equation
+describes measurement. Their combination makes the information flow explicit.
 
-## Motivation: a beta that will not sit still {#sec-motivation}
+The central difficulty is that we do not observe the changing quantity
+directly. A bank's return can move sharply even if its market exposure has
+not changed. Conversely, exposure may drift during months with unremarkable
+returns. We need a model that distinguishes changes in the underlying
+relationship from noise around that relationship.
 
-Every regression since Lecture 2 has estimated one coefficient and held it fixed for
-the whole sample. That is a strong claim whenever the relationship being measured is
-itself a claim about behaviour that plausibly changes, and the market beta of a bank
-is the cleanest case there is. A bank's equity is a levered claim on its assets, so
-standard capital-structure arithmetic says its beta should rise whenever asset values
-fall towards the value of its debt, exactly the mechanism that was live throughout
-2008. A single beta estimated over decades of data, of the kind Lecture 2 would
-produce, averages over any such episode rather than describing it.
+Start with a **local-level model**:
 
-**Reading the computation.** The full-sample regression is the benchmark; the three
-windows are chosen around three well-documented episodes in the history of the US
-banking sector, and none of the three subsample fits uses information from outside
-its own window.
+$$\alpha_t=\alpha_{t-1}+\eta_t,\qquad
+y_t=\alpha_t+\varepsilon_t.$$
+
+The state $\alpha_t$ is an unobserved level, such as underlying monthly
+inflation. The observation $y_t$ is the published measurement. State noise
+$\eta_t$ changes the underlying level; measurement noise $\varepsilon_t$
+changes the observation without changing that level. Both have mean zero,
+but their variances answer different questions.
+
+This is a dynamic extension of Normal–Normal updating. Yesterday's
+posterior supplies today's starting information, allowing for movement
+in between. We then combine that prediction with today's measurement.
+In a time-varying regression, the same logic updates a vector of coefficients.
+
 
 ```{python}
+#| label: setup-tvp
+#| include: false
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from scipy import stats
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from scipy import stats
 
-rng = np.random.default_rng(2026)
-plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
-                     "grid.alpha": 0.3, "font.size": 11})
-
+SEED = 2026
+rng = np.random.default_rng(SEED)
+plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
+                     "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": False})
+BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
-ff_m = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
-ind49 = pd.read_parquet(DATA / "ff_industry49_monthly.parquet")
+```
 
-bank = pd.DataFrame({
-    "excess": 100.0 * (ind49["banks"] - ff_m["rf"]),   # banks in excess of the bill rate
-    "market": 100.0 * ff_m["mkt_rf"],                  # market excess return
-}).loc["1970-01-01":].dropna()
-bk_y = bank["excess"].to_numpy()
-bk_X = np.column_stack([np.ones(len(bank)), bank["market"].to_numpy()])
-bk_dates = bank.index
+## Intuition: a simple worked example {#sec-intuition}
 
-b_full = np.linalg.lstsq(bk_X, bk_y, rcond=None)[0]
-windows = [("1988-01", "1992-12", "S&L crisis, 1988-1992", "C0"),
-           ("1998-01", "2002-12", "dot-com years, 1998-2002", "C1"),
-           ("2007-01", "2009-12", "banking crisis, 2007-2009", "C3")]
+### First separate movement from measurement
 
+Imagine underlying inflation rising gradually while monthly observations
+bounce around it. The state equation represents the gradual evolution;
+the observation equation represents the additional variation around it.
+The next figure is simulated, so we can display the otherwise unobserved
+state. In actual data, we must infer that line.
+
+```{python}
+#| label: fig-state-observation-noise
+#| fig-cap: "Illustrative local-level data. State disturbances move the latent level; measurement disturbances move observations around that level."
+#| code-fold: true
+N_TOY = 80
+toy_rng = np.random.default_rng(SEED)
+toy_state = 1 + np.cumsum(toy_rng.normal(0, 0.08, N_TOY))
+toy_observed = toy_state + toy_rng.normal(0, 0.3, N_TOY)
 fig, ax = plt.subplots()
-ax.scatter(bank["market"], bank["excess"], s=6, color="grey", alpha=0.25,
-           label="all months")
-grid_m = np.linspace(bank["market"].min(), bank["market"].max(), 50)
-ax.plot(grid_m, b_full[0] + b_full[1] * grid_m, "k--", lw=1.5,
-        label=f"full sample, beta {b_full[1]:.2f}")
-for lo, hi, label, col in windows:
-    m = (bk_dates >= lo) & (bk_dates <= hi)
-    b = np.linalg.lstsq(bk_X[m], bk_y[m], rcond=None)[0]
-    ax.plot(grid_m, b[0] + b[1] * grid_m, color=col, lw=2.0,
-            label=f"{label}, beta {b[1]:.2f}")
-ax.set_xlabel("market excess return (%)"); ax.set_ylabel("bank excess return (%)")
-ax.legend(fontsize=8); ax.set_title("One regression line does not fit every era")
-plt.tight_layout(); plt.show()
-
-print(f"{len(bank)} months, {bk_dates[0]:%Y-%m} to {bk_dates[-1]:%Y-%m}")
-print(f"full-sample OLS beta {b_full[1]:.4f}")
-for lo, hi, label, _ in windows:
-    m = (bk_dates >= lo) & (bk_dates <= hi)
-    b = np.linalg.lstsq(bk_X[m], bk_y[m], rcond=None)[0]
-    print(f"{label}: {m.sum()} months, beta {b[1]:.4f}")
+ax.plot(np.arange(1, N_TOY + 1), toy_observed, color=GREY, lw=0.8,
+        marker=".", alpha=0.7, label="Observed inflation")
+ax.plot(np.arange(1, N_TOY + 1), toy_state, color=BLUE, lw=2,
+        label="Latent level (known only in simulation)")
+ax.set(xlabel="Month", ylabel="Illustrative inflation (%)")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
+plt.tight_layout()
+plt.show()
 ```
 
-Six hundred and seventy-nine months of data give a single OLS beta of $1.0751$. Fitted
-separately, the three windows give $1.4411$ at the height of the savings-and-loan
-crisis, $0.7573$ at the dot-com peak, and $1.3124$ during 2007 to 2009, a range of
-nearly $0.7$ around a full-sample figure that hides all three episodes equally. The
-gap between $0.76$ and $1.44$ is not sampling noise from short windows; it is the
-levered-equity mechanism showing up exactly where the theory says it should, in the
-years the market's own variance was dominated by a sector other than banks and in the
-years bank solvency itself was in question.
+### Work through one correction
 
-Two responses are available and both are worse than they look. Refitting a fresh OLS
-regression on every five-year window, the informal version of what the picture just
-did, throws away every observation outside that window and produces an estimate that
-jumps whenever the window moves, with no way to say how much of the jump is signal and
-how much is the small-sample noise of sixty months. Reporting the full-sample beta
-instead is precise but wrong for any particular date: an investor pricing bank risk in
-March 2009 using $1.0751$ is using a number that describes 1970 through 2026 evenly,
-not the month in which it is needed. Neither response treats beta as something that
-moves gradually and is estimated with more or less confidence depending on how much
-has been learned about it so far, which is exactly the gap this chapter closes.
+Before today's observation, suppose a state has distribution $N(1,0.04)$.
+We observe $y=1.4$ with measurement variance 0.09. This is the Normal update
+from Chapter 2, now indexed by time:
 
-## The problem: a constant coefficient cannot see a drifting one {#sec-problem}
+$$K=\frac{0.04}{0.04+0.09}=0.3077,\qquad
+a=1+K(1.4-1)=1.1231,\qquad P=(1-K)0.04=0.0277.$$
 
-### Result R-8.1: the constant model is a boundary of the general one, and its residuals absorb what it cannot track
+The observation moves the state estimate upward, but not all the way to 1.4.
+If measurement noise were smaller, it would receive more weight. Before the
+next observation, uncertainty may increase again because the state itself evolves.
 
-Every model in this chapter, including the constant-coefficient regression, is a
-special case of the state space form introduced formally in the next section,
+Here 0.04 is uncertainty about the state **before** seeing the observation.
+The value 0.09 is the measurement-noise variance. Neither is the variance
+of a parameter estimate obtained by rerunning the filter.
+
+To derive the update, write $a^-=1$, $P^-=0.04$ and $H=0.09$.
+Multiplication of the predicted-state density by the likelihood gives
+
+$$p(\alpha\mid y)\propto
+\exp\left[-\frac12\left\{
+\frac{(\alpha-a^-)^2}{P^-}+\frac{(y-\alpha)^2}{H}\right\}\right].$$
+
+Completing the square produces
+
+$$P=\left(\frac1{P^-}+\frac1H\right)^{-1},\qquad
+a=P\left(\frac{a^-}{P^-}+\frac yH\right).$$
+
+Rearrange the mean to obtain $a=a^-+K(y-a^-)$ with
+$K=P^-/(P^-+H)$. Thus the gain is simply the familiar Bayesian data
+weight written as a correction to a prior prediction. The residual
+$y-a^-=0.4$ is the new information; the correction is only
+$0.3077(0.4)=0.1231$ because the observation is noisy.
+
+If state noise has variance $Q=0.01$, next period's predicted variance
+is $0.0277+0.01=0.0377$. Learning reduced uncertainty today, but movement
+of the state creates new uncertainty before the next measurement.
+If the next observation is unavailable, the prediction still proceeds;
+there is simply no measurement correction at that date.
+
+```{python}
+#| label: fig-kalman-update
+#| fig-cap: "A single filtering correction is the familiar Normal update. The measurement likelihood is scaled to integrate to one for display."
+#| code-fold: true
+grid = np.linspace(.3, 2, 400)
+gain = .04 / (.04+.09)
+updated_mean = 1 + gain*.4
+updated_var = (1-gain)*.04
+fig, ax = plt.subplots()
+ax.plot(grid, stats.norm.pdf(grid, 1, .2), color=GREY, linestyle=":", label="State prediction")
+ax.plot(grid, stats.norm.pdf(grid, 1.4, .3), color=BROWN, linestyle="--", label="Measurement")
+ax.plot(grid, stats.norm.pdf(grid, updated_mean, np.sqrt(updated_var)), color=BLUE,
+        label="Filtered state")
+ax.set(xlabel="State", ylabel="Density / scaled likelihood")
+ax.grid(axis="y", alpha=.3)
+ax.legend(loc="upper center", bbox_to_anchor=(.5, -.15), ncol=3, frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+## Formal framework and derivation {#sec-methodology}
+
+### State and observation equations
+
+Write
+$\alpha_t=T_t\alpha_{t-1}+\eta_t$, $\eta_t\sim N(0,Q_t)$, and
+$y_t=Z_t\alpha_t+\varepsilon_t$, $\varepsilon_t\sim N(0,H_t)$.
+Assume mutually independent disturbances and an initial Normal distribution.
+For now, matrices and noise covariances are known.
+
+For $d$ states and $r$ observations, $T_t$ is $d\times d$,
+$Z_t$ is $r\times d$, $Q_t$ is $d\times d$ and $H_t$ is $r\times r$.
+The local-level example has $d=r=1$, $T_t=Z_t=1$.
+The initial distribution $\alpha_0\sim N(a_0,P_0)$ specifies uncertainty
+before the first observation.
+
+The three calculations are **propagation of the state**, **prediction
+of the observation**, and **correction after observing it**. Writing the
+information set explicitly prevents us from accidentally using tomorrow's
+observation in today's filtered estimate.
+
+The state equation is also a **prior on an entire path**. For a random
+walk with a fixed covariance,
+
+$$p(\alpha_{0:T}\mid Q)=p(\alpha_0)
+\prod_{t=1}^T N(\alpha_t;\alpha_{t-1},Q).$$
+
+Thus we are not estimating an unrelated coefficient vector at every date.
+Neighbouring vectors are linked by a prior favouring small increments.
+This is the dynamic counterpart of Lecture 6's shrinkage: there we
+penalised departures from a coefficient baseline; here we penalise changes
+between adjacent coefficients. For diagonal $Q$, the log prior contains
+$-\tfrac12\sum_{t,j}(\alpha_{tj}-\alpha_{t-1,j})^2/Q_j$.
+Small evolution variances impose more continuity.
+
+A macroeconomic extension is a local linear trend with level $\mu_t$
+and slope $d_t$. Stack them in $\alpha_t=(\mu_t,d_t)^\top$ and set
+$T=\left(\begin{smallmatrix}1&1\\0&1\end{smallmatrix}\right)$,
+$Z=(1,0)$. Last period's slope predicts the next change in the level,
+and disturbances allow either component to evolve. The filter formulas
+below apply directly. Our Python implementation instead uses $T=I$
+for the exercise's drifting regression coefficients; a local-trend
+implementation must include the matrix multiplication in propagation.
+
+If $\alpha_{t-1}\mid y_{1:t-1}\sim N(a_{t-1},P_{t-1})$, linear transformation
+and independent noise give the prediction
+
+$$a_t^-=T_ta_{t-1},\qquad P_t^-=T_tP_{t-1}T_t^\top+Q_t.$$
+
+The mean follows the transition equation because state noise has mean zero.
+The covariance transforms through $T_t$ and then gains $Q_t$ because the
+new state disturbance is independent. A superscript minus means “before
+the current observation”, not a negative quantity.
+
+The forecast observation is $Z_ta_t^-$, with innovation
+$v_t=y_t-Z_ta_t^-$ and innovation covariance
+$F_t=Z_tP_t^-Z_t^\top+H_t$.
+
+This forecast variance has two sources. We are unsure where the state is,
+giving $Z_tP_t^-Z_t^\top$, and even a known state produces a noisy
+observation, giving $H_t$. Their sum measures how surprising a forecast
+error should be.
+
+### Derive the correction from a joint Normal
+
+Before observing $y_t$, state and observation have joint covariance
+
+$$\operatorname{Var}\begin{pmatrix}\alpha_t\\y_t\end{pmatrix}
+=\begin{pmatrix}
+P_t^-&P_t^-Z_t^\top\\
+Z_tP_t^-&F_t
+\end{pmatrix}.$$
+
+The conditional-Normal identity gives the correction because
+$\operatorname{Cov}(\alpha_t,y_t\mid y_{1:t-1})=P_t^-Z_t^\top$.
+The observation depends on the state through $Z_t$; its additional noise
+is independent of that state. Conditioning shifts the state mean by the
+cross-covariance times the inverse forecast variance times the observed
+forecast error:
+
+$$K_t=P_t^-Z_t^\top F_t^{-1},\qquad
+a_t=a_t^-+K_tv_t,\qquad
+P_t=P_t^--K_tF_tK_t^\top.$$
+
+Thus the filter performs one prior-to-posterior update per date. It also gives
+the likelihood through the innovation densities:
+$\log p(y_{1:T})=\sum_t\log N(y_t;Z_ta_t^-,F_t)$.
+This can support inference for unknown noise parameters; the filter alone does
+not integrate their uncertainty.
+
+In scalar observation form, its log-likelihood contribution is
+
+$$-\frac12\left\{\log(2\pi)+\log F_t+\frac{v_t^2}{F_t}\right\}.$$
+
+The forecast error alone is insufficient: a model could accommodate large
+errors by claiming enormous uncertainty. The $\log F_t$ term charges
+for that diffuseness. Lecture 9 uses the same predictive-density logic
+to evaluate forecasts and compare models.
+
+### Understand what makes the gain large
+
+In the local-level model, a small $H$ makes the measurement reliable
+and pushes $K$ towards one. A large $P^-$ makes the state prediction
+uncertain and has the same effect. Large measurement noise pushes the
+gain towards zero. These are changes in the relative information supplied
+by the two sources.
+
+```{python}
+#| label: fig-kalman-gain
+#| fig-cap: "Scalar Kalman gains depend on relative uncertainty. A less precise state prediction makes the filter respond more strongly to the same measurement."
+#| code-fold: true
+measurement_variances = np.linspace(0.001, 0.3, 300)
+fig, ax = plt.subplots()
+for predicted_variance, color in zip([0.01, 0.04, 0.16], [GREY, BLUE, BROWN]):
+    ax.plot(measurement_variances,
+            predicted_variance / (predicted_variance + measurement_variances),
+            color=color, label=f"State prediction variance = {predicted_variance}")
+ax.set(xlabel="Measurement-noise variance", ylabel="Kalman gain", ylim=(0, 1))
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+In a regression the gain is a vector, so its entries need not lie between
+zero and one. For a scalar slope observed through $y_t=x_t\beta_t+\varepsilon_t$,
+the gain is $P_t^-x_t/(x_t^2P_t^-+H)$. Its sign follows $x_t$.
+A negative market return therefore reverses how a given return residual
+updates beta. This follows the regression equation, not a failure of the filter.
+
+### Implement the random-walk filter
+
+The following function implements a random-walk state ($T=I$) with one
+observed outcome per date. Each row of the design matrix supplies $Z_t$.
+It returns predicted and filtered moments plus the innovation log likelihood.
+The covariance update uses the Joseph form, algebraically equivalent to
+the formula above but less vulnerable to floating-point asymmetry.
+
+```{python}
+#| label: random-walk-kalman-filter
+#| code-fold: true
+def kalman_filter(y: np.ndarray, design: np.ndarray, Q: np.ndarray,
+                  H: float, a0: np.ndarray, P0: np.ndarray) -> tuple:
+    """Return predicted and filtered state moments and the log likelihood."""
+    n, d = design.shape
+    predicted_mean = np.empty((n, d))
+    predicted_cov = np.empty((n, d, d))
+    filtered_mean = np.empty((n, d))
+    filtered_cov = np.empty((n, d, d))
+    mean, covariance = a0.copy(), P0.copy()
+    log_likelihood = 0.
+    for t, (outcome, z) in enumerate(zip(y, design)):
+        prior_mean, prior_cov = mean.copy(), covariance + Q
+        innovation = outcome - z @ prior_mean
+        innovation_var = z @ prior_cov @ z + H
+        gain = prior_cov @ z / innovation_var
+        mean = prior_mean + gain * innovation
+        correction = np.eye(d) - np.outer(gain, z)
+        covariance = correction @ prior_cov @ correction.T + H * np.outer(gain, gain)
+        predicted_mean[t], predicted_cov[t] = prior_mean, prior_cov
+        filtered_mean[t], filtered_cov[t] = mean, covariance
+        log_likelihood -= 0.5 * (
+            np.log(2 * np.pi * innovation_var) + innovation**2 / innovation_var
+        )
+    return predicted_mean, predicted_cov, filtered_mean, filtered_cov, log_likelihood
+```
+
+Apply it first where we know the answer-generating process. For the
+simulated local level, the design is a column of ones and the variances
+are the values used to generate the data. The filter never sees the
+latent line. Differences between the filtered mean and that line are
+expected: even with correct parameters, noisy observations cannot reveal
+the state exactly.
+
+```{python}
+#| label: fig-kalman-simulation
+#| fig-cap: "Filtering the simulated local level. The band is a pointwise 95% filtered interval, conditional on the known simulation variances."
+#| code-fold: true
+toy_prediction, toy_prediction_cov, toy_filtered, toy_cov, _ = kalman_filter(
+    toy_observed, np.ones((N_TOY, 1)), np.array([[0.08**2]]),
+    0.3**2, np.array([1.]), np.array([[0.2**2]])
+)
+toy_sd = np.sqrt(toy_cov[:, 0, 0])
+fig, ax = plt.subplots()
+ax.plot(toy_state, color=GREY, linestyle="--", label="Generating state")
+ax.plot(toy_filtered[:, 0], color=BLUE, label="Filtered mean")
+ax.fill_between(np.arange(N_TOY), toy_filtered[:, 0] - 1.96 * toy_sd,
+                toy_filtered[:, 0] + 1.96 * toy_sd, color=BLUE, alpha=0.2)
+ax.set(xlabel="Observation index", ylabel="Latent inflation level (%)")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+### Filtering, smoothing and path draws
+
+Filtering conditions on $y_{1:t}$. Smoothing conditions on the full sample
+$y_{1:T}$, including observations after date $t$. A smoothed beta can be more
+precise because it uses information unavailable at that date.
+
+For instance, a high return this month could reflect either a high beta
+or a large idiosyncratic disturbance. Several subsequent months with
+similar evidence make a persistent beta change more plausible. A smoother
+uses that later evidence to revise its assessment of this month's state.
+That is legitimate historical inference, but it is not the estimate a
+portfolio manager possessed at the time.
+
+The backward smoothing recursions follow from the same joint-Normal
+conditioning argument. Write $a_t^s,P_t^s$ for smoothed moments and initialise
+them at the final filtered moments. Then
 
 $$
-y_t = x_t^\top \beta_t + \varepsilon_t, \qquad \varepsilon_t \sim N(0, H),
-\qquad \beta_t = \beta_{t-1} + \eta_t, \qquad \eta_t \sim N(0, Q),
+J_t=P_tT_{t+1}^\top(P_{t+1}^-)^{-1},\qquad
+a_t^s=a_t+J_t(a_{t+1}^s-a_{t+1}^-),\qquad
+P_t^s=P_t+J_t(P_{t+1}^s-P_{t+1}^-)J_t^\top.
 $$
 
-with the constant-coefficient regression recovered exactly at $Q = 0$: no state
-noise means $\beta_t = \beta_0$ for every $t$, which is the single fixed coefficient
-Lecture 2 estimates by least squares. Because $Q = 0$ is a feasible point inside the
-larger parameter space rather than a different model, the log-likelihood that this
-chapter's filter delivers, maximised freely over $Q \succeq 0$, can never fall below
-the log-likelihood at $Q = 0$, for any sample size, any number of coefficients and any
-design: $\ell(\hat Q) \ge \ell(0)$ always. A constant model can tie the time-varying
-one only when the data show no evidence of drift; it cannot beat it.
-
-What a constant fit reports as measurement noise is correspondingly not a clean
-estimate of $H$ whenever $Q > 0$ in truth. Writing $\bar\beta$ for the fixed value a
-constant fit converges to and $b_t = \beta_t - \bar\beta$ for how far the true
-coefficient has wandered from it at date $t$, the residual of the constant fit is
-$e_t = y_t - x_t^\top\bar\beta = x_t^\top b_t + \varepsilon_t$: part genuine noise, part
-the piece of a moving coefficient that a single fixed number cannot express. A
-regression that looks well fitted by its residual variance alone may simply be
-quoting an inflated noise figure for what is, in part, a signal it has thrown away.
+The mean correction compares what later data now tell us about tomorrow
+with what we predicted about tomorrow at date $t$. The covariance $P_t$
+links today's state to tomorrow's, transmitting that new information
+backward. At the sample endpoint there is no future information, so
+filter and smoother coincide.
 
 ::: {.callout-note collapse="true"}
-## Derivation
+## Optional derivation: backward conditioning {.unnumbered}
 
-The nesting claim is immediate once the state space filter of R-8.2 is available: setting
-$Q = 0$ in the transition equation gives $\alpha_{t+1} = T_t\alpha_t$ with no added
-randomness, and for the random-walk case used throughout this chapter, $T_t = I$, so
-$\alpha_{t+1} = \alpha_t$ with probability one. A state that never moves and is
-observed through $y_t = Z_t\alpha_t + \varepsilon_t$ is exactly the classical regression
-model of Lecture 2 with $Z_t = x_t^\top$, and it is a textbook fact that the Kalman
-filter reduces, in this special case, to recursive least squares: starting from a
-diffuse prior, $a_{T\mid T}$ after processing all $T$ observations equals the ordinary
-least squares estimate on the whole sample. The log-likelihood the filter reports at
-$Q = 0$ is therefore the ordinary Normal regression log-likelihood. Since $Q = 0$ lies
-inside the feasible set $Q \succeq 0$ over which the general model's likelihood is
-maximised, the maximum over the larger set cannot be smaller than the value already
-achieved at one particular feasible point, which is the inequality $\ell(\hat Q) \ge
-\ell(0)$.
-
-For the residual decomposition, write the constant fit's probability limit as $\bar\beta$
-and note that $b_t = \beta_t - \bar\beta$ inherits the random walk's dependence
-structure, $b_{t+1} = b_t + \eta_{t+1}$, so consecutive deviations are strongly
-positively correlated whenever $Q$ is small relative to how far the path has already
-wandered. The constant fit's residual is $e_t = x_t^\top b_t + \varepsilon_t$, a sum of
-a genuinely autocorrelated term and an independent one, so its variance
-$\operatorname{Var}(e_t) = x_t^\top\operatorname{Var}(b_t)x_t + H$ is not the constant $H$
-the model assumes, and its correlation structure carries the fingerprint of the
-coefficient's own path rather than pure measurement noise. Two symptoms follow directly
-and can be checked without any further theory: the residual variance is not stable
-across sub-periods, since $\operatorname{Var}(b_t)$ is largest exactly when the true
-path is farthest from $\bar\beta$, and the squared residuals are serially correlated,
-since squaring keeps the sign information in $x_t^\top b_t$ that a single average level
-cannot remove.
+Let $J_t=P_tT_{t+1}^\top(P_{t+1}^-)^{-1}$. The same conditional-Normal identity
+gives
+$\alpha_t\mid\alpha_{t+1},y_{1:t}\sim
+N(a_t+J_t(\alpha_{t+1}-a_{t+1}^-),P_t-J_tP_{t+1}^-J_t^\top)$.
+Draw the final state from its filtered distribution, then draw backwards using
+this conditional. Forward-filtering backward-sampling gives a joint state path.
+Drawing independently from each smoothed marginal would lose the temporal
+dependence of that path.
 :::
 
-Both symptoms are checked directly on the constant fit's own residuals from the
-bank data already used above.
+### If the evolution variances are unknown
 
-**Reading the computation.** `resid` is the same full-sample constant-beta residual
-computed in the motivation section. The rolling variance uses a five-year window so
-that it can be compared with the same crisis and calm episodes already highlighted.
-
-```{python}
-#| label: fig-ols-residual-diagnostics
-#| fig-cap: "Rolling five-year variance of the constant-beta residual, and its lag-one autocorrelation in levels against in squares."
-bk_resid = bk_y - bk_X @ b_full
-roll_var = pd.Series(bk_resid).rolling(60).var()
-ac1_level = np.corrcoef(bk_resid[1:], bk_resid[:-1])[0, 1]
-ac1_sq = np.corrcoef(bk_resid[1:] ** 2, bk_resid[:-1] ** 2)[0, 1]
-
-fig, ax = plt.subplots(figsize=(7.6, 4.0))
-ax.plot(bk_dates, roll_var, color="C3", lw=1.3)
-for lo, hi, label, col in windows:
-    ax.axvspan(pd.Timestamp(lo), pd.Timestamp(hi), color=col, alpha=0.15)
-ax.set_xlabel("date"); ax.set_ylabel("rolling 5-year residual variance")
-ax.set_title("The constant fit's own residual variance is not constant")
-plt.tight_layout(); plt.show()
-
-m_calm = (bk_dates >= "1995-01") & (bk_dates <= "2005-12")
-m_crisis = (bk_dates >= "2007-01") & (bk_dates <= "2009-12")
-print(f"residual variance, calm 1995-2005: {bk_resid[m_calm].var():.2f}; "
-      f"crisis 2007-2009: {bk_resid[m_crisis].var():.2f}")
-print(f"lag-1 autocorrelation: residuals {ac1_level:.3f}, squared residuals {ac1_sq:.3f}")
-```
-
-The constant fit's residual variance is $16.63$ in the calm decade 1995 to 2005 and
-$44.03$ during the 2007 to 2009 crisis, nearly three times as large, exactly the
-pattern R-8.1 predicts if beta genuinely moved rather than the noise variance
-genuinely tripling, and the rolling-variance line rises and falls in step with the
-shaded episodes rather than drifting smoothly. The raw residuals show almost no
-serial correlation, a first-lag correlation of $0.015$, because $\bar\beta$ was chosen
-precisely to make the mean residual small at every date; but the squared residuals
-correlate at $0.261$ from one month to the next, the signature of a variance that
-clusters in time because a piece of the true relationship is missing from the model
-rather than because volatility itself is truly constant. Least squares is not wrong
-about anything it was asked to estimate. It was asked to estimate one number for
-sixty years, and the data contain more than one number to find.
-
-## Methodology: the state space model and its two samplers {#sec-methodology}
-
-The repair keeps the two-equation structure already used informally above and makes
-it exact. A linear Gaussian **state space model** pairs a **measurement equation**
-linking an observed series to a latent **state**, with a **transition equation**
-describing how that state evolves,
+So far the filter is conditional on $Q$ and $H$. To perform joint
+Bayesian inference, alternate a draw of the entire state path with draws
+of the variance parameters. For diagonal $Q$, independent inverse-Gamma
+priors give particularly transparent conditionals. In the random-walk
+model, conditional on $\alpha_{0:T}$,
 
 $$
-y_t = Z_t\,\alpha_t + \varepsilon_t, \quad \varepsilon_t \sim N(0, H_t), \qquad\qquad
-\alpha_{t+1} = T_t\,\alpha_t + R_t\,\eta_t, \quad \eta_t \sim N(0, Q_t),
+Q_j\mid\alpha_{0:T},y\sim IG\left(
+a_{Qj}+\frac T2,\ d_{Qj}+
+\frac12\sum_{t=1}^T(\alpha_{tj}-\alpha_{t-1,j})^2\right),
 $$
 
-with the two shocks independent of each other and over time. The matrices
-$Z_t, T_t, R_t, H_t, Q_t$ are the system matrices, often constant across $t$; the
-template nests the local level model, the time-varying regression of the previous
-section with $Z_t = x_t^\top$, and, stacked appropriately, the time-varying vector
-autoregression of Primiceri (2005), in which both the autoregressive coefficients and
-the shock covariance of a macroeconomic system are allowed to drift, a model credited
-with much of what is known about how the transmission of monetary policy changed
-across the post-war period.
+and for a scalar observation variance,
 
-### Result R-8.2: the Kalman filter recursions, and the likelihood as a by-product
+$$H\mid\alpha_{0:T},y\sim IG\left(
+a_H+\frac T2,\ d_H+\frac12\sum_{t=1}^T(y_t-Z_t\alpha_t)^2\right).$$
 
-Suppose $\alpha_t \mid y_{1:t-1} \sim N(a_{t\mid t-1}, P_{t\mid t-1})$. Then the
-distribution of the state given data up to and including date $t$ is again exactly
-Normal, and is produced by
+These are the variance updates from Lecture 4 applied to state increments
+and observation residuals. They assume the initial-state prior is independent
+of these variances and that its state draw is included. The state path
+must be drawn jointly, for example by forward-filtering backward-sampling.
+Replacing it by the filtered mean is not a Gibbs update.
 
-$$
-v_t = y_t - Z_t a_{t\mid t-1}, \qquad F_t = Z_tP_{t\mid t-1}Z_t^\top + H_t, \qquad
-K_t = P_{t\mid t-1}Z_t^\top F_t^{-1},
-$$
-$$
-a_{t\mid t} = a_{t\mid t-1} + K_t v_t, \qquad P_{t\mid t} = (I - K_tZ_t)P_{t\mid t-1},
-\qquad\qquad
-a_{t+1\mid t} = T_t a_{t\mid t}, \qquad P_{t+1\mid t} = T_tP_{t\mid t}T_t^\top + R_tQ_tR_t^\top,
-$$
+Small $Q_j$ favours a nearly constant coefficient. Estimating very small
+evolution variances can be sensitive to their priors; adding state flexibility
+does not guarantee that the data identify its magnitude well. The core
+exercise keeps these variances fixed so students can understand and verify
+the filtering recursions first.
 
-for any sample size, any state dimension, and any sequence of system matrices. The
-same recursion delivers the model's log-likelihood at no extra cost, because the
-chain rule factors the joint density of the data into one-step-ahead predictive
-factors with no assumption beyond the model already written down,
-$p(y_{1:T}) = \prod_t p(y_t \mid y_{1:t-1})$, and each factor is available in closed
-form as the Normal density of $v_t$ with variance $F_t$: $\log p(y_{1:T}) =
--\tfrac12\sum_t\big(\log 2\pi + \log F_t + v_t^2/F_t\big)$ in the scalar case, with the
-obvious matrix generalisation.
+## Economic application and interpretation {#sec-empirical}
 
-::: {.callout-note collapse="true"}
-## Derivation
+For banking returns, let $\alpha_t=(a_t^{\rm CAPM},b_t^{\rm CAPM})^\top$ contain
+time-varying intercept and beta. Use $T=I$, $Z_t=(1,r_{m,t}^{e})$ and fixed $Q,H$.
+The state random walk permits gradual change; $Q$ determines how much.
+The following 2000–2024 example uses the documented Kenneth French snapshot.
 
-Since $\alpha_t \mid y_{1:t-1}$ is Normal and $y_t = Z_t\alpha_t + \varepsilon_t$ is an
-affine function of it plus independent Normal noise, the pair $(\alpha_t, y_t)$ is
-jointly Normal given $y_{1:t-1}$. Its mean is $(a_{t\mid t-1}, Z_ta_{t\mid t-1})$ since
-$\varepsilon_t$ has mean zero; its state variance is $P_{t\mid t-1}$; its observation
-variance is $Z_tP_{t\mid t-1}Z_t^\top + H_t \equiv F_t$, the two pieces adding because
-$\varepsilon_t$ is independent of $\alpha_t$; and the cross covariance is
-$\operatorname{Cov}(\alpha_t,y_t) = P_{t\mid t-1}Z_t^\top$, again because the
-$\varepsilon_t$ cross term vanishes. Applying the conditional Normal formula to this
-joint distribution, with $\alpha_t$ playing the role of the unobserved coordinate and
-$y_t$ the observed one, gives exactly the displayed $a_{t\mid t}$ and $P_{t\mid t}$,
-with $K_t = P_{t\mid t-1}Z_t^\top F_t^{-1}$ read literally as a covariance divided by a
-variance, the population regression coefficient of the state on the observed surprise.
-The prediction step then applies the transition equation to this updated
-distribution: taking expectations through the linear map $T_t$ gives $a_{t+1\mid t} =
-T_ta_{t\mid t}$, and taking variances, using the independence of $\eta_t$ from
-everything dated $t$ or earlier, gives $P_{t+1\mid t} = T_tP_{t\mid t}T_t^\top +
-R_tQ_tR_t^\top$. Conditioning on data always subtracts from the variance; letting the
-state evolve always adds to it, and the filter is that alternation, repeated once per
-date.
+The observation equation is
+$r_{b,t}^e=a_t^{\rm CAPM}+b_t^{\rm CAPM}r_{m,t}^e+\varepsilon_t$.
+Returns are decimals: a market return of 0.02 means 2%.
+If the intercept is zero and beta is 1.2, the conditional expected
+banking excess return is $1.2(0.02)=0.024$, or 2.4%.
+The realised return will also contain an idiosyncratic residual.
 
-For the likelihood, the chain rule for densities factorises the joint density of any
-sequence of random variables into one-step conditionals with no assumption whatsoever,
-$p(y_{1:T}) = \prod_{t=1}^T p(y_t \mid y_{1:t-1})$, turning a $T$-dimensional
-integral over the whole latent path into a product of $T$ one-dimensional predictive
-densities. Each factor is exactly the Normal density of $v_t = y_t - Z_ta_{t\mid t-1}$
-with variance $F_t$, both of which the filter has already computed on its way past, so
-summing $\log N(v_t; 0, F_t)$ over $t$ recovers $\log p(y_{1:T})$ with no further
-integration required. Because $\theta$ here is only the variances $H$ and $Q$, this
-expression can be maximised, or compared across candidate values, exactly as a
-likelihood is used anywhere else in this course, and a gap of $\lambda$ log points
-between two settings is a log Bayes factor of $\lambda$ in favour of one over the
-other.
-:::
+We start with mean $(0,1)^\top$ and standard deviations 1 percentage
+point for the intercept and 0.5 for beta. The observation-noise standard
+deviation is 4% per month. The diagonal $Q$ permits monthly coefficient
+increments with standard deviations 0.0005 for the intercept and 0.03
+for beta. These are declared illustrative settings, not full-sample
+estimates masquerading as real-time inputs.
 
-### Result R-8.3: forward-filtering, backward-sampling
-
-A full Bayesian treatment does not want a single filtered path; it wants draws of the
-entire latent sequence from its posterior, so that the variances $H$ and $Q$ can in
-turn be updated conditional on a sampled path inside a Gibbs sampler. Given the
-variances, a draw of the whole path $\alpha_{1:T}$ from $p(\alpha_{1:T} \mid y_{1:T})$
-is obtained by running the filter above once, then drawing $\alpha_T \sim
-N(a_{T\mid T}, P_{T\mid T})$ and, for $t = T-1$ down to $1$,
-
-$$
-\alpha_t \mid \alpha_{t+1}, y_{1:t} \sim N\!\Big(a_{t\mid t} + J_t\big(\alpha_{t+1} -
-T_t a_{t\mid t}\big),\;\; P_{t\mid t} - J_tP_{t+1\mid t}J_t^\top\Big),
-\qquad J_t = P_{t\mid t}T_t^\top P_{t+1\mid t}^{-1},
-$$
-
-for any linear Gaussian state space model, at a cost linear in $T$: one forward pass
-plus one small Normal draw per date.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-Write the joint posterior of the path backwards using the chain rule, an identity
-rather than an assumption, $p(\alpha_{1:T}\mid y_{1:T}) = p(\alpha_T \mid y_{1:T})
-\prod_{t=1}^{T-1} p(\alpha_t \mid \alpha_{t+1:T}, y_{1:T})$. Two conditional
-independencies simplify the generic factor. First, the state is Markov, so given
-$\alpha_{t+1}$ the later states carry no further information about $\alpha_t$. Second,
-every later observation $y_s$, $s > t$, depends on the path only through $\alpha_s$,
-and every such $\alpha_s$ depends on $\alpha_t$ only through $\alpha_{t+1}$, so once
-$\alpha_{t+1}$ is fixed the future of the system is cut off from $\alpha_t$. Together
-these give $p(\alpha_t \mid \alpha_{t+1:T}, y_{1:T}) = p(\alpha_t \mid \alpha_{t+1},
-y_{1:t})$, a density that involves only quantities the forward filter has already
-produced, which is what makes the backward sweep cheap: it never touches the data
-again.
-
-By Bayes' theorem, $p(\alpha_t \mid \alpha_{t+1}, y_{1:t}) \propto p(\alpha_{t+1} \mid
-\alpha_t)\,p(\alpha_t \mid y_{1:t})$. The second factor is the filtered posterior
-$N(a_{t\mid t}, P_{t\mid t})$; the first, viewed as a function of $\alpha_t$, is a
-Normal likelihood with the already-sampled $\alpha_{t+1}$ playing the role of an extra
-observation, transition matrix $T_t$ and noise covariance $R_tQ_tR_t^\top$. This is
-therefore one more instance of the update in R-8.2, with $\alpha_{t+1}$ as data, $T_t$
-as the observation matrix and $R_tQ_tR_t^\top$ as the measurement variance. Writing
-$P_{t+1\mid t} = T_tP_{t\mid t}T_t^\top + R_tQ_tR_t^\top$ for the variance of this
-pseudo-observation, the same substitution that produced $K_t$ now produces $J_t =
-P_{t\mid t}T_t^\top P_{t+1\mid t}^{-1}$, and the displayed conditional follows exactly
-as $a_{t\mid t}$ and $P_{t\mid t}$ did before.
-
-The mean of many draws from this recursion converges to the smoother's $a_{t\mid T}$,
-so the classical Kalman smoother is recoverable from this sampler but not the reverse:
-nothing in a collection of smoothed marginal means and variances records the posterior
-correlation between $\alpha_t$ and $\alpha_{t+1}$, which is exactly what makes a single
-sampled path wiggle coherently through time instead of behaving like independent draws
-from separate pointwise bands, and exactly what a Gibbs sampler needs in order to
-update the variances conditional on a specific, internally consistent path.
-:::
-
-The two results compose into the sampler this chapter uses on real data. Given the
-current variances, R-8.3 draws a whole path; given that path, the measurement
-residuals and the state increments are the sum of squares of two independent
-regressions with known regressors, so under the course's conjugate prior
-$\sigma^2 \sim IG(\alpha_0, \delta_0)$ the variances have standard inverse-gamma
-conditional posteriors and are drawn in turn. Iterating the two steps is a Gibbs
-sampler whose every draw is a complete, internally consistent history of the
-coefficient together with a value for how fast it is allowed to move.
-
-## Data: the market beta of US banks, 1970 to 2026 {#sec-data}
-
-The chapter's dataset is the same one introduced in the motivation: the monthly
-value-weighted return of the Fama-French 49 bank industry portfolio and the
-Fama-French market factor, both from `ff_industry49_monthly.parquet` and
-`ff_factors_monthly.parquet`. Both are converted to excess-of-bill-rate returns in
-percentage points and no other series is used anywhere in this chapter. Banks are the
-right sector for this question for three reasons already used above: their equity is
-a levered claim whose beta should mechanically move with asset values, they were the
-epicentre rather than a bystander of the 2008 crisis, and the industry has a long
-enough documented history, from the savings-and-loan crisis through the pandemic
-shock, to give a time-varying model several independent chances to be right or wrong.
+Here $T=I$ denotes the transition matrix, not the sample length.
+The function below specialises to that identity transition. Its predicted
+covariance grows by $Q$ before each observation; the observed market
+return then determines how informative that month's bank return is
+about each coefficient.
 
 ```{python}
-#| label: fig-bank-market-series
-#| fig-cap: "Monthly excess returns on the US banking sector and the market, 1970 to 2026. The shaded bands mark the three episodes used earlier in this chapter."
-fig, ax = plt.subplots(figsize=(7.6, 4.0))
-ax.plot(bk_dates, bank["excess"], color="C3", lw=0.6, alpha=0.85, label="banks")
-ax.plot(bk_dates, bank["market"], color="steelblue", lw=0.6, alpha=0.6, label="market")
-for lo, hi, _, col in windows:
-    ax.axvspan(pd.Timestamp(lo), pd.Timestamp(hi), color=col, alpha=0.12)
-ax.axhline(0, color="black", lw=0.5)
-ax.set_xlabel("date"); ax.set_ylabel("excess return (%)")
-ax.legend(fontsize=8)
-ax.set_title("US bank and market excess returns, 1970 to 2026")
-plt.tight_layout(); plt.show()
-
-print(bank.describe().loc[["mean", "std", "min", "max"]].round(3).to_string())
-print(f"correlation of bank and market excess returns: {bank['excess'].corr(bank['market']):.3f}")
+#| label: tvp-filter
+#| code-fold: true
+ff = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
+industry = pd.read_parquet(DATA / "ff_industry49_monthly.parquet")
+panel = pd.merge(ff[["mkt_rf", "rf"]], industry[["banks"]],
+                 left_index=True, right_index=True).loc["2000":"2024"].dropna()
+y = (panel["banks"]-panel["rf"]).to_numpy()
+market = panel["mkt_rf"].to_numpy()
+H = .04**2
+Q = np.diag([.0005**2, .03**2])
+a0 = np.array([0., 1.])
+P0 = np.diag([.01**2, .5**2])
+design = np.column_stack([np.ones(len(y)), market])
+predicted_mean, predicted_cov, filtered_mean, filtered_cov, log_likelihood = (
+    kalman_filter(y, design, Q, H, a0, P0)
+)
 ```
 
-Bank excess returns average $0.659$ percent a month against the market's $0.625$, with
-a standard deviation of $6.177$ against the market's $4.575$: banks earn a slightly
-higher raw return but carry so much more risk that their risk-adjusted compensation,
-mean divided by standard deviation, is noticeably lower than the market's. The two
-series correlate at $0.796$, confirming that a single-factor market model is a
-reasonable starting point, and the shaded bands mark exactly the
-three episodes already shown to carry different betas. Bank returns are visibly more
-volatile inside the crisis band than elsewhere in the picture, which is the same
-symptom identified in R-8.1 appearing in the raw data before any model is fitted to
-it.
-
-## Empirical analysis: filtering, smoothing and sampling a drifting beta {#sec-empirical}
-
-The state space model for this dataset lets alpha and beta drift together,
-$s_t = (\alpha_t,\beta_t)^\top$, $s_t = s_{t-1} + \eta_t$, observed through
-$r_{b,t} - r_{f,t} = x_t^\top s_t + \varepsilon_t$ with $x_t = (1, r_{m,t}-r_{f,t})^\top$,
-exactly the general form of R-8.2 with $Z_t = x_t^\top$ and $T_t = R_t = I_2$. We
-parameterise the state variance in signal-to-noise form, $Q = H\operatorname{diag}(\lambda_\alpha,
-\lambda_\beta)$, fix $H$ at the constant-fit residual variance as a starting value, and
-choose the two ratios by the marginal likelihood R-8.2 provides.
+The filter sees one return at a time. The observation's information about beta
+depends on the market move: when market excess return is near zero, it supplies
+little direct information about the slope. A large residual is not automatically a
+beta change; it can also be observation noise.
 
 ```{python}
-def kalman_tvp(y, X, H, Q, P1=100.0, smooth=True):
-    n_t, k = X.shape
-    a = np.zeros(k); P = np.eye(k) * P1
-    a_f = np.empty((n_t, k)); P_f = np.empty((n_t, k, k))
-    a_p = np.empty((n_t, k)); P_p = np.empty((n_t, k, k))
-    v = np.empty(n_t); F = np.empty(n_t); loglik = 0.0
-    for t in range(n_t):
-        a_p[t], P_p[t] = a, P
-        x = X[t]; Px = P @ x
-        v[t] = y[t] - x @ a
-        F[t] = x @ Px + H
-        K = Px / F[t]
-        a = a + K * v[t]
-        P = P - np.outer(K, Px)
-        a_f[t], P_f[t] = a, P
-        loglik += -0.5 * (np.log(2 * np.pi) + np.log(F[t]) + v[t] ** 2 / F[t])
-        P = P + Q
-    out = dict(a_f=a_f, P_f=P_f, a_p=a_p, P_p=P_p, v=v, F=F, loglik=loglik)
-    if smooth:
-        a_s = a_f.copy(); P_s = P_f.copy()
-        for t in range(n_t - 2, -1, -1):
-            J = P_f[t] @ np.linalg.inv(P_p[t + 1])
-            a_s[t] = a_f[t] + J @ (a_s[t + 1] - a_p[t + 1])
-            P_s[t] = P_f[t] + J @ (P_s[t + 1] - P_p[t + 1]) @ J.T
-        out["a_s"], out["P_s"] = a_s, P_s
-    return out
+#| label: fig-tvp-banking-beta
+#| fig-cap: "Filtered banking beta with pointwise 95% intervals, conditional on fixed Q and H. Each date uses only observations through that date."
+#| code-fold: true
+import matplotlib.dates as mdates
 
-bk_resid = bk_y - bk_X @ b_full
-bk_H = bk_resid @ bk_resid / (len(bk_y) - 2)
-
-lam_grid = np.logspace(-6, -1.5, 46)
-ll_grid = np.array([[kalman_tvp(bk_y, bk_X, bk_H, bk_H * np.diag([la, lb]),
-                                smooth=False)["loglik"] for lb in lam_grid]
-                    for la in lam_grid])
-i_a, i_b = np.unravel_index(ll_grid.argmax(), ll_grid.shape)
-lam_a, lam_b = lam_grid[i_a], lam_grid[i_b]
-ll_const = kalman_tvp(bk_y, bk_X, bk_H, bk_H * np.diag([1e-8, 1e-8]),
-                      smooth=False)["loglik"]
-
-print(f"best lambda_alpha {lam_a:.2e}, best lambda_beta {lam_b:.2e}")
-print(f"log marginal likelihood: time-varying {ll_grid.max():.2f}, "
-      f"constant coefficients {ll_const:.2f}, difference {ll_grid.max() - ll_const:.2f}")
-print(f"implied sd of the monthly innovation to beta: {np.sqrt(bk_H * lam_b):.4f}")
+beta_sd = np.sqrt(filtered_cov[:, 1, 1])
+fig, ax = plt.subplots()
+ax.plot(panel.index, filtered_mean[:, 1], color=BLUE)
+ax.fill_between(panel.index, filtered_mean[:, 1]-1.96*beta_sd,
+                filtered_mean[:, 1]+1.96*beta_sd, color=BLUE, alpha=.2)
+ax.axhline(1, color=GREY, linestyle="--")
+ax.set(ylabel="Market beta", xlabel="Date")
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+ax.grid(axis="y", alpha=.3)
+plt.tight_layout()
+plt.show()
 ```
 
-The grid puts $\lambda_\alpha$ at its lower bound, so the data see no evidence of a
-drifting alpha: an industry portfolio's abnormal return is close to zero and stays
-there. Beta is different. The preferred $\lambda_\beta = 2.51\times10^{-4}$ implies a
-monthly innovation standard deviation of $0.0593$, so beta can plausibly move by about
-$0.2$ over a year, and the log marginal likelihood rises by $12.11$ points over the
-constant-coefficient model, exactly R-8.1's inequality with the gap now measured: a
-log Bayes factor of twelve is decisive evidence on any of the usual scales.
+The displayed intervals omit uncertainty about $Q,H$ because those were fixed
+for teaching. They should not be described as a complete posterior under
+estimated volatility dynamics. Increase and decrease the beta element of $Q$:
+a larger value permits faster movement but also more state uncertainty.
+
+### Compare filtering with historical smoothing
+
+The backward pass below starts from the final filtered distribution.
+At every earlier date it uses the stored prediction for the next date,
+not a new forward estimate. The gain $J_t=P_t(P_{t+1}^-)^{-1}$ uses
+the identity transition of this application.
 
 ```{python}
-#| label: fig-tvp-filtered-smoothed
-#| fig-cap: "Filtered and smoothed estimates of the banks portfolio's market beta, at the marginal-likelihood-preferred signal-to-noise ratio. The dashed line is the full-sample constant-beta estimate."
-bk = kalman_tvp(bk_y, bk_X, bk_H, bk_H * np.diag([lam_a, lam_b]))
-beta_f, beta_s = bk["a_f"][:, 1], bk["a_s"][:, 1]
-sd_f = np.sqrt(bk["P_f"][:, 1, 1]); sd_s = np.sqrt(bk["P_s"][:, 1, 1])
-
-fig, ax = plt.subplots(figsize=(7.6, 4.2))
-ax.fill_between(bk_dates, beta_s - 1.96 * sd_s, beta_s + 1.96 * sd_s,
-                color="C3", alpha=0.18, label="95% smoothed band")
-ax.plot(bk_dates, beta_f, color="C0", lw=1.0, label=r"filtered $\beta_{t|t}$")
-ax.plot(bk_dates, beta_s, color="C3", lw=1.8, label=r"smoothed $\beta_{t|T}$")
-ax.axhline(b_full[1], color="black", ls="--", lw=1.0, label=f"constant OLS beta {b_full[1]:.2f}")
-ax.set_xlabel("date"); ax.set_ylabel("market beta of banks")
-ax.legend(fontsize=8, loc="lower left", ncol=2)
-ax.set_title("The market beta of US banks is not a constant")
-plt.tight_layout(); plt.show()
-
-for lab in ["1991-01", "2000-06", "2006-12", "2008-09", "2009-03", "2020-03"]:
-    t = bk_dates.get_loc(pd.Timestamp(lab + "-01"))
-    print(f"{lab}: filtered {beta_f[t]:.3f} (sd {sd_f[t]:.3f}), smoothed {beta_s[t]:.3f} (sd {sd_s[t]:.3f})")
-print(f"smoothed beta ranges from {beta_s.min():.3f} to {beta_s.max():.3f}")
-print(f"mean filtered sd {sd_f.mean():.4f}, mean smoothed sd {sd_s.mean():.4f}")
+#| label: fig-tvp-filter-smoother
+#| fig-cap: "Filtered and smoothed banking beta. Smoothing uses later observations to revise earlier states; the two means coincide at the sample endpoint."
+#| code-fold: true
+smoothed_mean = filtered_mean.copy()
+smoothed_cov = filtered_cov.copy()
+for t in range(len(y) - 2, -1, -1):
+    backward_gain = np.linalg.solve(predicted_cov[t + 1], filtered_cov[t].T).T
+    smoothed_mean[t] = filtered_mean[t] + backward_gain @ (
+        smoothed_mean[t + 1] - predicted_mean[t + 1]
+    )
+    smoothed_cov[t] = filtered_cov[t] + backward_gain @ (
+        smoothed_cov[t + 1] - predicted_cov[t + 1]
+    ) @ backward_gain.T
+fig, ax = plt.subplots()
+ax.plot(panel.index, filtered_mean[:, 1], color=GREY, label="Filtered")
+ax.plot(panel.index, smoothed_mean[:, 1], color=BLUE, label="Smoothed")
+ax.set(xlabel="Date", ylabel="Market beta")
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
 ```
 
-The smoothed path recovers, from the data alone, exactly the three episodes the
-motivation used to make its case: a peak of $1.484$ in January 1991 during the
-savings-and-loan crisis, a trough of $0.526$ at the June 2000 dot-com peak, and a
-climb to $1.392$ by March 2009, the month the market bottomed. Averaged over the whole
-sample the smoothed standard deviation is $0.1644$ against the filtered $0.2326$, a
-thirty percent reduction: knowing what happened afterwards sharpens every historical
-estimate, because the smoother conditions on the whole sample rather than only the
-past.
+The smoother can revise an early estimate in either direction. A smoother
+path may look more convincing because it uses more information, but that
+is precisely why it cannot be substituted into a historical trading rule
+that was meant to act using only data available at the time.
+
+Even the filtered beta dated $t$ uses the bank return and market return
+for month $t$. It is an end-of-month estimate. A position chosen before
+those returns are realised must use the previous filtered information
+and the state prediction.
+
+### Check whether apparent movement depends on the evolution prior
+
+Keep the observations, initial distribution and measurement variance fixed,
+and change only the permitted monthly beta movement. This comparison
+isolates the modelling assumption controlling how rapidly exposure can
+evolve. The setting $Q_{\beta\beta}=0$ makes beta constant over time,
+although our estimate of that constant can still change as we learn.
 
 ```{python}
-#| label: fig-tvp-rolling
-#| fig-cap: "Sixty-month rolling-window OLS beta against the smoothed state space estimate."
-win = 60
-roll_beta = np.full(len(bk_y), np.nan)
-for t in range(win - 1, len(bk_y)):
-    Xw, yw = bk_X[t - win + 1:t + 1], bk_y[t - win + 1:t + 1]
-    roll_beta[t] = np.linalg.lstsq(Xw, yw, rcond=None)[0][1]
-ok = ~np.isnan(roll_beta)
-
-fig, ax = plt.subplots(figsize=(7.6, 4.2))
-ax.plot(bk_dates, roll_beta, color="C1", lw=1.2, label="60-month rolling OLS")
-ax.plot(bk_dates, beta_s, color="C3", lw=1.8, label="smoothed state space")
-ax.set_xlabel("date"); ax.set_ylabel("market beta")
-ax.legend(fontsize=8, loc="upper left")
-ax.set_title("A cruder filter against the state space estimate")
-plt.tight_layout(); plt.show()
-
-print(f"correlation of rolling and smoothed beta: {np.corrcoef(roll_beta[ok], beta_s[ok])[0,1]:.3f}")
-print(f"sd of month-to-month changes: rolling {np.std(np.diff(roll_beta[ok])):.4f}, "
-      f"smoothed {np.std(np.diff(beta_s)):.4f}")
-t0809 = bk_dates.get_loc(pd.Timestamp("2008-09-01"))
-print(f"Sept 2008: rolling {roll_beta[t0809]:.3f}, filtered {beta_f[t0809]:.3f}, smoothed {beta_s[t0809]:.3f}")
+#| label: fig-tvp-drift-sensitivity
+#| fig-cap: "Filtered beta under three predeclared evolution scales. A changing estimate under zero beta drift reflects learning about a constant, not a changing latent coefficient."
+#| code-fold: true
+fig, ax = plt.subplots()
+for beta_drift_sd, color in zip([0., 0.03, 0.10], [GREY, BLUE, BROWN]):
+    candidate_Q = np.diag([0.0005**2, beta_drift_sd**2])
+    _, _, candidate_mean, _, _ = kalman_filter(y, design, candidate_Q, H, a0, P0)
+    ax.plot(panel.index, candidate_mean[:, 1], color=color,
+            label=f"Monthly beta-drift SD = {beta_drift_sd:g}")
+ax.set(xlabel="Date", ylabel="Filtered market beta")
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
+plt.tight_layout()
+plt.show()
 ```
 
-A rolling window is a defensible cruder filter, not a wrong one, and comparing it
-against the state space estimate says exactly what it buys. The two series correlate
-at only $0.566$, and the rolling line is nearly three times as jumpy, a standard
-deviation of month-to-month changes of $0.0309$ against $0.0109$, because a single
-large return shifts the window and then, sixty months later, drops back out of it and
-shifts the estimate back for no economic reason. It also lags: in September 2008 it
-still reads $0.790$, four fifths of its window still the placid mid-2000s, while the
-smoothed estimate is already at $1.183$. The rolling window's one advantage is real:
-its September 2008 value is close to the *filtered*, real-time estimate of $0.741$,
-which is the number an investor could actually have had that month. For describing
-history rather than reacting to it in real time, the state space smoother dominates.
+Do not pick the most responsive curve merely because it follows familiar
+events. A larger drift variance lets the model interpret more return
+variation as exposure change, but also changes forecast uncertainty.
+The innovation likelihood or genuinely sequential forecast evaluation
+can inform that choice. Selecting a setting using the full sample and
+then calling its historical filtered path “real-time” would hide that
+selection step.
 
-```{python}
-def ffbs_draw(y, X, H, Q, rng):
-    n_t, k = X.shape
-    a = np.zeros(k); P = np.eye(k) * 100.0
-    a_f = np.empty((n_t, k)); P_f = np.empty((n_t, k, k))
-    for t in range(n_t):
-        x = X[t]; Px = P @ x
-        F = x @ Px + H; K = Px / F
-        a = a + K * (y[t] - x @ a); P = P - np.outer(K, Px)
-        a_f[t], P_f[t] = a, P
-        P = P + Q
-    s = np.empty((n_t, k)); z = rng.standard_normal((n_t, k))
-    s[-1] = a_f[-1] + np.linalg.cholesky(P_f[-1]) @ z[-1]
-    for t in range(n_t - 2, -1, -1):
-        Pf = P_f[t]; Ppred = Pf + Q
-        J = np.linalg.solve(Ppred.T, Pf.T).T
-        C = Pf - J @ Ppred @ J.T
-        s[t] = a_f[t] + J @ (s[t + 1] - a_f[t]) + np.linalg.cholesky((C + C.T) / 2) @ z[t]
-    return s
+### What can we forecast with these states?
 
-def gibbs_tvp(y, X, rng, alpha_q=3.0, delta_q=1e-3, n_iter=1000, burn=200):
-    n_t, k = X.shape
-    alpha_0, delta_0 = 3.0, 2.0
-    H, lam = bk_H, 2.5e-4
-    beta_draws = np.empty((n_iter - burn, n_t)); par = np.empty((n_iter - burn, 2))
-    for it in range(n_iter):
-        s = ffbs_draw(y, X, H, H * lam * np.eye(k), rng)
-        resid = y - np.einsum("tk,tk->t", X, s)
-        ssq = np.sum(np.diff(s, axis=0) ** 2)
-        H = stats.invgamma.rvs(a=alpha_0 + n_t / 2 + k * (n_t - 1) / 2,
-                               scale=delta_0 + 0.5 * resid @ resid + 0.5 * ssq / lam,
-                               random_state=rng)
-        lam = stats.invgamma.rvs(a=alpha_q + k * (n_t - 1) / 2,
-                                 scale=delta_q + 0.5 * ssq / H, random_state=rng)
-        if it >= burn:
-            beta_draws[it - burn] = s[:, 1]; par[it - burn] = (H, lam)
-    return beta_draws, par
+Conditional on a specified next-month market return $x_*$, set
+$z_*=(1,x_*)$. The next banking return has distribution
 
-B_draws, gib_par = gibbs_tvp(bk_y, bk_X, np.random.default_rng(88))
-print(f"{B_draws.shape[0]} retained sweeps")
-print(f"lambda: median {np.median(gib_par[:,1]):.3e}, "
-      f"90% interval [{np.quantile(gib_par[:,1],0.05):.3e}, {np.quantile(gib_par[:,1],0.95):.3e}]")
-print(f"mean posterior sd of beta: Gibbs {B_draws.std(axis=0, ddof=1).mean():.4f}, "
-      f"plug-in smoother {sd_s.mean():.4f}")
-```
+$$r_{b,*}^e\mid y_{1:T},x_*,Q,H
+\sim N\left(z_*a_T,\ z_*(P_T+Q)z_*^\top+H\right).$$
 
-Everything above conditions on a single plug-in value of the signal-to-noise ratio,
-the one that maximised the marginal likelihood. R-8.3's sampler treats it as unknown
-instead. The posterior median of $\lambda$ is $4.06\times10^{-4}$, higher than the
-plug-in value, with a ninety percent interval spanning a factor of three and a half,
-and the sampler's average posterior standard deviation for beta, $0.1831$, exceeds the
-plug-in smoother's $0.1644$: part of the width the plug-in version omits is honest
-uncertainty about how fast beta drifts at all.
+The extra $Q$ allows exposure to change before the next observation.
+The remaining terms account for current state uncertainty and new return
+noise. This is a conditional scenario forecast: the future market return
+is not known at the time a portfolio is chosen. An unconditional return
+forecast also needs a distribution for that market return.
 
-```{python}
-#| label: fig-tvp-gibbs
-#| fig-cap: "Posterior median and 95% credible band for the beta path from the Gibbs sampler, against the plug-in smoothed path."
-lo_g, med_g, hi_g = np.quantile(B_draws, [0.025, 0.5, 0.975], axis=0)
-fig, ax = plt.subplots(figsize=(7.6, 4.2))
-ax.fill_between(bk_dates, lo_g, hi_g, color="C4", alpha=0.22, label="95% credible band")
-ax.plot(bk_dates, med_g, color="C4", lw=1.8, label="posterior median")
-ax.plot(bk_dates, beta_s, color="C3", lw=1.2, ls="--", label="plug-in smoothed")
-ax.axhline(b_full[1], color="black", ls=":", lw=1.0)
-ax.set_xlabel("date"); ax.set_ylabel("market beta of banks")
-ax.legend(fontsize=8, loc="lower left")
-ax.set_title("The posterior beta path, variances integrated out")
-plt.tight_layout(); plt.show()
+The [data snapshot](../data/SOURCES.md) supplies observed industry and
+factor returns. The model describes changing historical exposure, not
+a causal effect of changing a bank's business strategy. The latent state
+is inferred under the assumed observation and transition equations.
 
-t06 = bk_dates.get_loc(pd.Timestamp("2006-12-01")); t09 = bk_dates.get_loc(pd.Timestamp("2009-03-01"))
-t91 = bk_dates.get_loc(pd.Timestamp("1991-01-01")); t00 = bk_dates.get_loc(pd.Timestamp("2000-06-01"))
-print(f"P(beta higher in 2009-03 than in 2006-12) = {(B_draws[:,t09] > B_draws[:,t06]).mean():.4f}, "
-      f"mean rise {(B_draws[:,t09] - B_draws[:,t06]).mean():.3f}")
-print(f"P(beta lower in 2000-06 than in 1991-01) = {(B_draws[:,t00] < B_draws[:,t91]).mean():.4f}")
-```
+## Discussion and connection to the exercises {#sec-discussion}
 
-The posterior median tracks the plug-in smoothed path closely, so nothing above is
-overturned by admitting uncertainty about the drift rate, but the sampler answers
-questions the pointwise bands cannot. The posterior probability that beta was higher
-in March 2009 than in December 2006 is $0.9825$, with a posterior mean rise of
-$0.565$: the crisis-era increase is a claim the data support with high confidence, not
-merely a feature of one point estimate. The probability that beta was lower at the
-dot-com peak than at the savings-and-loan peak is $1.0000$, every retained draw
-agreeing. Neither statement could be read off the pointwise ninety percent intervals
-for those dates, which overlap; the difference between two dates is decisively signed
-because the sampler tracks how a whole path moves together, which is precisely what
-FFBS was built to preserve.
+The [Week 8 lab](../exercise-sessions/08-state-space-tvp.qmd) first simulates
+known drifting betas, then implements these recursions. Compare the filtered
+path with the generating path before using real data.
 
-## Discussion: what the filter buys, and what it cannot tell you {#sec-discussion}
+1. Reproduce the scalar update and explain each variance.
+2. Distinguish state noise from measurement noise.
+3. Explain why a smoother is unsuitable as an unqualified real-time trading signal.
+4. State which uncertainty is omitted when $Q,H$ are fixed.
 
-The bank's question was whether a levered sector's exposure to the market moves with
-its own solvency, and the filter answers yes, with a path that reproduces three
-separate episodes of financial history without being told where to look for them: the
-savings-and-loan peak, the dot-com trough, and the 2008 climb all appear at the dates
-independent economic history already assigns them. That is the check against
-something already known, and it is worth confirming that the log-likelihood advantage
-of R-8.1 is not manufactured by one unusual episode.
+The next lecture evaluates predictive distributions and averages across models.
+Both require respecting what was known at the forecast date.
 
-**Reading the computation.** Each point is the running difference between the
-time-varying model's and the constant model's one-step-ahead log predictive density,
-using the filtered quantities already computed in @sec-empirical. A steadily rising
-line means the advantage accrues throughout the sample; a single jump would mean one
-episode was doing all the work.
+### Reading guide
 
-```{python}
-#| label: fig-loglik-gap
-#| fig-cap: "Cumulative one-step-ahead log predictive density, time-varying model minus constant-coefficient model."
-r_tv = kalman_tvp(bk_y, bk_X, bk_H, bk_H * np.diag([lam_a, lam_b]), smooth=False)
-r_c = kalman_tvp(bk_y, bk_X, bk_H, bk_H * np.diag([1e-8, 1e-8]), smooth=False)
-v_tv, F_tv, v_c, F_c = r_tv["v"], r_tv["F"], r_c["v"], r_c["F"]
-ll_tv = -0.5 * (np.log(2 * np.pi) + np.log(F_tv) + v_tv ** 2 / F_tv)
-ll_c = -0.5 * (np.log(2 * np.pi) + np.log(F_c) + v_c ** 2 / F_c)
-gap = np.cumsum(ll_tv - ll_c)
-
-fig, ax = plt.subplots(figsize=(7.6, 3.8))
-ax.plot(bk_dates, gap, color="C0", lw=1.4)
-ax.axhline(0.0, color="black", lw=0.8, ls=":")
-ax.set_xlabel("date"); ax.set_ylabel("cumulative log-likelihood gap")
-ax.set_title("The time-varying model's advantage accrues throughout the sample")
-plt.tight_layout(); plt.show()
-
-print(f"cumulative gap at end of sample: {gap[-1]:.2f}; "
-      f"gap contributed by the 2007-2009 crisis alone: {(ll_tv-ll_c)[m_crisis].sum():.2f}")
-```
-
-The line climbs unevenly but never reverses for long, and only $3.50$ of the final
-$12.11$ log points come from the 2007 to 2009 crisis itself, about a quarter of the
-total. A
-model built purely to track a number, with no reference to levered-equity theory or
-banking history, has recovered the qualitative shape of the theory anyway across many
-separate episodes rather than one, which is good evidence that the state space
-specification, and not merely a single dramatic period, is doing the work.
-
-It is also worth being honest about a choice buried inside this chapter's own method.
-Both the marginal-likelihood plug-in and the Gibbs sampler settled on one number,
-$\lambda_\beta \approx 2.5$ to $4\times10^{-4}$, as the state's signal-to-noise ratio,
-and everything reported above conditions on that choice being the right specification
-for how beta moves. R-8.1 showed that a constant model cannot beat a time-varying one
-because it is a nested special case; but nothing said the reverse, that the particular
-time-varying specification maximising the marginal likelihood among many candidates
-is the one to trust going forward. Picking the single best-supported specification and
-proceeding as though it were certainly correct is exactly the same manoeuvre as
-picking the single most probable model in a much larger comparison, and it carries the
-same risk: a specification chosen because it happened to fit best on this sample can
-be an overconfident guide to the next one.
-
-That is the next chapter's subject, in a setting where it is not one nuisance
-parameter but the whole specification, predictors and all, that is in question.
-Choosing the single best model in sample, exactly as this chapter chose one
-signal-to-noise ratio, loses money out of sample whenever the comparison among
-candidates is close, and Lecture 9 shows both how badly that can go wrong and what
-averaging over the candidates buys instead.
-
-## Exercises
-
-These are the chapter's practice questions; the [Week 8 exercise
-session](../exercise-sessions/08-state-space-tvp.qmd) works through them, adds a lab
-built around a time-varying Phillips curve, and revisits the Kalman filter from first
-principles on a simulated local-level model.
-
-1. By hand. Starting from R-8.2, set $T_t = R_t = 1$ and $Z_t = 1$ for all $t$ and
-   show that the steady-state Kalman gain, the fixed point of $K$ as $t \to \infty$
-   with $H$ and $Q$ constant, solves a quadratic equation in $K$ whose only root in
-   $[0,1]$ is $K^\ast = \big(-q + \sqrt{q^2+4q}\big)/2$ with $q = Q/H$. Confirm that
-   $K^\ast \to 0$ as $q \to 0$ and $K^\ast \to 1$ as $q \to \infty$, and interpret both
-   limits in terms of R-8.1.
-
-2. Computational. Refit the bank beta model of @sec-empirical with $\lambda_\alpha$
-   fixed at zero rather than chosen by the grid, forcing a constant alpha and a
-   drifting beta only, and report how much the log marginal likelihood changes and
-   whether the smoothed beta path moves. Then repeat the marginal-likelihood grid
-   search with $H$ re-estimated jointly with $Q$ rather than fixed at the constant-fit
-   value, and report whether the preferred signal-to-noise ratio changes.
-
-3. On real data. Add the ten-year Treasury yield as a second regressor alongside the
-   market factor, refit the three-dimensional state space model of R-8.2, and report
-   whether the interest-rate exposure of bank equity is itself time varying and
-   whether allowing it to drift changes the beta path recovered in @sec-empirical.
-
-Exercise 1 is worth attempting before the session, since the steady-state gain is used
-without derivation in the Phillips-curve lab. Exercises 2 and 3 reuse the code of
-@sec-empirical with the state dimension or the prior changed.
-
-## Reading and references
-
-The state space form and the Kalman filter recursions of R-8.2 follow Frühwirth-Schnatter,
-*Bayesian Computing*, Part IV, and Greenberg (2008), Section 10.3. The
-forward-filtering backward-sampling recursion of R-8.3 follows the same sources and is
-the standard reference implementation used across the time-varying-parameter
-literature. The time-varying VAR mentioned in the methodology section is Primiceri
-(2005). The data are the Fama-French factor and industry portfolio files distributed
-with this course as repository snapshots.
-
-The explanations and exercises are adapted to this course's notation and weekly
-structure; consult the cited originals for the full treatments.
-
-Primiceri (2005), "Time Varying Structural Vector Autoregressions and Monetary Policy,"
-*Review of Economic Studies*. Koop, *Bayesian Econometrics*, ch. 8 on state-space
-models. Chan, Koop, Poirier, and Tobias, *Bayesian Econometric Methods* (2nd ed.), ch.
-on state-space and TVP models. Gelman et al., *Bayesian Data Analysis* (3rd ed.), ch.
-18 on hierarchical and dynamic models.
+Durbin and Koopman (2012), *Time Series Analysis by State Space Methods*;
+Koop (2003), *Bayesian Econometrics*, on dynamic models and posterior simulation;
+Bauwens, Lubrano and Richard (1999), *Bayesian Inference in Dynamic Econometric
+Models*, for the broader dynamic-model framework.

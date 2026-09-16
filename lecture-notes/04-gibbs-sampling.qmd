@@ -45,15 +45,6 @@ to market movements, and how uncertain is that exposure? We first understand
 the calculation in a small Normal model, derive the regression sampler, and
 then use its draws for coefficient probabilities and predictive returns.
 
-::: {.callout-note collapse="true"}
-## A route through the 90-minute lecture
-
-Allow 10 minutes for the posterior-sampling question, 20 for the worked
-example and conditional geometry, 30 for the regression derivation and
-algorithm, 20 for the banking application, and 10 for discussion. The
-invariance argument can be read after class; students should be able to
-derive and implement the two regression updates during the lecture.
-:::
 
 
 ```{python}

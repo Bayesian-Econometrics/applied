@@ -45,15 +45,6 @@ coordinated moves, leading to HMC and its adaptive trajectory method, NUTS.
 The economic application asks about the probability of a negative market
 return. Its simplicity lets us compare algorithms without changing the model.
 
-::: {.callout-note collapse="true"}
-## A route through the 90-minute lecture
-
-Allow 10 minutes for motivation, 15 for the numerical example, 20 for the
-MH rule and logistic posterior, 25 for HMC and NUTS, 15 for the application,
-and 5 for discussion. The full Python implementations and supplementary
-diagnostics support the exercise session; the lecture emphasises where the
-posterior and proposal rules come from.
-:::
 
 
 ```{python}

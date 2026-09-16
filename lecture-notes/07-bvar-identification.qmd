@@ -49,15 +49,6 @@ to identify monetary policy once and for all with three variables.
 It is to understand the steps needed to make a structural claim and
 how posterior draws carry uncertainty through those steps.
 
-::: {.callout-note collapse="true"}
-## A route through the 90-minute lecture
-
-Allow 10 minutes for the economic question, 15 for the two-variable
-identification example, 25 for the joint posterior and Gibbs updates,
-20 for impulse responses and identifying restrictions, 15 for the
-three-variable application, and 5 for discussion. The vectorisation
-identities and implementation can be revisited in the exercise session.
-:::
 
 
 ```{python}

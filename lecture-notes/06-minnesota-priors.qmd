@@ -23,10 +23,53 @@ format:
 
 ## Motivation and the central question {#sec-motivation}
 
-Output, inflation and interest rates move together over time. A vector
-autoregression lets each variable depend on past values of itself and the others.
-Even a small system soon contains many coefficients: a three-variable VAR with
-four lags has 13 coefficients per equation, including its intercept.
+Output, inflation and interest rates move together over time. A central bank
+forecasting inflation may therefore want to use the history of real activity
+as well as inflation's own history. Before specifying a prior, we need to
+understand the forecasting model to which it applies.
+
+### Start with two familiar regressions
+
+Let $g_t$ denote output growth and $\pi_t$ inflation in month $t$.
+Suppose each can be predicted using both variables' previous values:
+
+$$
+\begin{aligned}
+g_t &= c_g+a_{gg}g_{t-1}+a_{g\pi}\pi_{t-1}+u_{g,t},\\
+\pi_t &= c_\pi+a_{\pi g}g_{t-1}+a_{\pi\pi}\pi_{t-1}+u_{\pi,t}.
+\end{aligned}
+$$
+
+Each line is a linear regression of the kind we already know. Taken
+together, they form a **vector autoregression with one lag**, or VAR(1).
+“Vector” means that we model several outcomes together; “autoregression”
+means that their own past values appear among the predictors.
+
+An **own lag** is a variable's past value in its own equation:
+$g_{t-1}$ in the growth equation or $\pi_{t-1}$ in the inflation equation.
+A **cross lag** is another variable's past value: inflation in the growth
+equation or growth in the inflation equation. Each equation has its own
+coefficients even though it uses the same set of predictors.
+
+For example, suppose the inflation equation has illustrative coefficients
+$c_\pi=0.1$, $a_{\pi g}=0.2$ and $a_{\pi\pi}=0.5$. If this month's
+growth is 0.4% and inflation is 0.3%, next month's conditional inflation
+forecast is $0.1+0.2(0.4)+0.5(0.3)=0.33\%$. The future innovation
+has conditional mean zero; its unknown realisation creates forecast error.
+These numbers illustrate the calculation, not an empirical estimate.
+
+Adding a second lag adds $g_{t-2}$ and $\pi_{t-2}$ to **both**
+equations. Adding the policy rate adds its lags to every equation and
+adds a new equation forecasting the rate itself. A three-variable VAR
+with four lags thus has $1+3\cdot4=13$ coefficients per equation,
+or 39 across the system, before counting innovation covariances.
+
+### Why put a prior on these coefficients?
+
+Including another lag or variable gives the model another possible
+predictive relationship to estimate. It also creates another opportunity
+to fit accidental movements in a finite sample. We would like to retain
+useful relationships while being cautious about weakly estimated ones.
 
 **How can we express plausible dynamics without estimating every coefficient
 as though it were equally unconstrained?** The Minnesota prior starts with a
@@ -47,20 +90,12 @@ the forecast. A Minnesota prior says that a simple own-history forecast is
 a reasonable starting point. Cross-variable effects and additional lags
 must be supported by the data to move far from that starting point.
 
-We first examine shrinkage for one coefficient. We then translate three
+Starting from this forecasting system, we next examine shrinkage for one
+coefficient. We then translate three
 economic judgements into a covariance matrix: recent lags matter more,
 own lags may matter more, and measurement units should not determine
 our beliefs. Finally, we update that prior with macroeconomic observations.
 
-::: {.callout-note collapse="true"}
-## A route through the 90-minute lecture
-
-Allow 10 minutes for the forecasting question, 15 for scalar shrinkage,
-30 for the VAR notation and manual prior construction, 15 for the posterior
-derivation, 15 for the macroeconomic application, and 5 for discussion.
-The exercise session develops the covariance bookkeeping further. Full
-BVAR covariance inference and structural shocks belong to Lecture 7.
-:::
 
 
 ```{python}
@@ -85,8 +120,8 @@ DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
 
 ## Intuition: a simple worked example {#sec-intuition}
 
-Consider output growth regressed on its first and second lags and on lagged
-inflation. We may expect the first own lag to matter more than the second,
+Return to the output-growth equation above, now allowing a second lag.
+We may expect the first own lag to matter more than the second,
 and be less confident that inflation adds much. This becomes a prior centred
 near a simple univariate model, with different variances for different terms.
 
@@ -201,15 +236,16 @@ u_t\sim N_m(0,\Sigma).$$
 
 The coefficient $A_{\ell,ij}$ links lag $\ell$ of variable $j$ to equation $i$.
 
-For two variables and two lags, the first equation is
+This is the compact version of our opening regressions. With
+$y_t=(g_t,\pi_t)^\top$ and one lag, the first row of $A_1$ contains
+$(a_{gg},a_{g\pi})$ and its second row contains
+$(a_{\pi g},a_{\pi\pi})$. Further matrices $A_2,\ldots,A_p$ collect
+the effects of earlier lags. The covariance $\Sigma$ describes the
+variances and co-movement of the equations' innovations.
 
-$$y_{1t}=c_1+A_{1,11}y_{1,t-1}+A_{1,12}y_{2,t-1}
-+A_{2,11}y_{1,t-2}+A_{2,12}y_{2,t-2}+u_{1t}.$$
-
-The second equation has the same regressors but its own coefficients.
-No contemporaneous policy effect has been identified merely by writing
-these equations. They describe how lagged observations help predict a
-vector of outcomes.
+Writing the equations gives us a forecasting system. Interpreting its
+innovations as economic shocks requires additional assumptions, developed
+in Lecture 7.
 
 With $m$ variables and $p$ lags, each equation has $k=1+mp$ coefficients.
 The system has $mk=m+m^2p$ regression coefficients, excluding innovation

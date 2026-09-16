@@ -1,759 +1,671 @@
 ---
 title: "Prediction and Bayesian model averaging"
 subtitle: "Lecture 9"
+format:
+  html:
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img, .cell figure img, figure img {
+          width: 100%; max-width: 100%; height: auto;
+        }
+        </style>
 ---
 
-## Overview
+::: {.callout-tip icon=false}
+## Key takeaways {.unnumbered}
 
-By the end of this lecture you can turn a posterior into a forecast that is honest
-about two separate kinds of ignorance, not knowing the parameters of a model and not
-knowing which model deserves to be trusted, and average across candidates rather than
-betting everything on the one that fits best today.
-
-::: {.callout-important}
-## The result of this chapter
-
-With $J$ candidate models, each with its own parameters and its own likelihood, Bayes'
-theorem applied to the model index itself gives a posterior probability for each
-model, $p(M_j \mid y) \propto p(y \mid M_j)\,p(M_j)$, and the forecast that reflects
-every candidate at once is the model-averaged posterior predictive,
-
-$$
-p(y^\ast \mid y) = \sum_{j=1}^{J} p(M_j \mid y)\; p\big(y^\ast \mid y, M_j\big).
-$$
-
-This mixes each model's own forecast distribution in proportion to how well it has
-already explained the data, rather than discarding every candidate but one. Its
-difficulty is that the number of candidates grows exponentially in the number of
-things one is unsure about, and the weight attached to each candidate is itself
-estimated with error that a forecaster who reports only the leading model never has to
-confront.
+- **Prediction averages over parameter uncertainty.** A plug-in forecast generally omits a source of uncertainty.
+- **Model averaging adds uncertainty about the model itself.** Posterior model probabilities weight predictive distributions, not just point forecasts.
+- **Predictive performance must be assessed before observing the outcome.** Forecast, score, then update.
+- **A high model probability is conditional on the candidate set and priors.** It does not prove that a model is true or causally identified.
 :::
 
-After working through this chapter you can
+## Motivation and the central question {#sec-motivation}
 
-1. derive the posterior predictive distribution of the Normal linear model and show
-   why it is wider than a forecast that plugs in the posterior mean;
-2. diagnose why selecting the single best-fitting model overstates how much that
-   model should be trusted out of sample;
-3. derive the model-averaged predictive distribution and the sense in which the
-   marginal likelihood already penalises an unnecessarily large model;
-4. implement Bayesian model averaging over a set of candidate return predictors and
-   grade its forecasts with the log predictive score;
-5. compare model averaging against model selection, a maximal model and a
-   no-predictability benchmark in an expanding-window backtest;
-6. interpret a predictive density's calibration as a question distinct from whether
-   its centre carries any information at all.
+One analyst forecasts returns using a constant mean; another adds a lagged
+predictor. Both have posterior uncertainty about their coefficients. Choosing
+one model and forgetting the alternative adds a further unacknowledged assumption.
 
-Week 9 of 15, paired with the [Week 9 exercise
-session](../exercise-sessions/09-prediction-bma.qmd). The chapter assumes the
-Normal-Inverse-Gamma regression posterior of Lecture 2; the state-space filtering of
-Lecture 8 is not needed, because every candidate model considered here has fixed
-coefficients.
+**How can a forecast represent uncertainty about parameters and about which
+model to use?** Bayesian model averaging (BMA) applies Bayes' theorem to a
+discrete model index and then averages the models' predictive distributions.
 
-## Motivation: the best model in sample is not the best model out of sample {#sec-motivation}
+The object we want is a distribution for an observation that has not yet
+arrived. An investor may need a probability of a negative return, while
+a central bank may need a probability that inflation exceeds a threshold.
+Neither question is answered by a coefficient estimate alone.
 
-Every model comparison since Lecture 6 has used the data to say which specification
-fits best, and it has been natural to read that as saying which specification to
-trust going forward. Whether that reading survives contact with data is itself a
-testable question, and predicting the market's own return is the sharpest place to
-ask it, because the return-predictability literature has spent forty years arguing
-about a handful of candidate predictors without settling on one.
+There are three layers of uncertainty. Even with known parameters, a new
+observation contains new noise. Our parameters are uncertain because
+the sample is finite. Finally, different plausible models may imply
+different predictive distributions. We will add these layers in that order.
 
-We take five variables the literature has used to predict the market's monthly excess
-return, the term spread, the change in the federal funds rate, inflation, unemployment
-and last month's return, giving $2^5 = 32$ candidate models once the constant-only
-model and every subset of predictors are included. Fitting all thirty-two on data
-through December 1994 and ranking them by marginal likelihood identifies a single
-best-supported specification. The question is whether that specification goes on to
-forecast well over the following three decades, which nothing so far in the course has
-had to check, because every previous chapter's model comparisons ended at the fitted
-sample.
+This lecture brings together earlier calculations rather than introducing
+a new sampler. Within each model, we use the posterior predictive
+distribution from conjugate regression. Across models, we apply the same
+Bayes' theorem used for parameters. In the exercise, we evaluate each
+forecast before allowing the realised outcome to update the models.
 
-**Reading the computation.** Every model is fit once on the training months and then
-scored, unchanged, against every remaining month; nothing about the test period
-enters the fit. `fit_g` and its helper functions are the same ones defined in full in
-@sec-empirical and are used here in their simplest form, evidence on a fixed sample.
 
 ```{python}
+#| label: setup-bma
+#| include: false
 from pathlib import Path
-from itertools import combinations
+
 import numpy as np
 import pandas as pd
-from scipy import stats
-from scipy.special import gammaln, logsumexp
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from scipy import stats
+from scipy.special import logsumexp
 
-plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
-                     "grid.alpha": 0.3, "font.size": 11})
-
+SEED = 2026
+rng = np.random.default_rng(SEED)
+plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
+                     "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": False})
+BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
-fred_p = pd.read_parquet(DATA / "fred_macro_monthly.parquet")
-ff_p = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
-cpi_yoy = 100.0 * np.log(fred_p["cpi"]).diff(12)
-
-panel = pd.DataFrame({
-    "term_spread": fred_p["yield_10y"] - fred_p["fed_funds"],
-    "d_ffr": fred_p["fed_funds"].diff(),
-    "inflation": cpi_yoy.shift(1),
-    "unemp": fred_p["unemployment"].shift(1),
-    "lag_ret": 100.0 * ff_p["mkt_rf"],
-})
-panel["target"] = 100.0 * ff_p["mkt_rf"].shift(-1)
-panel = panel.dropna()
-pred_names = ["term_spread", "d_ffr", "inflation", "unemp", "lag_ret"]
-Zp, yp = panel[pred_names].to_numpy(), panel["target"].to_numpy()
-n_p, k_p = Zp.shape
-dates_p = panel.index
-a0, d0 = 2.5, 2.5
-
-def nig_posterior(X, y, b0, V0, a0, d0):
-    V0_inv = np.linalg.inv(V0)
-    V_bar = np.linalg.inv(V0_inv + X.T @ X)
-    b_bar = V_bar @ (V0_inv @ b0 + X.T @ y)
-    Q = (y - X @ b_bar) @ y + (b0 - b_bar) @ V0_inv @ b0
-    return b_bar, V_bar, a0 + 0.5 * y.size, d0 + 0.5 * Q
-
-def predictive_t(x_star, b_bar, V_bar, a_bar, d_bar):
-    return 2 * a_bar, x_star @ b_bar, np.sqrt(d_bar / a_bar * (1 + x_star @ V_bar @ x_star))
-
-def log_marglik(X, y, b0, V0, a0, d0):
-    b_bar, V_bar, a_bar, d_bar = nig_posterior(X, y, b0, V0, a0, d0)
-    ld0, ldb = np.linalg.slogdet(V0)[1], np.linalg.slogdet(V_bar)[1]
-    return (-0.5 * y.size * np.log(2 * np.pi) + 0.5 * (ldb - ld0)
-            + gammaln(a_bar) - gammaln(a0) + a0 * np.log(d0) - a_bar * np.log(d_bar))
-
-def gprior(X, g):
-    return np.zeros(X.shape[1]), g * np.linalg.inv(X.T @ X)
-
-models_r = [tuple(s) for kk in range(k_p + 1) for s in combinations(range(k_p), kk)]
-labels_r = ["{" + ", ".join(pred_names[j] for j in m) + "}" if m else "{constant only}"
-            for m in models_r]
-
-def fit_g(rows):
-    g = float(len(rows))
-    lml = np.empty(len(models_r))
-    for j, m in enumerate(models_r):
-        Xm = np.column_stack([np.ones(len(rows))] + [Zp[rows, i] for i in m])
-        b0m, V0m = gprior(Xm, g)
-        lml[j] = log_marglik(Xm, yp[rows], b0m, V0m, a0, d0)
-    return lml
-
-t_split = dates_p.get_loc(pd.Timestamp("1994-12-01"))
-train, test = np.arange(t_split + 1), np.arange(t_split + 1, n_p)
-lml_tr = fit_g(train)
-j_train, j_const = np.argmax(lml_tr), models_r.index(())
-
-oos_scores = np.empty(len(models_r))
-for j, m in enumerate(models_r):
-    Xtr = np.column_stack([np.ones(len(train))] + [Zp[train, i] for i in m])
-    b0m, V0m = gprior(Xtr, float(len(train)))
-    post = nig_posterior(Xtr, yp[train], b0m, V0m, a0, d0)
-    Xte = np.column_stack([np.ones(len(test))] + [Zp[test, i] for i in m])
-    oos_scores[j] = np.mean([stats.t.logpdf(yp[test[i]], *predictive_t(Xte[i], *post))
-                             for i in range(len(test))])
-j_oos = np.argmax(oos_scores)
-
-fig, ax = plt.subplots(figsize=(6.6, 4.6))
-ax.scatter(lml_tr, oos_scores, color="grey", alpha=0.6, s=28)
-ax.scatter(lml_tr[j_train], oos_scores[j_train], color="C3", s=90, zorder=5,
-           label=f"best in-sample: {labels_r[j_train]}")
-ax.scatter(lml_tr[j_oos], oos_scores[j_oos], color="C2", s=90, zorder=5,
-           label=f"best out-of-sample: {labels_r[j_oos]}")
-ax.scatter(lml_tr[j_const], oos_scores[j_const], color="C7", s=90, zorder=5,
-           label="constant only")
-ax.set_xlabel("in-sample log marginal likelihood (through 1994)")
-ax.set_ylabel("mean out-of-sample log predictive score (1995-2026)")
-ax.legend(fontsize=8)
-ax.set_title("Thirty-two models: fit through 1994 against performance after it")
-plt.tight_layout(); plt.show()
-
-print(f"training sample: {len(train)} months through {dates_p[t_split]:%Y-%m}; "
-      f"test sample: {len(test)} months to {dates_p[-1]:%Y-%m}")
-print(f"best in-sample model: {labels_r[j_train]}, log ML {lml_tr[j_train]:.2f}")
-print(f"its out-of-sample rank among the 32 candidates: "
-      f"{int((oos_scores > oos_scores[j_train]).sum()) + 1}")
-print(f"its out-of-sample score {oos_scores[j_train]:.4f} against the constant-only "
-      f"model's {oos_scores[j_const]:.4f}")
-print(f"correlation of in-sample log ML with out-of-sample score across the 32 models: "
-      f"{np.corrcoef(lml_tr, oos_scores)[0,1]:.3f}")
 ```
 
-The picture has no visible upward slope, and the number confirms it: across the
-thirty-two candidates, in-sample fit and subsequent performance correlate at
-$-0.073$, indistinguishable from zero and if anything the wrong sign. The model that
-looked best through 1994, the one built on the term spread alone, ranks twenty-fourth
-of thirty-two once graded on the following three decades, and its out-of-sample score
-of $-2.9317$ is worse than the constant-only model's $-2.9265$: a researcher in 1994
-who selected the best-fitting specification and used it for the next thirty years
-would have done worse than one who used no predictors at all. Choosing the single
-model that best explains the past is not obviously choosing the model that best
-anticipates the future, and the rest of this chapter is about why, and what to do
-instead.
+## Intuition: a simple worked example {#sec-intuition}
 
-## The problem: a model chosen by its own fit overstates that fit {#sec-problem}
+### Predict an observation, not just its mean
 
-### Result R-9.1: selecting the best of many candidates is a biased estimate of its own quality
+Suppose an illustrative growth model has posterior
+$\mu\mid y\sim N(1,0.25)$, with growth measured in percentage points.
+Next period's outcome satisfies $y_*=\mu+\varepsilon_*$, where
+$\varepsilon_*\sim N(0,1)$ is independent new noise. Conditional on a
+particular mean, we would predict $N(\mu,1)$. But we do not know that mean.
 
-Let $X_1, \dots, X_J$ be the in-sample fit statistics, for instance the log marginal
-likelihoods above, that a set of $J$ candidate models would earn on hypothetical
-repetitions of the same sampling process, each with some finite mean $\mathbb
-E[X_j]$. Then
+Adding two independent Normal variables gives
 
-$$
-\mathbb E\Big[\max_{j} X_j\Big] \;\ge\; \max_{j}\, \mathbb E[X_j],
-$$
+$$y_*\mid y\sim N(1,1.25).$$
 
-for any $J \ge 1$ and any joint distribution of the $X_j$ with finite means, with
-equality only in the degenerate case where one model dominates every replication or
-all the $X_j$ are almost surely equal to their means. The gap on the left is what a
-researcher who selects the best-fitting model and reports its own fit statistic as
-evidence of quality is quoting; the right-hand side is the truth for whichever model
-happens to be best on average. Selecting by fit and then citing that fit is therefore
-optimistic in expectation, the more so the more candidates are compared and the
-noisier each one's fit statistic is.
+The predictive mean is one and the predictive standard deviation is
+$\sqrt{1.25}\approx1.118$. A plug-in forecast fixing $\mu$ at its
+posterior mean would instead use standard deviation one. It leaves out
+the 0.25 variance arising from parameter uncertainty.
+
+The state of knowledge has not become more pessimistic simply because
+the interval is wider. It has become more complete: it now represents
+both the uncertain mean and the next period's unpredictable disturbance.
+The posterior distribution of $\mu$ alone would be narrower still,
+and is not an appropriate interval for next period's realised growth.
+
+```{python}
+#| label: fig-predictive-uncertainty
+#| fig-cap: "Three different objects: uncertainty about the mean, a plug-in outcome forecast, and the predictive distribution integrating over the mean."
+#| code-fold: true
+growth_grid = np.linspace(-3, 5, 500)
+fig, ax = plt.subplots()
+for sd, color, name in [
+    (0.5, GREY, "Posterior of mean"),
+    (1., BROWN, "Plug-in outcome forecast"),
+    (np.sqrt(1.25), BLUE, "Posterior predictive"),
+]:
+    ax.plot(growth_grid, stats.norm.pdf(growth_grid, 1, sd),
+            color=color, label=name)
+ax.set(xlabel="Growth / mean growth (%)", ylabel="Density")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+### Add disagreement between models
+
+Suppose two models predict growth with means 1% and 3%, each with standard
+deviation 1 percentage point. Give them probabilities 0.6 and 0.4.
+The averaged mean is 1.8%, but its variance is not merely the within-model
+variance of 1. The disagreement between the means contributes another 0.96.
+
+The mixture variance is therefore 1.96 and its standard deviation is 1.4.
+Averaging means and attaching the old standard deviation would hide model
+uncertainty.
+
+The arithmetic is worth doing explicitly. The weighted mean is
+$0.6(1)+0.4(3)=1.8$. Within-model variance is $0.6(1)+0.4(1)=1$.
+The variance due to disagreement is
+$0.6(1-1.8)^2+0.4(3-1.8)^2=0.96$.
+Both components matter because we do not first learn which model generated
+the future observation.
+
+The mixture is formed by adding **density heights** at every possible
+outcome. Averaging model standard deviations or interval endpoints
+would not generally give its predictive standard deviation or quantiles.
+Even though the two components here are Normal, their mixture need not
+be Normal. The figure displays the distribution we will actually use.
+
+```{python}
+#| label: fig-bma-mixture
+#| fig-cap: "Averaging distributions retains both within-model uncertainty and disagreement between models. The mixture need not itself be Normal."
+#| code-fold: true
+grid = np.linspace(-3, 7, 500)
+first, second = stats.norm.pdf(grid, 1, 1), stats.norm.pdf(grid, 3, 1)
+fig, ax = plt.subplots()
+ax.plot(grid, first, color=GREY, linestyle=":", label="Model 1")
+ax.plot(grid, second, color=BROWN, linestyle="--", label="Model 2")
+ax.plot(grid, .6*first+.4*second, color=BLUE, lw=2, label="Model average")
+ax.set(xlabel="Growth (%)", ylabel="Predictive density")
+ax.grid(axis="y", alpha=.3)
+ax.legend(loc="upper center", bbox_to_anchor=(.5, -.15), ncol=3, frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+## Formal framework and derivation {#sec-methodology}
+
+### Treat the model index as another unknown
+
+A model specifies a likelihood and a parameter prior. We also assign
+probabilities to the candidate models themselves. These two levels of
+prior information serve different purposes: the parameter prior describes
+plausible values within a model, while the model prior describes our
+initial allocation across models.
+
+Suppose current model probabilities are 0.6 and 0.4. A new observation
+arrives at a point where the models' predictive densities are 0.2 and
+0.3, respectively. Bayes' rule multiplies weight by predictive density:
+
+| Model | Weight before observation | Predictive density at outcome | Product | Updated weight |
+|:--|--:|--:|--:|--:|
+| $M_1$ | 0.6 | 0.2 | 0.12 | 0.5 |
+| $M_2$ | 0.4 | 0.3 | 0.12 | 0.5 |
+
+The observation is 1.5 times as well predicted by the second model, enough
+to offset its smaller starting weight. The mixture predictive density
+of that observation was $0.12+0.12=0.24$, computed using the **old**
+weights. The updated weights are available only after it has arrived.
+
+```{python}
+#| label: fig-bma-weight-update
+#| fig-cap: "One Bayesian model-weight update. An observation better predicted by Model 2 moves probability towards it, without deleting Model 1."
+#| code-fold: true
+positions = np.arange(2)
+fig, ax = plt.subplots()
+ax.bar(positions - 0.18, [0.6, 0.4], width=0.36, color=GREY,
+       label="Before observation")
+ax.bar(positions + 0.18, [0.5, 0.5], width=0.36, color=BLUE,
+       label="After observation")
+ax.set(xticks=positions, xticklabels=["Model 1", "Model 2"],
+       ylabel="Model probability", ylim=(0, 1))
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+### First integrate parameters, then sum over models
+
+For model $M_j$,
+
+the joint distribution of the future observation and parameters factorises
+as $p(y_*,\theta_j\mid y,M_j)=
+p(y_*\mid\theta_j,y,M_j)p(\theta_j\mid y,M_j)$.
+Summing over possible parameter values means integrating this joint
+distribution. For observations conditionally independent of the training
+sample given the parameters and known predictors, this gives
+
+$$p(y_*\mid y,M_j)=\int p(y_*\mid\theta_j,M_j)
+p(\theta_j\mid y,M_j)\,d\theta_j.$$
+
+The likelihood of the observed sample under a model also integrates its
+parameters, but against their **prior**:
+
+$$p(y\mid M_j)=\int p(y\mid\theta_j,M_j)p(\theta_j\mid M_j)\,d\theta_j.$$
+
+This marginal likelihood is not the likelihood maximised over parameters.
+It rewards models that assigned probability to the observations before
+learning from them. It can be sensitive to prior width; proper, meaningful
+priors are essential for this comparison.
+
+The two integrals use different information sets. Posterior prediction
+asks what comes next **after learning** the parameters from $y$.
+Marginal likelihood asks how much density the model assigned to $y$
+**before that learning**. Substituting the posterior into the second
+integral would use the observations twice.
+
+Bayes' theorem for the model index gives
+
+$$w_j=p(M_j\mid y)=\frac{p(y\mid M_j)p(M_j)}
+{\sum_\ell p(y\mid M_\ell)p(M_\ell)},\qquad
+p(y_*\mid y)=\sum_jw_jp(y_*\mid y,M_j).$$
+
+To derive the second expression, partition the possible future outcomes
+by the mutually exclusive model index. The joint predictive contribution
+from model $j$ is $p(y_*\mid y,M_j)p(M_j\mid y)$; adding these
+contributions eliminates the index.
+
+For two models, posterior odds equal prior odds times a Bayes factor:
+
+$$\frac{p(M_1\mid y)}{p(M_2\mid y)}
+=\underbrace{\frac{p(y\mid M_1)}{p(y\mid M_2)}}_{BF_{12}}
+\frac{p(M_1)}{p(M_2)}.$$
+
+An evidence ratio of two doubles the prior odds; it does not necessarily
+make the posterior probability two thirds unless the prior odds were one.
+The probabilities remain conditional on the models being compared.
+A high weight can mean “better among these candidates” even when all
+of them omit important features.
+
+The total-variance identity explains the worked example:
+
+$$\operatorname{Var}(y_*\mid y)=
+\sum_jw_j V_j+\sum_jw_j(m_j-\bar m)^2,\qquad
+\bar m=\sum_jw_jm_j.$$
+
+This follows by writing $y_*-\bar m=(y_*-m_j)+(m_j-\bar m)$
+within each model. Squaring gives a within-model term, a between-model
+term and a cross term. The conditional expectation of the cross term is
+zero because $E[y_*-m_j\mid y,M_j]=0$. Summing over models yields
+the displayed expression.
+
+For a future-event probability, average the component probabilities:
+$P(y_*<0\mid y)=\sum_jw_jP(y_*<0\mid y,M_j)$.
+For simulated predictive draws, first draw the model index using the
+weights, then draw parameters from that model's posterior and an outcome
+conditional on those parameters. Do not average one simulated outcome
+from each model: that would create the distribution of a different object.
+
+### The conjugate regression forecast
+
+Recall the scaled Normal–Inverse-Gamma posterior:
+
+$$\beta_j\mid\sigma_j^2,y,M_j\sim
+N(b_j,\sigma_j^2 B_j),\qquad
+\sigma_j^2\mid y,M_j\sim IG(a_j,d_j).$$
+
+For a known predictor vector $x_*$, the future outcome is
+$y_*=x_*^\top\beta_j+\varepsilon_*$ with new residual variance
+$\sigma_j^2$. First integrate the Normal coefficient distribution:
+
+$$y_*\mid\sigma_j^2,y,M_j,x_*\sim
+N\left(x_*^\top b_j,\ \sigma_j^2(1+x_*^\top B_jx_*)\right).$$
+
+The coefficient contribution is $x_*^\top(\sigma_j^2B_j)x_*$.
+The independent new residual contributes the extra $\sigma_j^2$.
+Integrating the remaining inverse-Gamma variance mixes Normal
+distributions with different spreads, producing Student-$t$ tails.
+
+Chapter 2 supplies
+$y_*\mid y,M_j,x_*\sim t_{2a_j}(x_*^\top b_j,
+\text{scale}=\sqrt{(d_j/a_j)(1+x_*^\top B_jx_*)})$.
+The 1 represents new observation noise and the quadratic term coefficient
+uncertainty. Model averaging adds a further layer rather than replacing either.
+
+The Student-$t$ **scale is not its standard deviation**. When $a_j>1$,
+its predictive variance is
+$d_j(1+x_*^\top B_jx_*)/(a_j-1)$.
+The additional factor relative to the squared scale reflects uncertainty
+about the observation variance. A plug-in Gaussian forecast would omit
+this tail behaviour as well as potentially ignoring coefficient uncertainty.
+
+### Why model evidence depends on prior spread
+
+A more flexible regression may fit the observed data better at its best
+coefficient values. Marginal likelihood averages likelihood over the whole
+parameter prior, including values that predict the observations poorly.
+Flexibility therefore has a cost when it spreads prior probability over
+many possibilities unsupported by the data.
+
+This is not a rule that the smallest model wins. A useful added predictor
+can improve fit enough to overcome that cost. It does mean that increasing
+the width of a model-specific coefficient prior can change model weights,
+even when its posterior point estimate changes little.
+
+For example, a model that forecasts returns with an almost arbitrary lag
+coefficient places prior mass on extreme dynamics. If the observed sample
+supports only a narrow range, much of its original predictive mass was
+spent elsewhere. A prior with economically meaningful units makes that
+comparison more interpretable than a supposedly harmless “very diffuse” prior.
 
 ::: {.callout-note collapse="true"}
-## Derivation
+## Optional calculation: the NIG marginal likelihood {.unnumbered}
 
-The function $x \mapsto \max_j x_j$ on $\mathbb R^J$ is convex: it is the pointwise
-maximum of the $J$ coordinate projections, each of which is linear and therefore
-convex, and a pointwise maximum of convex functions is convex. Jensen's inequality
-states that for any convex function $g$ and any random vector $X$ with finite mean,
-$\mathbb E[g(X)] \ge g(\mathbb E[X])$. Applying it with $g(x) = \max_j x_j$ and
-$X = (X_1,\dots,X_J)$ gives immediately
+The likelihood normalising constant is $(2\pi)^{-n/2}$. Integrating the
+completed Normal square contributes the determinant ratio; integrating variance
+contributes the Gamma-function ratio:
 
-$$
-\mathbb E\Big[\max_j X_j\Big] \ge \max_j \mathbb E[X_j],
-$$
+$$p(y\mid M_j)=(2\pi)^{-n/2}
+\frac{|B_j|^{1/2}}{|B_{0j}|^{1/2}}
+\frac{d_{0j}^{a_{0j}}}{d_j^{a_j}}
+\frac{\Gamma(a_j)}{\Gamma(a_{0j})}.$$
 
-which is the displayed result; no assumption beyond finite means and the definition of
-the maximum was used, so it holds for any $J$, any correlation structure among the
-$X_j$, and any sample size behind each one.
+Compute its logarithm to avoid underflow. Constants that cancel when estimating
+coefficients may not cancel when comparing different models.
 
-Equality in Jensen's inequality for a strictly convex function on a set of positive
-measure requires the random vector to be almost surely constant along the direction
-that matters, here that the identity of the maximising coordinate never changes across
-replications and its value never varies either; short of that degenerate case the
-inequality is strict. The gap grows with $J$ because adding another candidate can only
-weakly increase $\max_j X_j$ in every replication while leaving $\max_j \mathbb E[X_j]$
-unchanged unless the newcomer is the new true best, and it grows with the variance of
-each $X_j$ because a noisier fit statistic gives the maximum more room to be pulled up
-by chance in some replications without a compensating pull down, since the maximum can
-never fall below what any single candidate achieves. This is the same arithmetic
-familiar from extreme value theory and from the winner's curse in auctions: the
-winning bid is a biased estimate of the value of what was won, for exactly the reason
-that it was selected for being the largest number in the room.
+The determinant ratio comes from integrating the coefficient Normal
+kernel: the posterior volume is compared with the prior volume.
+For the variance integral, use
+$\int_0^\infty v^{-(a+1)}e^{-d/v}\,dv=\Gamma(a)d^{-a}$.
+Combining this with the prior's normalisation gives the Gamma and
+scale ratios. Keeping these constants is essential for an evidence
+calculation, even though we could drop them when locating a posterior mode.
 :::
 
-The inequality can be checked directly rather than taken on faith, by resampling the
-training period many times and comparing the average of the best fit found each time
-against the best of the average fits.
+### Forecast evaluation is sequential
 
-**Reading the computation.** Each replication resamples the training months in blocks
-of a year, preserving some of the short-run dependence in monthly returns, and refits
-all thirty-two models. The two quantities compared are not the same object: one
-averages after taking the maximum, the other takes the maximum after averaging.
+The chain rule supplies a useful bridge between evidence and prediction:
 
-```{python}
-#| label: fig-jensen-check
-#| fig-cap: "Distribution, across 300 resamples of the training period, of the best log marginal likelihood found in that resample. The vertical line is the best model's average log marginal likelihood across the same resamples."
-boot_rng = np.random.default_rng(2026)
-n_boot, block = 300, 12
-n_blocks = int(np.ceil(len(train) / block))
-lml_boot = np.empty((n_boot, len(models_r)))
-for b in range(n_boot):
-    starts = boot_rng.integers(0, len(train) - block, size=n_blocks)
-    idx = np.concatenate([train[s:s + block] for s in starts])[:len(train)]
-    lml_boot[b] = fit_g(idx)
+$$p(y_{1:T}\mid M_j)=
+\prod_{t=1}^T p(y_t\mid y_{1:t-1},M_j).$$
 
-mean_of_max = lml_boot.max(axis=1).mean()
-max_of_mean = lml_boot.mean(axis=0).max()
+For a time-series model this is conditional on the common initial history.
+Evidence is the accumulated product of forecasts issued before each
+observation, with parameters updated between forecasts. Consequently,
 
-fig, ax = plt.subplots(figsize=(6.6, 4.0))
-ax.hist(lml_boot.max(axis=1), bins=30, color="C0", alpha=0.75, edgecolor="white")
-ax.axvline(max_of_mean, color="black", ls="--", lw=1.5,
-           label=r"$\max_j \mathbb{E}[X_j]$ (estimated)")
-ax.axvline(mean_of_max, color="C3", lw=1.5,
-           label=r"$\mathbb{E}[\max_j X_j]$ (estimated)")
-ax.set_xlabel("best log marginal likelihood in a resample")
-ax.set_ylabel("count")
-ax.legend(fontsize=8)
-ax.set_title("The average of the best is not the best of the average")
-plt.tight_layout(); plt.show()
+$$w_{j,t}=
+\frac{w_{j,t-1}p(y_t\mid y_{1:t-1},M_j)}
+{\sum_\ell w_{\ell,t-1}p(y_t\mid y_{1:t-1},M_\ell)}.$$
 
-print(f"E[max_j X_j] (estimated by resampling) = {mean_of_max:.3f}")
-print(f"max_j E[X_j] (estimated by resampling)  = {max_of_mean:.3f}")
-print(f"estimated gap = {mean_of_max - max_of_mean:.3f} log points")
-```
+In log odds, each new observation adds the difference between the models'
+log predictive scores. Recomputing marginal likelihoods from the beginning
+and updating weights sequentially give the same result when the priors,
+data and initial conditioning information are identical.
 
-The gap is $1.496$ log points, positive as R-9.1 requires, and it is not a small
-number on the scale these models are compared: @sec-empirical below finds a log Bayes
-factor of only $0.02$ separating the best and second-best specifications on the full
-sample, so an optimism bias of this size is easily large enough to decide which
-model looks best even when the true difference between candidates is close to
-nothing. Whatever fit statistic is used to pick a winner among many candidates, part of
-that winner's apparent advantage is the advantage of having been chosen out of many,
-not the advantage of being correct, and R-9.1 says this is true before any data are
-even examined, purely as a consequence of taking a maximum over more than one
-candidate.
+At date $t-1$, issue each predictive density and the mixture using
+$w_{j,t-1}$. After observing $y_t$, record
+$\log[\sum_jw_{j,t-1}p(y_t\mid y_{1:t-1},M_j)]$, then update weights.
+The score is the **log of the mixture**, not the weighted average of log scores.
 
-## Methodology: averaging over parameters, then over models {#sec-methodology}
+A log score rewards assigning density to the realised outcome. Comparing its
+cumulative value with a benchmark assesses relative predictive performance.
+It does not establish causality, and a single backtest does not establish
+universal superiority.
 
-Two separate kinds of not-knowing are in play, and the repair handles them in two
-layers. Within a single model, the parameters $\beta$ and $\sigma^2$ are unknown and
-a forecast should integrate over them rather than plugging in a point estimate.
-Across models, which specification is correct is itself unknown, and a forecast
-should integrate over that too, exactly as R-9.1 says a forecaster who instead
-commits to one specification is trusting a number more than the evidence supports.
+The log score evaluates the full forecast, not just its centre.
+An excessively concentrated forecast is penalised when an outcome falls
+in its tails. An excessively diffuse forecast spreads density thinly even
+around likely observations. For a Normal forecast,
 
-### Result R-9.2: the posterior predictive distribution is a Student t, wider than the plug-in forecast
+$$\log p(y_t)=-\tfrac12\log(2\pi s^2)
+-\frac{(y_t-\mu)^2}{2s^2}.$$
 
-Let $y = X\beta + \varepsilon$, $\varepsilon \sim N(0,\sigma^2 I_n)$, with the natural
-conjugate prior $\beta \mid \sigma^2 \sim N(b_0, \sigma^2 V_0)$ and $\sigma^2 \sim
-IG(a_0,d_0)$, so the posterior is again Normal-Inverse-Gamma with moments $\bar V =
-(V_0^{-1}+X^\top X)^{-1}$, $\bar b = \bar V(V_0^{-1}b_0 + X^\top y)$, $\bar a =
-a_0+n/2$ and $\bar d = d_0 + \tfrac12\big[(y-X\bar b)^\top y + (b_0-\bar
-b)^\top V_0^{-1}b_0\big]$. For a future observation $y^\ast$ with known row $x_\ast$,
-
-$$
-y^\ast \mid y \;\sim\; t_{2\bar a}\!\left(x_\ast^\top \bar b,\;\;
-\frac{\bar d}{\bar a}\big(1 + x_\ast^\top \bar V x_\ast\big)\right),
-$$
-
-for any $n$, any number of regressors $k$ and any $x_\ast$. The plug-in forecast fixes
-the parameters at their posterior means and reports $N(x_\ast^\top\bar b,
-\hat\sigma^2)$: the same centre, but missing both the extra term $x_\ast^\top \bar
-Vx_\ast$, coefficient uncertainty that grows as $x_\ast$ moves away from where the data
-were observed, and the heavier tails that come from not knowing $\sigma^2$ exactly.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-Integrate in two stages, first over $\beta$ at fixed $\sigma^2$, then over $\sigma^2$.
-At fixed $\sigma^2$, $y^\ast = x_\ast^\top\beta + \varepsilon^\ast$ is an affine function
-of the Normal $\beta \mid \sigma^2, y \sim N(\bar b, \sigma^2\bar V)$ plus an
-independent $N(0,\sigma^2)$ shock, hence Normal with mean $x_\ast^\top\bar b$ and
-variance $\sigma^2 c$, $c \equiv 1 + x_\ast^\top\bar Vx_\ast$, the leading one being the
-future shock's own variance and the second term the coefficient uncertainty carried
-through $x_\ast$. Writing $r = (y^\ast - x_\ast^\top\bar b)^2$, the second stage
-integrates this Normal density against the Inverse-Gamma density of $\sigma^2$,
-
-$$
-p(y^\ast \mid y) \propto \int_0^\infty (\sigma^2)^{-\bar a - 3/2}
-\exp\!\left(-\frac{1}{\sigma^2}\Big[\bar d + \frac{r}{2c}\Big]\right) d\sigma^2,
-$$
-
-after collecting the two exponentials and the powers of $\sigma^2$. The integrand is an
-unnormalised $IG(\bar a + \tfrac12, \bar d + r/(2c))$ kernel, so the integral is the
-reciprocal of that density's normalising constant, giving $p(y^\ast\mid y) \propto
-\big(1 + r/(2c\bar a\,\bar d/\bar a)\big)^{-\bar a - 1/2}$ after factoring $\bar d$ out
-of the bracket. Matching this shape against the Student $t$ density, proportional to
-$(1+(y-\mu)^2/(\nu s^2))^{-(\nu+1)/2}$, gives $\nu = 2\bar a$ and $s^2 = c\bar d/\bar
-a$, the displayed result.
-
-Two features of this shape matter beyond the algebra. The degrees of freedom $2\bar a
-= 2a_0+n$ grow with the sample, so the $t$ converges to a Normal as $n\to\infty$: heavy
-predictive tails are a small-sample consequence of not knowing $\sigma^2$ and vanish
-once it is well pinned down. The factor $c = 1+x_\ast^\top\bar Vx_\ast$, by contrast,
-never vanishes, because its leading term is the variance of a shock that has not
-happened yet and no quantity of data removes it; a long sample shrinks the interval
-around the conditional mean to nothing while the interval around a future realised
-outcome converges to a fixed width set by $\sigma$, and confusing the two is a common
-error in reporting a forecast interval.
-:::
-
-### Result R-9.3: model averaging as one more layer of the same integral, with an automatic penalty for size
-
-With $J$ models each given a prior probability $p(M_j)$, Bayes' theorem applied to the
-model index gives the posterior model probability
-
-$$
-p(M_j \mid y) \propto p(y \mid M_j)\,p(M_j), \qquad
-p(y \mid M_j) = \iint p(y \mid \beta,\sigma^2,M_j)\,p(\beta,\sigma^2\mid M_j)\,
-d\beta\,d\sigma^2,
-$$
-
-and the model-averaged predictive mixes each model's own R-9.2 distribution in
-proportion to these weights, $p(y^\ast\mid y) = \sum_j p(M_j\mid y)\,p(y^\ast\mid
-y,M_j)$. Because the chain rule factorises $p(y\mid M_j) = \prod_t p(y_t\mid
-y_{1:t-1},M_j)$ with no assumption beyond the model already written down, the marginal
-likelihood is literally a cumulative in-sample log predictive score, the same currency
-used to grade a forecast out of sample. It also penalises size with no term added by
-hand: a model that spreads its prior over a larger parameter space must divide its
-prior density more thinly, and therefore assigns less of it to the one dataset
-actually observed, unless the extra parameters earn their keep by improving the fit
-enough to compensate.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-Write the natural conjugate marginal likelihood as $p(y\mid M) = (2\pi)^{-n/2}
-|\bar V|^{1/2}|V_0|^{-1/2}\,\Gamma(\bar a)/\Gamma(a_0)\cdot d_0^{a_0}/\bar d^{\,\bar a}$,
-so everything that depends on the size of the model rather than the fit sits in the
-determinant ratio $|\bar V|/|V_0|$. Since $\bar V^{-1} = V_0^{-1} + X^\top X$ and
-$X^\top X$ is positive semi-definite, $\bar V^{-1} \succeq V_0^{-1}$ in the Loewner
-order, which implies $\bar V \preceq V_0$ in the same order and hence $|\bar V| \le
-|V_0|$ for any design and any prior, with equality only when $X^\top X = 0$, that is,
-when the regressors carry no information at all. The ratio $|\bar V|/|V_0| \in (0,1]$
-is therefore always a genuine penalty, and it applies model by model regardless of
-whether the extra columns of $X$ turn out to matter: enlarging a model by adding a
-column to $X$ and a corresponding row and column to $V_0$ enlarges the space the prior
-must cover before any data are seen, shrinking this ratio further unless the new
-column is informative enough to shrink $|\bar V|$ by at least as much as $|V_0|$ grew.
-
-The chain-rule factorisation of the marginal likelihood is exact for any joint density,
-$p(y_{1:n}\mid M) = \prod_{t=1}^n p(y_t \mid y_{1:t-1}, M)$, so the log marginal
-likelihood is $\sum_t \log p(y_t\mid y_{1:t-1},M)$, a sum of one-step-ahead log
-predictive densities computed in exactly the sense R-9.2 defines them, using only data
-up to $t-1$ at each term. Ranking models by marginal likelihood is therefore ranking
-them by cumulative in-sample forecasting performance under the model's own prior, which
-is the same object, on the same log scale, that an out-of-sample backtest reports; the
-two can disagree, as @sec-motivation already showed they can, but they are commensurable
-rather than being two different currencies.
-:::
-
-Averaging over models is not a hedge added on top of averaging over parameters; it is
-the same operation, mixing over one more layer of what remains unknown, and R-9.1
-says why skipping this layer and reporting the single best-supported model is
-optimistic exactly to the degree that the comparison among candidates is close.
-
-## Data: the market's excess return and five candidate predictors, 1961 to 2026 {#sec-data}
-
-The chapter's dataset, used in every section from here on and never swapped for
-another, is the monthly Fama-French market excess return together with five variables
-the return-predictability literature has proposed as predictors: the term spread, the
-change in the federal funds rate, year-on-year consumer price inflation, the
-unemployment rate, and the market's own lagged return. Timing is enforced explicitly:
-the term spread and the funds-rate change are built from rates known within month
-$t$, inflation and unemployment are lagged one further month to match their
-publication schedule, and the target is next month's return, so every predictor used
-to forecast month $t+1$ was public before that month began.
+The two terms show this balance. Predictive density can exceed one when
+outcomes are tightly concentrated in the chosen units; it is not a
+probability of an exact observation. Compare scores for the same outcome,
+units and dates. A change of units shifts absolute log scores but cancels
+from score differences between models transformed consistently.
 
 ```{python}
-#| label: fig-market-return-series
-#| fig-cap: "The market's monthly excess return, 1961 to 2026, the chapter's single forecasting target."
-fig, ax = plt.subplots(figsize=(7.6, 3.6))
-ax.plot(dates_p, yp, color="steelblue", lw=0.5)
-ax.axhline(0, color="black", lw=0.5)
-ax.set_xlabel("date"); ax.set_ylabel("market excess return (%)")
-ax.set_title("The forecasting target: next month's market excess return")
-plt.tight_layout(); plt.show()
-
-print(f"{n_p} months, {dates_p[0]:%Y-%m} to {dates_p[-1]:%Y-%m}")
-print(panel.describe().loc[["mean", "std", "min", "max"]].round(3).T)
-print("\ncorrelation of each predictor with next month's return:")
-print(panel.corr()["target"][pred_names].round(4))
+#| label: fig-predictive-log-score
+#| fig-cap: "Two forecasts with the same mean but different spreads. The narrow forecast scores better near zero and worse for sufficiently distant outcomes."
+#| code-fold: true
+possible_outcomes = np.linspace(-3, 3, 500)
+fig, ax = plt.subplots()
+ax.plot(possible_outcomes, stats.norm.logpdf(possible_outcomes, 0, 0.5),
+        color=BLUE, label="Forecast SD = 0.5")
+ax.plot(possible_outcomes, stats.norm.logpdf(possible_outcomes, 0, 1.5),
+        color=BROWN, label="Forecast SD = 1.5")
+ax.set(xlabel="Realised outcome", ylabel="Log predictive density")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
 ```
 
-Seven hundred and eighty-four months of data give a market excess return averaging
-$0.593$ percentage points a month with a standard deviation of $4.460$, an annualised
-Sharpe ratio near $0.46$. Every predictor correlates with next month's return at
-under one tenth in absolute value, with the signs the literature reports: the term
-spread and unemployment positively, the funds-rate change and inflation negatively. A
-correlation of $0.09$ implies an $R^2$ of about eight tenths of one percent from a
-single regressor, and that number, not any failure of the data, is the whole reason
-model uncertainty is severe here: with a signal this weak, thirty-two candidate
-specifications are never going to be decisively separated by sixty-five years of
-monthly observations.
+For the numerical weight example above, the mixture score is $\log(0.24)$.
+It is not $0.6\log(0.2)+0.4\log(0.3)$. The first scores the mixture
+distribution we actually issued; the second averages scores of separate
+forecasts. After recording the mixture score, update the model weights
+and parameter posteriors for the next forecast.
 
-## Empirical analysis: does averaging over the thirty-two models help? {#sec-empirical}
+## Economic application and interpretation {#sec-empirical}
 
-### Enumerating the models
+Compare a constant-mean market-return model with a model adding last month's
+return. Use monthly excess returns in percent from 1990–2024 and begin scoring
+after 60 observations. Both models use the same response dates and proper priors.
+Their predictors are available at the forecast origin.
 
-With five predictors and an always-included intercept there are $2^5 = 32$ models, few
-enough to enumerate exactly. Each gets Zellner's g-prior, $V_0 = g(X^\top X)^{-1}$
-with the unit-information choice $g = n$, a standard convenient prior that scales
-automatically with the units of each regressor; its properties are derived in the
-supplementary material for the exercise session. `fit_full` below fits every model on
-a set of rows and, when asked, scores one future observation.
+### Specify comparable models and priors
 
-**Reading the computation.** Posterior model probabilities are normalised in log space
-with `logsumexp` because the individual marginal likelihoods are astronomically small
-numbers whose ratios are all that matter.
+The two candidate equations are
+
+$$M_0:\ r_t^e=\beta_0+\varepsilon_t,\qquad
+M_1:\ r_t^e=\beta_0+\beta_1r_{t-1}^e+\varepsilon_t.$$
+
+In both, errors are conditionally Normal with a constant unknown variance.
+The extra slope asks whether last month's excess return helps predict
+this month's mean return. This is a deliberately small model comparison,
+not a claim that return predictability must exist.
+
+Use equal model prior probabilities, zero coefficient prior means and
+$\sigma^2\sim IG(3,32)$ in percentage-return units. The prior mean
+variance is 16, corresponding to a reference volatility of 4% monthly.
+Set the intercept's relative prior variance to 0.0625 in both models and
+the lag coefficient's to 0.01 in the larger model. Conditional on
+$\sigma=4$, these imply coefficient standard deviations of 1 percentage
+point and 0.4 respectively.
+
+The common intercept prior is unchanged across models. This matters:
+we want differences in weights to have an interpretable source.
+Our choices are proper, fixed teaching priors and are not selected by
+looking at the evaluation-period score.
+
+### Calculate each forecast using only its available history
+
+For each forecast date, the code fits both NIG posteriors on earlier
+outcomes, computes their model weights from that same history, then
+evaluates the realised return under the two Student-$t$ predictive densities.
+The next iteration adds that observation to the estimation sample.
+Recomputing the conjugate fits makes the information set transparent;
+no repeated MCMC runs are needed.
 
 ```{python}
-def fit_full(rows, x_row=None, y_new=None):
-    g = float(len(rows))
-    lml = np.empty(len(models_r)); ld = np.full(len(models_r), np.nan)
-    mu = np.full(len(models_r), np.nan); sc = np.full(len(models_r), np.nan)
-    nu = np.full(len(models_r), np.nan)
-    for j, m in enumerate(models_r):
-        Xm = np.column_stack([np.ones(len(rows))] + [Zp[rows, i] for i in m])
-        b0m, V0m = gprior(Xm, g)
-        lml[j] = log_marglik(Xm, yp[rows], b0m, V0m, a0, d0)
-        if x_row is not None:
-            post = nig_posterior(Xm, yp[rows], b0m, V0m, a0, d0)
-            nu[j], mu[j], sc[j] = predictive_t(np.r_[1.0, x_row[list(m)]], *post)
-            ld[j] = stats.t.logpdf(y_new, nu[j], mu[j], sc[j])
-    return np.exp(lml - logsumexp(lml)), lml, ld, mu, sc, nu
+#| label: bma-backtest
+#| code-fold: true
+from scipy.special import gammaln
 
-w_r, lml_r, *_ = fit_full(np.arange(n_p))
-j_const = models_r.index(())
-j_full_r = models_r.index(tuple(range(k_p)))
-pip_r = np.array([w_r[[j for j, m in enumerate(models_r) if v in m]].sum()
-                  for v in range(k_p)])
+ff = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
+frame = pd.DataFrame({"y": 100*ff["mkt_rf"], "lag": 100*ff["mkt_rf"].shift(1)})
+frame = frame.loc["1990":"2024"].dropna()
+y = frame["y"].to_numpy()
+designs = [np.ones((len(y), 1)), np.column_stack([np.ones(len(y)), frame["lag"]])]
 
-print(f"posterior probability of the constant-only model: {w_r[j_const]:.4f}")
-print(f"log Bayes factor, best model over constant only: {lml_r.max() - lml_r[j_const]:.2f}")
-print(f"log Bayes factor, best model over the full model: {lml_r.max() - lml_r[j_full_r]:.2f}")
-print("posterior inclusion probabilities:",
-      {pred_names[v]: round(float(pip_r[v]), 3) for v in range(k_p)})
+def nig_fit(y: np.ndarray, X: np.ndarray, b0: np.ndarray, B0: np.ndarray,
+            a0: float, d0: float) -> tuple:
+    """Return NIG posterior parameters and the log marginal likelihood."""
+    k = X.shape[1]
+    P0 = np.linalg.inv(B0)
+    P1 = P0 + X.T@X
+    B = np.linalg.solve(P1, np.eye(k))
+    b = np.linalg.solve(P1, P0 @ b0 + X.T@y)
+    residual = y-X@b
+    displacement = b - b0
+    a = a0 + len(y)/2
+    d = d0 + (residual@residual + displacement @ P0 @ displacement)/2
+    log_evidence = (-len(y)/2*np.log(2*np.pi)
+                    + .5*np.linalg.slogdet(B)[1] - .5*np.linalg.slogdet(B0)[1]
+                    + a0*np.log(d0)-a*np.log(d)+gammaln(a)-gammaln(a0))
+    return b, B, a, d, log_evidence
+
+A0, D0, INITIAL_OBSERVATIONS = 3., 32., 60
+prior_means = [np.zeros(1), np.zeros(2)]
+prior_covariances = [np.diag([0.0625]), np.diag([0.0625, 0.01])]
+weights_history, score_gains = [], []
+for t in range(INITIAL_OBSERVATIONS, len(y)):
+    fitted = [
+        nig_fit(y[:t], design[:t], mean, covariance, A0, D0)
+        for design, mean, covariance in zip(designs, prior_means, prior_covariances)
+    ]
+    log_evidence = np.array([fit[-1] for fit in fitted])
+    log_weights = log_evidence-logsumexp(log_evidence)
+    log_scores = []
+    for design, (b, B, a, d, _) in zip(designs, fitted):
+        x = design[t]
+        log_scores.append(stats.t.logpdf(y[t], 2*a, loc=x@b,
+                          scale=np.sqrt(d/a*(1+x@B@x))))
+    score_gains.append(logsumexp(log_weights+log_scores)-log_scores[0])
+    weights_history.append(np.exp(log_weights))
 ```
+
+Equal model prior probabilities cancel from the log-weight calculation.
+The function's zero-mean coefficient prior and fixed hyperparameters are shared
+teaching choices, not optimised on the test period. A richer candidate set
+requires its own prior and computational assessment.
+
+The determinant terms compare prior and posterior covariance volumes,
+and the Gamma terms integrate the observation variance. The function
+keeps the likelihood constants needed for evidence rather than returning
+an unnormalised posterior kernel. Using logarithms and
+log-sum-exp prevents the tiny products of predictive densities from
+underflowing to zero.
+
+The first 60 observations initialise learning. They contribute to model
+weights and parameter posteriors, but not to the reported evaluation
+score. Both candidates use the same response dates, including the initial
+conditioning history needed for the lagged-return regressor.
 
 ```{python}
-#| label: fig-posterior-models
-#| fig-cap: "Left: posterior probability of the six best-supported models, out of thirty-two, on the full sample. Right: posterior inclusion probability of each predictor against the prior line of one half."
-ord_r = np.argsort(w_r)[::-1][:6]
-fig, axes = plt.subplots(1, 2, figsize=(11, 4.0))
-cols = ["C7" if j == j_const else "C0" for j in ord_r]
-axes[0].bar(range(6), w_r[ord_r], color=cols,
-            tick_label=[labels_r[j].replace(", ", ",\n") for j in ord_r])
-axes[0].set_ylabel("posterior model probability"); axes[0].tick_params(axis="x", labelsize=7)
-axes[0].set_title("Six best-supported models")
-axes[1].bar(pred_names, pip_r, color="C2")
-axes[1].axhline(0.5, color="grey", ls=":", label="prior inclusion probability")
-axes[1].set_ylabel("posterior inclusion probability"); axes[1].set_ylim(0, 1)
-axes[1].legend(fontsize=8); axes[1].tick_params(axis="x", rotation=25, labelsize=8)
-axes[1].set_title("Posterior inclusion probabilities")
-plt.tight_layout(); plt.show()
+#| label: fig-bma-backtest
+#| fig-cap: "Weights are computed before each scored outcome. Positive cumulative score gain favours BMA over the constant-mean benchmark on this historical sample."
+#| code-fold: true
+import matplotlib.dates as mdates
+
+dates = frame.index[INITIAL_OBSERVATIONS:]
+fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+axes[0].plot(dates, np.array(weights_history)[:, 1], color=BLUE)
+axes[0].set(ylabel="Lag-model probability", ylim=(0, 1))
+axes[1].plot(dates, np.cumsum(score_gains), color=BLUE)
+axes[1].axhline(0, color=GREY, linestyle="--")
+axes[1].set(ylabel="Cumulative log-score gain", xlabel="Forecast date")
+for ax in axes:
+    ax.grid(axis="y", alpha=.3)
+axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+plt.tight_layout()
+plt.show()
 ```
 
-Read on the whole sample, this is a negative result. The best-supported single model
-contains only the funds-rate change, with posterior probability $0.1702$; the
-second-best is the constant-only model at $0.1676$. The log Bayes factor of the best
-model over the constant is $0.02$, not weak evidence but no evidence, and every
-predictor's inclusion probability sits below the prior value of one half, meaning the
-data have argued against every one of them individually even as the full model is
-rejected by $7.81$ log points against the best single predictor. After sixty-five
-years and five of the profession's favourite predictors, the evidence cannot separate
-a world with predictable returns from one without.
+The upper panel describes what the historical data have taught us about
+the two models **before** each forecast. The lower panel asks whether
+averaging their predictive distributions outscored the constant-mean
+benchmark. Positive cumulative differences favour BMA for this period;
+the plot need not rise monotonically or end above zero.
 
-### An expanding-window backtest from 1990
+An extreme model weight should not be read as proof of a true return
+equation. It is a conditional comparison within a two-model set whose
+members both impose Gaussian constant-variance errors. Both can miss
+important tail or volatility behaviour. Nor does evidence for a lagged
+predictor establish a causal effect of yesterday's return.
 
-**Reading the computation.** At every month from January 1990 the model set is refit
-on data available up to but not including that month, so nothing after month $t$
-enters the forecast issued for month $t$. BMA scores the probability-weighted mixture;
-selection scores whichever model has the highest posterior probability that month;
-full always uses all five predictors; the benchmark is the constant-only model.
+### Inspect an actual mixture forecast
+
+Choose the last evaluation date and construct its predictive distribution
+using only earlier observations. This avoids using its realised return
+to determine the weights shown in the figure. Plot the component
+Student-$t$ densities and their weighted sum on a common outcome axis.
 
 ```{python}
-t_start = dates_p.get_loc(pd.Timestamp("1990-01-01"))
-rec = []
-for t in range(t_start, n_p):
-    w, lml, ld, mu, sc, nu = fit_full(np.arange(t), Zp[t], yp[t])
-    jb = int(np.argmax(w))
-    rec.append({"date": dates_p[t], "y": yp[t], "top_w": w.max(),
-                "lps_bma": logsumexp(ld + np.log(w)), "lps_sel": ld[jb],
-                "lps_full": ld[j_full_r], "lps_bench": ld[j_const],
-                "mu_bma": float(w @ mu), "mu_bench": mu[j_const]})
-bt = pd.DataFrame(rec).set_index("date")
-
-def r2_oos(mu_col):
-    e = bt["y"] - bt[mu_col]; base = bt["y"] - bt["mu_bench"]
-    return 1.0 - (e @ e) / (base @ base)
-
-strategies = [("BMA", "bma"), ("best single model", "sel"),
-              ("full model", "full"), ("prevailing mean", "bench")]
-print(f"{len(bt)} out-of-sample months, {bt.index[0]:%Y-%m} to {bt.index[-1]:%Y-%m}")
-print(pd.DataFrame({"mean log score": [bt["lps_"+s].mean() for _, s in strategies],
-                    "cumulative log score": [bt["lps_"+s].sum() for _, s in strategies]},
-                   index=[nm for nm, _ in strategies]).round(4))
-print(f"\nmean weight on the leading model: {bt['top_w'].mean():.3f}")
+#| label: fig-bma-return-density
+#| fig-cap: "Predictive return densities for the last evaluation month, computed before that month's outcome. Component distributions and weights both reflect parameter learning."
+#| code-fold: true
+t = len(y) - 1
+last_fits = [
+    nig_fit(y[:t], design[:t], mean, covariance, A0, D0)
+    for design, mean, covariance in zip(designs, prior_means, prior_covariances)
+]
+last_log_evidence = np.array([fit[-1] for fit in last_fits])
+last_weights = np.exp(last_log_evidence - logsumexp(last_log_evidence))
+components = []
+for design, (b, B, a, d, _) in zip(designs, last_fits):
+    x = design[t]
+    components.append(stats.t(2 * a, loc=x @ b,
+                              scale=np.sqrt(d / a * (1 + x @ B @ x))))
+return_grid = np.linspace(min(component.ppf(0.005) for component in components),
+                          max(component.ppf(0.995) for component in components), 600)
+fig, ax = plt.subplots()
+mixture_density = np.zeros_like(return_grid)
+for component, weight, name, color in zip(
+    components, last_weights, ["Constant mean", "Lagged return"], [GREY, BROWN]
+):
+    density = component.pdf(return_grid)
+    ax.plot(return_grid, density, color=color, linestyle="--",
+            label=f"{name} (weight {weight:.2f})")
+    mixture_density += weight * density
+ax.plot(return_grid, mixture_density, color=BLUE, lw=2, label="BMA")
+ax.set(xlabel="Next market excess return (%)", ylabel="Predictive density")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
+plt.tight_layout()
+plt.show()
+loss_probability = sum(weight * component.cdf(0)
+                       for weight, component in zip(last_weights, components))
+print("Forecast date:", frame.index[t])
+print("BMA probability of negative excess return:", loss_probability)
 ```
+
+If the two component densities nearly overlap, model disagreement adds
+little predictive uncertainty at that date. If one weight is close to
+one, the mixture will resemble that component. Neither possibility makes
+averaging incorrect; it tells us that this particular model uncertainty
+has little influence on this particular forecast.
+
+The printed loss probability sums weighted component CDFs at zero.
+It is a probability of a negative **excess** return, not a probability
+of losing nominal wealth. The economic threshold must match the outcome
+being modelled.
+
+### Check sensitivity to a model-specific prior
+
+Hold the observations, intercept prior, variance prior and model prior
+fixed. Change only the lag-coefficient prior width in $M_1$, and recompute
+its model probability at the same forecast origin. This is a sensitivity
+analysis, not a procedure for choosing whichever prior gives the desired
+model weight.
 
 ```{python}
-#| label: fig-backtest-cumulative
-#| fig-cap: "Cumulative log score minus the prevailing-mean benchmark, 1990 to 2026, for BMA, model selection and the full model."
-fig, ax = plt.subplots(figsize=(7.6, 4.2))
-for lab, key, col in [("BMA", "bma", "C0"), ("best single model", "sel", "C3"),
-                      ("full model", "full", "C2")]:
-    ax.plot(bt.index, np.cumsum(bt["lps_" + key] - bt["lps_bench"]), color=col, label=lab)
-ax.axhline(0.0, color="black", ls=":", lw=1.0)
-ax.set_xlabel("forecast origin"); ax.set_ylabel("cumulative log score minus prevailing mean")
-ax.legend(fontsize=8)
-ax.set_title("Thirty-six years of forecasting, and almost nothing to show for it")
-plt.tight_layout(); plt.show()
-
-for lab, key in [("BMA", "bma"), ("best single", "sel"), ("full", "full")]:
-    c = np.cumsum(bt["lps_" + key] - bt["lps_bench"])
-    print(f"{lab:12s}: ends at {c.iloc[-1]:+.2f}, ranging from {c.min():+.2f} to {c.max():+.2f}")
+#| label: fig-bma-prior-sensitivity
+#| fig-cap: "Sensitivity of the lag-model probability to its slope-prior width, using the same pre-forecast history. Widths are conditional standard deviations at a reference residual SD of 4%."
+#| code-fold: true
+reference_slope_sds = np.array([0.1, 0.2, 0.4, 0.8, 1.6])
+lag_probabilities = []
+for slope_sd in reference_slope_sds:
+    candidate_covariance = np.diag([0.0625, (slope_sd / 4)**2])
+    candidate_fit = nig_fit(y[:t], designs[1][:t], prior_means[1],
+                            candidate_covariance, A0, D0)
+    evidence_pair = np.array([last_fits[0][-1], candidate_fit[-1]])
+    lag_probabilities.append(np.exp(evidence_pair[1] - logsumexp(evidence_pair)))
+fig, ax = plt.subplots()
+ax.plot(reference_slope_sds, lag_probabilities, color=BLUE, marker="o")
+ax.set(xscale="log", xticks=reference_slope_sds,
+       xticklabels=[f"{value:g}" for value in reference_slope_sds],
+       xlabel="Lag-coefficient prior SD at reference volatility",
+       ylabel="Lag-model probability", ylim=(0, 1))
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
 ```
 
-Nothing beats the prevailing mean by much, and the ranking among the three
-alternatives is the chapter's main empirical point. The full model ends $0.55$
-cumulative log points above the benchmark, BMA ends $0.37$ below it, and selecting the
-single most probable model each month ends $3.42$ below it, roughly nine times BMA's
-shortfall. Selection is the only one of the three with a visible downward drift over
-the whole thirty-six years, exactly what R-9.1 predicts when the model space is this
-close to indistinguishable: the leading model changes hands repeatedly, carrying a
-mean posterior weight of only $0.274$, so a strategy that trusts it fully is
-repeatedly betting on whichever specification happened to look best a month or two
-earlier.
+A change in weight here comes from a different prior predictive commitment,
+not new observations. This is why model comparison requires a defensible
+prior on added parameters. The prior used for a forecasting claim should
+be declared before evaluating that claim, or its selection must itself
+be included in the evaluation design.
 
-### The predictive density, and whether it is calibrated
+These are the documented [Kenneth French monthly factors](../data/SOURCES.md).
+Our chronological exercise uses the downloaded historical snapshot. It
+isolates the mechanics of posterior predictive scoring and BMA; broader
+investment conclusions require a richer evaluation than these two
+illustrative return models.
 
-**Reading the computation.** The mixture density at the final forecast origin is
-formed by summing thirty-two weighted Student $t$ densities on a grid. The probability
-integral transform of a correct predictive CDF, evaluated at the outcome that actually
-occurred, should be uniform on $[0,1]$ if the forecast is calibrated.
+## Discussion and connection to the exercises {#sec-discussion}
 
-```{python}
-#| label: fig-predictive-and-calibration
-#| fig-cap: "Left: the BMA predictive density at the final forecast origin against the prevailing-mean and leading-model densities. Right: probability integral transforms of the BMA density over the 437-month backtest."
-t_last = n_p - 1
-w_L, _, _, mu_L, sc_L, nu_L = fit_full(np.arange(t_last), Zp[t_last], yp[t_last])
-grid_r = np.linspace(-18, 18, 801)
-mix = sum(w_L[j] * stats.t.pdf(grid_r, nu_L[j], mu_L[j], sc_L[j]) for j in range(len(models_r)))
-j_lead = int(np.argmax(w_L))
-var_within = float(w_L @ (sc_L ** 2 * nu_L / (nu_L - 2)))
-var_between = float(w_L @ (mu_L - float(w_L @ mu_L)) ** 2)
+The [Week 9 lab](../exercise-sessions/09-prediction-bma.qmd) uses the same
+forecast–score–update order in a controlled simulation.
 
-pit = []
-for t in range(t_start, n_p):
-    w, _, _, mu, sc, nu = fit_full(np.arange(t), Zp[t], yp[t])
-    pit.append(float(w @ stats.t.cdf(yp[t], nu, mu, sc)))
-pit = np.array(pit)
+1. Reproduce the 1.96 mixture variance by separating its two components.
+2. Explain why marginal likelihood integrates against the prior.
+3. Show which observations enter a forecast issued at date $t-1$.
+4. Change the coefficient-prior width and assess weight sensitivity.
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4.0))
-axes[0].plot(grid_r, mix, color="C0", lw=2.0, label="BMA mixture")
-axes[0].plot(grid_r, stats.t.pdf(grid_r, nu_L[j_const], mu_L[j_const], sc_L[j_const]),
-             color="C7", ls="--", lw=1.4, label="prevailing mean")
-axes[0].plot(grid_r, stats.t.pdf(grid_r, nu_L[j_lead], mu_L[j_lead], sc_L[j_lead]),
-             color="C3", ls=":", lw=1.2, label=f"leader {labels_r[j_lead]}")
-axes[0].set_xlabel("excess return next month (%)"); axes[0].set_ylabel("density")
-axes[0].legend(fontsize=8); axes[0].set_title("The predictive density hardly depends on the model")
-axes[1].hist(pit, bins=np.linspace(0, 1, 11), density=True, color="C0", alpha=0.75,
-             edgecolor="white")
-axes[1].axhline(1.0, color="grey", ls="--")
-axes[1].set_xlabel("PIT of the BMA density"); axes[1].set_ylabel("density")
-axes[1].set_title("Calibration over the backtest")
-plt.tight_layout(); plt.show()
+For macro data, a historical snapshot may contain revisions unavailable at the
+forecast date. Such a backtest is pseudo-out-of-sample unless vintage data are
+used. Next chapter asks a different question: effects of interventions.
 
-print(f"within-model variance {var_within:.2f}, between-model variance {var_between:.4f} "
-      f"({100*var_between/(var_within+var_between):.2f}% of the total)")
-print(f"PIT: mean {pit.mean():.3f}, share below 0.1 {(pit<0.1).mean():.3f}, "
-      f"share above 0.9 {(pit>0.9).mean():.3f}")
-```
+### Reading guide
 
-The three densities in the left panel are visually indistinguishable, standard
-deviations near $4.44$ centred within a fifth of a point of each other, and the
-variance decomposition explains why: disagreement among the thirty-two models about
-next month's mean accounts for only $0.15$ percent of the total predictive variance,
-so essentially all of a forecaster's uncertainty about next month's market return is
-irreducible, not a question any model in this set claims to resolve. The right panel
-is the consolation prize. The probability integral transforms average $0.525$ against
-a target of one half, with $9.8$ percent of outcomes below the tenth percentile and
-$9.4$ percent above the ninetieth, both close to the nominal ten percent. The model
-cannot say where the market is going, but it can say, honestly, how uncertain one
-should be about it, which for a risk manager sizing a position is the more valuable of
-the two statements.
-
-## Discussion: averaging is insurance, not a discovery procedure {#sec-discussion}
-
-The check against something already known is the shape of the whole exercise, and it
-is worth putting a number on the out-of-sample $R^2$ that the log scores above imply,
-because that statistic is exactly the one the return-predictability literature reports.
-
-**Reading the computation.** `r2_oos` compares each strategy's squared forecast error
-against the prevailing-mean benchmark's, using the same backtest already computed;
-zero is the benchmark's own score by construction, and a negative value means the
-strategy did worse than always forecasting the historical average.
-
-```{python}
-#| label: fig-r2-oos-check
-#| fig-cap: "Out-of-sample R-squared against the prevailing mean, the standard metric of the return-predictability literature, for each strategy over the same 1990-2026 backtest."
-r2_bma = r2_oos("mu_bma")
-print(f"out-of-sample R2 vs prevailing mean: BMA {r2_bma:.4f}, prevailing mean 0 (by construction)")
-
-fig, ax = plt.subplots(figsize=(5.4, 4.0))
-ax.bar(["BMA", "prevailing mean"], [r2_bma, 0.0], color=["C0", "C7"])
-ax.axhline(0.0, color="black", lw=0.8)
-ax.set_ylabel("out-of-sample R2 vs prevailing mean")
-ax.set_title("Negative out-of-sample R2 is the Goyal-Welch result")
-plt.tight_layout(); plt.show()
-```
-
-BMA's out-of-sample $R^2$ against the prevailing mean is $-0.0030$: a forecaster using
-all five predictors through the BMA mixture would have produced larger squared errors,
-on net, than one who simply projected the historical average return every month. That
-is the Goyal and Welch result, that standard return predictors fail to beat the
-prevailing mean out of sample, reproduced here with Bayesian machinery on a fresh
-sample and a different set of models, and it lands in the same place the literature
-has landed for two decades. That agreement is itself evidence
-that nothing about this chapter's implementation is an artefact; a method that finds
-strong predictability where a large literature has repeatedly failed to would be the
-one to distrust.
-
-The comparison among strategies is the result actually worth taking away, and it does
-not depend on predictability existing. When the posterior is spread almost evenly
-across thirty-two candidates, selecting the leader is close to arbitrary from one
-month to the next, and forecasting as though the leader were certainly correct quotes
-a density sharper than the evidence supports around a centre chosen by noise, which
-R-9.1 already said would happen and the backtest confirms costs nine times what
-averaging costs. Averaging is not a way to discover which predictor works. It is
-insurance against not knowing, priced correctly, and the price is a small, measured
-amount of sharpness given up in exchange for never being the model that was
-confidently wrong.
-
-There is a limitation this backtest cannot touch, and it is the reason model
-averaging alone is not the end of the course. Every specification compared here is a
-static linear regression: parameters that do not move, coefficients that describe the
-whole sample the same way regardless of when a predictor is measured relative to when
-policy changed. Chapter 10 turns to a setting where that limitation is not about
-which of several linear models to trust, but about whether a linear model of any kind
-can answer the question at all: the estimated effect of Federal Reserve tightening on
-the economy flips sign when the rule used to date policy tightenings changes, and no
-amount of averaging over specifications repairs that, because the problem is not model
-uncertainty but a causal question that more data, by themselves, cannot settle.
-
-## Exercises
-
-These are the chapter's practice questions; the [Week 9 exercise
-session](../exercise-sessions/09-prediction-bma.qmd) works through them, adds a
-worked derivation of the g-prior's dimension penalty and of the log score's
-calibration-sharpness decomposition, and revisits a simulated model space where the
-true model is known.
-
-1. By hand. Two models are compared on $n$ observations with $R^2_1 < R^2_2$ under the
-   g-prior with $g = n$ and $k_2 = k_1 + 1$. Using R-9.3, derive the condition on
-   $R^2_2 - R^2_1$ under which the log Bayes factor favours the larger model, and show
-   that this threshold shrinks as $n$ grows but never reaches zero.
-
-2. Computational. Refit the backtest of @sec-empirical replacing the g-prior's
-   unit-information choice $g = n$ with $g = 4$, a much tighter prior, and report how
-   the posterior inclusion probabilities and the out-of-sample ranking of BMA against
-   selection change. Explain the direction of the change using R-9.3.
-
-3. On real data. Add the ten-year Treasury yield's own level, rather than the term
-   spread, as a sixth candidate predictor, re-enumerate the now $2^6 = 64$ models, and
-   report whether the winner's-curse gap of R-9.1, estimated as in @sec-problem,
-   grows with the larger model space as the derivation predicts it should.
-
-Exercise 1 is worth attempting before the session, since the dimension penalty it asks
-for is used without derivation in the session's own material. Exercises 2 and 3 reuse
-the code of @sec-empirical with the prior or the predictor set changed.
-
-## Reading and references
-
-The predictive distribution of R-9.2 and the marginal likelihood of R-9.3 follow UPM
-Classes 1 and 5. Madigan and Raftery (1994) is the source for treating the model index
-itself as an unknown with a posterior, and for Occam's window, keeping only models
-whose odds against the leader clear a threshold, which becomes necessary once
-enumeration is no longer feasible. Hoeting, Madigan, Raftery and Volinsky (1999) is the
-standard tutorial reference. The log predictive score and its calibration-sharpness
-decomposition are due to Gneiting and Raftery (2007). Goyal and Welch's finding that
-standard predictors fail to beat the prevailing mean out of sample is the empirical
-benchmark @sec-empirical reproduces. The data are the FRED macroeconomic and
-Fama-French factor files distributed with this course as repository snapshots.
-
-The explanations and exercises are adapted to this course's notation and weekly
-structure; consult the cited originals for the full treatments.
-
-Madigan and Raftery (1994), "Model Selection and Accounting for Model Uncertainty in
-Graphical Models Using Occam's Window," *Journal of the American Statistical
-Association*. Hoeting, Madigan, Raftery, and Volinsky (1999), "Bayesian Model
-Averaging: A Tutorial," *Statistical Science*. Gneiting and Raftery (2007), "Strictly
-Proper Scoring Rules, Prediction, and Estimation," *Journal of the American
-Statistical Association*. Koop, *Bayesian Econometrics*, ch. 2-4 and 11. Chan, Koop,
-Poirier, and Tobias, *Bayesian Econometric Methods* (2nd ed.), ch. 2.
+Koop (2003), *Bayesian Econometrics*, on model comparison and prediction;
+Bauwens, Lubrano and Richard (1999), *Bayesian Inference in Dynamic Econometric
+Models*, on predictive analysis.
