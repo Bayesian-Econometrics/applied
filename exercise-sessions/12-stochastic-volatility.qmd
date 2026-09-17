@@ -11,7 +11,7 @@ Can a single-state JPR sampler recover latent volatility and its persistence?
 
 ## Derive before coding
 
-Derive the two-neighbour Normal kernel for log volatility. Transform to
+Derive the two-neighbour Normal kernel for log variance. Transform to
 variance and retain the Jacobian. Match a lognormal's moments with an inverse-Gamma
 blanket and derive the accept-reject density f(s)=min(p(s),c q(s)). Show why the
 final Metropolis ratio corrects proposals even when c q is not a global bound.
@@ -145,12 +145,12 @@ must not silently compare a density in ds with one in dlog(s).
 h_mean = h_draws.mean(0)
 h_lower, h_upper = np.quantile(h_draws, [.05, .95], axis=0)
 fig, ax = plt.subplots()
-ax.plot(truth, color='black', lw=1, label='simulated true log-volatility')
+ax.plot(truth, color='black', lw=1, label='simulated true log variance')
 ax.plot(h_mean, color='tab:blue', lw=1.2, label='posterior mean')
 ax.fill_between(np.arange(T), h_lower, h_upper, color='tab:blue', alpha=.25,
                  label='90% credible band')
-ax.set_xlabel('time'); ax.set_ylabel(r'log-volatility $h_t$')
-ax.set_title('JPR-filtered log-volatility path')
+ax.set_xlabel('time'); ax.set_ylabel(r'log variance $h_t$')
+ax.set_title('JPR-smoothed log-variance path')
 ax.legend()
 plt.tight_layout(); plt.show()
 
@@ -164,11 +164,11 @@ ax.legend()
 plt.tight_layout(); plt.show()
 ```
 
-The credible band covers the simulated path for most of the sample, with the
-usual occasional excursions of the truth outside a 90% interval that a short
-teaching run should show rather than hide. The persistence histogram is
-concentrated near the generating value of `phi_true`, though a run this short
-still leaves visible posterior spread.
+Compare the pointwise credible bands with the generating path and the
+persistence posterior with the generating parameter. Do not assume that
+this short run has converged or that every interval contains the truth.
+These are smoothed states conditional on the full simulated sample, not
+real-time filtered estimates.
 
 ## Discuss the results
 
@@ -190,7 +190,7 @@ The following questions extend the JPR sampler and simulation used above.
    credible band on `h` change between the near-unit-root and the more mean-reverting case.
 2. Replace the informative inverse-Gamma prior on $\sigma_h^2$ (`c0, d0`) by a much flatter
    one, for instance `c0 = d0 = 0.01`, and describe what happens to the posterior mean of
-   `phi` and to the visual smoothness of the filtered path plotted above.
+   `phi` and to the visual smoothness of the smoothed path plotted above.
 3. Derive the moment-matching equations used to build the inverse-Gamma accept-reject
    blanket, `a_ln = 2 + 1/expm1(variance)` and `b_ln = (a_ln - 1) * exp(mean + variance/2)`,
    from setting the lognormal and inverse-Gamma means and variances equal, then confirm

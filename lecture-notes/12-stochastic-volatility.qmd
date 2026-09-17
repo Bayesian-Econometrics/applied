@@ -1,810 +1,842 @@
 ---
 title: "Stochastic volatility"
 subtitle: "Lecture 12"
+format:
+  html:
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img, .cell figure img, figure img {
+          width: 100%; max-width: 100%; height: auto;
+        }
+        </style>
 ---
 
-## Overview
+::: {.callout-tip icon=false}
+## Key takeaways {.unnumbered}
 
-By the end of this lecture you can treat an asset's variance as a hidden random
-process rather than a constant or a deterministic function of the past, and turn a
-likelihood that has no closed form into a posterior you can actually sample.
-
-::: {.callout-important}
-## The result of this chapter
-
-For a stochastic-volatility model $r_t = \exp(h_t/2)\,u_t$, $h_t = \mu +
-\phi(h_{t-1}-\mu) + \sigma_h\zeta_t$, with $u_t,\zeta_t \sim \mathcal{N}(0,1)$
-independent of each other and over time, the posterior of the latent path
-$h_{1:T}$ together with $(\mu,\phi,\sigma_h)$ can be sampled one date, or one
-block, at a time even though the likelihood
-
-$$
-p(r_{1:T}\mid\mu,\phi,\sigma_h)
-= \int p(r_{1:T}\mid h_{1:T})\, p(h_{1:T}\mid \mu,\phi,\sigma_h)\,\mathrm{d}h_{1:T}
-$$
-
-has no closed form. Each full conditional of a single state is Gaussian in its
-neighbours and non-Gaussian only through the single return observed that day,
-which is enough structure for an exact Metropolis step. The difficulty is that
-neighbouring states are strongly dependent whenever volatility is persistent, so
-the chain that recovers them mixes slowly.
+- **Stochastic volatility models variance as an unobserved evolving process.** Large absolute returns provide noisy evidence about that process.
+- **A quiet or turbulent day does not reveal its variance exactly.** The posterior combines current returns with neighbouring states and persistence.
+- **The return likelihood is nonlinear in log variance.** State sampling combines a Gaussian transition model with a non-Gaussian observation contribution.
+- **Volatility paths have uncertainty and strong dependence.** Mixing and the treatment of the initial state matter for inference.
 :::
 
-After working through this chapter you can
+## Motivation and the central question {#sec-motivation}
 
-1. diagnose why a nonlinear measurement equation breaks the Kalman recursion and
-   leaves the likelihood as an intractable integral;
-2. derive the full conditional of a single log-volatility as a Gaussian
-   neighbour term combined with a non-Gaussian likelihood correction;
-3. derive an accept-reject and Metropolis construction that draws exactly from
-   that full conditional using a moment-matched inverse-gamma proposal;
-4. implement a single-move Metropolis-within-Gibbs sampler for a
-   stochastic-volatility model in Python;
-5. interpret the estimated persistence, volatility of volatility, and posterior
-   volatility path of a real return series;
-6. compare a Bayesian stochastic-volatility estimate with an industry-standard
-   exponentially weighted variance and say what each does and does not deliver;
-7. diagnose why persistence and volatility of volatility are only weakly
-   separated in the posterior even with a long sample.
+Financial returns alternate between calm and turbulent periods. For risk
+measurement, we need a distribution for the level of risk itself, not only
+a moving average of past squared returns.
 
-Week 12 of 15, paired with the [Week 12 exercise
-session](../exercise-sessions/12-stochastic-volatility.qmd). The chapter assumes
-the state-space machinery and the Kalman filter of Lecture 8 and the
-Metropolis-Hastings construction of Lecture 5; the model-averaging of Lecture 9
-is not needed.
+**How can returns inform an unobserved variance that changes over time?**
+A stochastic-volatility (SV) model uses the state-space idea from Chapter 8,
+but observations measure the scale of a shock rather than its mean.
 
-## Motivation: every earlier model priced risk with a variance that never moves {#sec-motivation}
+Consider a manager holding a broad equity portfolio. A one-percent move
+may be a large surprise in a quiet market and an ordinary day during a
+crisis. A model with one variance for the whole sample assigns the same
+uncertainty to both situations. Changing the expected return alone cannot
+repair this problem: the width of the return distribution must change.
 
-Every regression, every vector autoregression and every state-space model built so
-far in this course writes the shock in its measurement equation as
-$\varepsilon_t \sim \mathcal{N}(0,\sigma^2)$ or $\mathcal{N}(0,\Sigma)$, a single
-number or a single matrix standing for risk over the whole estimation window.
-Lecture 8 let the coefficients drift through time, but even there the innovation
-variance of every equation was held fixed, because a constant variance is exactly
-what keeps the Kalman filter available. A risk manager who sized a position with
-any of these models would be using the same variance on a quiet Tuesday in 2017
-and on the Monday a pandemic was declared.
+The economic question is **how uncertain is tomorrow's portfolio return,
+given what we have learned about today's risk?** The intermediate task is
+to infer a hidden volatility path. The final task is to propagate that
+uncertainty into future returns. We will keep these tasks separate from
+the retrospective description of past crises.
 
-Whether that assumption is defensible is a question about data rather than
-taste, and daily returns settle it quickly. A risk desk sizing a position for
-tomorrow needs an estimate of tomorrow's variance, not last decade's average one,
-and every model built in this course so far would hand it the same number
-regardless of whether the last month looked like early 2017 or March 2020.
+Chapter 8 used noisy observations to learn a drifting coefficient. Here
+we use noisy returns to learn a drifting variance. Chapter 11 allowed
+uncertain factor exposures but kept the residual variance constant.
+Stochastic volatility supplies a natural extension of both ideas.
+The mean equation can still contain factors; we start with demeaned
+returns so that the new concept is visible.
+
 
 ```{python}
+#| label: setup-sv
+#| include: false
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 import matplotlib.pyplot as plt
+from scipy import stats
 
+SEED = 2026
+rng = np.random.default_rng(SEED)
+plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
+                     "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": False})
+BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
-
-rng = np.random.default_rng(2026)
-plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
-                     "grid.alpha": 0.3, "font.size": 11})
-
-ff_d = pd.read_parquet(DATA / "ff_factors_daily.parquet")
-window = ff_d["2005-01-01":"2022-12-31"]
-dates = window.index
-r = (window["mkt_rf"] - window["mkt_rf"].mean()).to_numpy()
-T = r.size
-
-roll_vol = pd.Series(r, index=dates).rolling(21).std() * np.sqrt(252)
-
-def acf(x, lag):
-    x = x - x.mean()
-    return np.corrcoef(x[:-lag], x[lag:])[0, 1]
-
-fig, ax = plt.subplots(figsize=(9, 4))
-ax.plot(dates, roll_vol, color="steelblue", lw=0.8)
-ax.set_ylabel("21-day rolling annualised volatility"); ax.set_xlabel("date")
-ax.set_title("A single constant variance describes none of this")
-plt.tight_layout(); plt.show()
-
-print(f"{T} trading days, {dates[0]:%Y-%m-%d} to {dates[-1]:%Y-%m-%d}")
-print(f"whole-sample annualised volatility {r.std(ddof=1)*np.sqrt(252):.2%}")
-print(f"21-day rolling volatility: min {roll_vol.min():.2%}, max {roll_vol.max():.2%}")
-for lag in (1, 5, 20):
-    print(f"lag {lag:2d}: return autocorrelation {acf(r, lag):+.3f}, "
-          f"squared-return autocorrelation {acf(r**2, lag):+.3f}")
 ```
 
-The rolling window is a moving picture of exactly the number every model so far has
-held fixed, and it is not fixed at all: annualised volatility measured over
-successive months ranges from $3.94\%$ to $96.64\%$, a factor of about twenty-five,
-against a single whole-sample figure of $19.95\%$ that no month actually
-experiences. The autocorrelation table says the same thing more precisely. The
-return itself is close to unpredictable, with an autocorrelation of $-0.113$ at
-one day and $0.017$ at twenty, the mild pattern classical market efficiency
-predicts. Its square tells a different story: an autocorrelation of $0.332$ at one
-day that is still $0.176$ a full trading month later. A large squared return today
-makes a large squared return likely for weeks, even though the sign of the return
-carries almost no memory at all.
+## Intuition: a simple worked example {#sec-intuition}
 
-A model with a single $\sigma^2$ cannot represent any of this, because it has
-nowhere for the clustering to live. The traditional response, the GARCH family, keeps
-the variance a deterministic function of past squared returns, so that once the
-data are observed the whole variance path is known with certainty; that choice is
-defensible and widely used, but it treats a variance estimated with noise as if it
-were known exactly, the same overconfidence a plug-in point estimate always
-carries. This chapter takes a different route, treating the variance as a
-genuinely random, unobserved state with a shock of its own,
-$h_t = \log(\text{variance}_t)$ evolving as an autoregression exactly like the
-states of Lecture 8, so that the model itself carries an honest statement of how
-uncertain today's variance is, not only its best guess.
+A return of 2% could be ordinary on a high-volatility day or unusual on a
+low-volatility day. One return cannot determine the variance. Several large
+absolute returns together are stronger evidence, especially if volatility is
+persistent. Positive and negative returns of the same magnitude provide the
+same variance information in the symmetric model below.
 
-That single change, a random rather than a deterministic state, is what breaks
-every piece of machinery this course has built so far. Lecture 8 could compute the
-posterior of a drifting coefficient in closed form at every date because the
-Kalman filter turns a Gaussian prior and a Gaussian measurement into a Gaussian
-posterior, one step at a time. The measurement equation here, $r_t =
-\exp(h_t/2)u_t$, makes the variance itself the hidden state, and multiplying a
-return by $\exp(h_t/2)$ rather than adding a state to it is exactly the change that
-takes the Kalman recursion away, which the next section makes precise.
+Compare two candidate daily standard deviations, 1% and 3%. A zero return has
+three times as much density under 1%; a 4% return strongly favours 3%.
+This likelihood evidence updates prior beliefs about today's state.
 
-## The problem: a nonlinear measurement equation breaks the Kalman recursion {#sec-problem}
-
-### Result R-12.1: the likelihood has no closed form
-
-For $r_t = \exp(h_t/2)\,u_t$ with $h_t = \mu + \phi(h_{t-1}-\mu) + \sigma_h\zeta_t$
-and $u_t,\zeta_t \stackrel{\text{iid}}{\sim} \mathcal{N}(0,1)$, the likelihood of
-$\theta = (\mu,\phi,\sigma_h)$ requires integrating the entire latent path out of
-the joint density,
-
+Give the two volatility levels equal prior probability. After observing
+a zero return, Bayes' rule assigns the low-volatility state probability
+$3/(3+1)=0.75$. For a return of 4%, the likelihood ratio in favour of
+the high-volatility state is
 $$
-p(r_{1:T} \mid \theta)
-= \int \prod_{t=1}^{T} p(r_t \mid h_t)\; p(h_{1:T} \mid \theta)\; \mathrm{d}h_{1:T},
-\qquad p(r_t \mid h_t) = \mathcal{N}(0, e^{h_t}),
+\frac{p(0.04\mid \sigma=0.03)}{p(0.04\mid \sigma=0.01)}
+=\frac{0.01}{0.03}
+\exp\left[\frac{0.04^2}{2}
+\left(\frac1{0.01^2}-\frac1{0.03^2}\right)\right]
+\approx 408.
 $$
+Its posterior probability is then about 0.998. These are two candidate
+states for a hand calculation, not the continuous SV model we will fit.
+The lesson is that the likelihood provides evidence about scale without
+observing scale directly.
 
-an integral of dimension $T$ with no closed form for any $T > 1$. In a linear
-Gaussian state-space model the Kalman filter computes exactly this integral
-recursively, because each step multiplies a Gaussian prior over the state by a
-measurement density that is Gaussian in the state, and the product of two
-Gaussians is again Gaussian. Here the measurement density is Gaussian in $r_t$ but
-its log kernel is not quadratic in $h_t$, so the recursion that every model in this
-course has relied on so far cannot close.
-
-::: {.callout-note collapse="true"}
-## Derivation: why the measurement density will not sit still for a Kalman update
-
-Write the log measurement kernel as $\ell(h_t) = -h_t/2 - r_t^2 e^{-h_t}/2$. Its
-first derivative is $\ell'(h_t) = \big[-1 + r_t^2 e^{-h_t}\big]/2$ and its second
-derivative is $\ell''(h_t) = -r_t^2 e^{-h_t}/2$, which is itself a function of
-$h_t$ rather than a constant. A Gaussian log density has curvature equal to minus
-the reciprocal of its variance everywhere, a fixed number; here the curvature
-vanishes as $h_t \to \infty$ and grows without bound as $h_t \to -\infty$, so no
-single Gaussian matches $\ell$ at every point, which is what "not quadratic" means
-concretely.
-
-Contrast this with the state equation. Writing $h_t = \alpha + \phi h_{t-1} +
-\sigma_h\zeta_t$ with $\alpha = \mu(1-\phi)$, the two transition densities linking
-$h_t$ to its neighbours have log kernels $-(h_t-\alpha-\phi h_{t-1})^2/(2\sigma_h^2)$
-and $-(h_{t+1}-\alpha-\phi h_t)^2/(2\sigma_h^2)$, each exactly quadratic in $h_t$
-with constant curvature $-1/\sigma_h^2$ and $-\phi^2/\sigma_h^2$. Two quadratics
-add to a quadratic, so the two transition densities alone multiply to a Gaussian in
-$h_t$. It is only the measurement density that refuses to cooperate, and it is
-exactly this piece that a Kalman update would need to fold in.
-:::
-
-The result is not an artefact of one model. The moment $r_t$ enters the return
-equation through a random variance rather than a random mean, every model with that
-feature loses the Kalman filter, because a random scale rather than a random shift
-is what makes the measurement density non-Gaussian in the state. The chunk below
-makes the shape concrete for the actual returns of this chapter, illustrating a
-single state's target density under a stand-in Gaussian belief about its
-neighbours, $h_t \sim \mathcal{N}(m_0, 1)$ with $m_0$ set to twice the log of the
-sample's daily standard deviation, at three representative absolute return sizes:
-a typical day, a large day and an extreme day.
+One squared return is particularly noisy. Conditional on today's variance,
+$r_t^2/e^{h_t}=z_t^2$ has a chi-squared distribution with one degree of
+freedom. Thus $E[r_t^2\mid h_t]=e^{h_t}$, but
+$\operatorname{Var}(r_t^2\mid h_t)=2e^{2h_t}$.
+Squaring a return gives an unbiased measurement of conditional variance
+under this model, not an accurate measurement on every date.
 
 ```{python}
-m0 = 2 * np.log(r.std(ddof=1))
-h_grid = np.linspace(m0 - 6, m0 + 6, 4000)
-r_levels = {"typical day, median |r|": np.median(np.abs(r)),
-            "large day, 90th pct |r|": np.quantile(np.abs(r), 0.90),
-            "extreme day, 99th pct |r|": np.quantile(np.abs(r), 0.99)}
-
+#| label: fig-sv-observation
+#| fig-cap: "A return is a noisy measurement of scale. The same observation has different likelihood under low and high daily volatility."
+#| code-fold: true
+grid = np.linspace(-.08, .08, 500)
 fig, ax = plt.subplots()
-summary = []
-for (lbl, rv), col in zip(r_levels.items(), ["C0", "C1", "C3"]):
-    log_kernel = -h_grid / 2 - rv**2 * np.exp(-h_grid) / 2 - (h_grid - m0) ** 2 / 2
-    dens = np.exp(log_kernel - log_kernel.max())
-    dens /= np.trapezoid(dens, h_grid)
-    mean = np.trapezoid(dens * h_grid, h_grid)
-    var = np.trapezoid(dens * (h_grid - mean) ** 2, h_grid)
-    skew = np.trapezoid(dens * (h_grid - mean) ** 3, h_grid) / var ** 1.5
-    summary.append((lbl, rv, var, skew))
-    ax.plot(h_grid, dens, color=col, label=f"{lbl} (|r| = {rv:.4f})")
-ax.axvline(m0, color="grey", ls=":", lw=1, label="stand-in neighbour belief")
-ax.set_xlabel("log variance $h_t$"); ax.set_ylabel("density")
-ax.set_title("One day's evidence reshapes belief about today's variance")
-ax.legend(fontsize=7)
-plt.tight_layout(); plt.show()
-
-for lbl, rv, var, skew in summary:
-    print(f"{lbl}: variance {var:.3f}, skewness {skew:+.3f}")
+ax.plot(100*grid, stats.norm.pdf(grid, 0, .01)/100, color=BLUE, label="Daily SD 1%")
+ax.plot(100*grid, stats.norm.pdf(grid, 0, .03)/100, color=BROWN, label="Daily SD 3%")
+ax.set(xlabel="Daily return (%)", ylabel="Density per percentage point")
+ax.grid(axis="y", alpha=.3)
+ax.legend(loc="upper center", bbox_to_anchor=(.5, -.15), ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
 ```
 
-The three curves are the same neighbour belief updated by three different single
-observations, and none of them is symmetric. On a typical day the update barely
-tilts the density, leaving a skewness of $0.121$; on a large day the skewness rises
-to $0.294$ and the spread narrows from a variance of $0.856$ to $0.556$, because a
-big move is informative about variance and the neighbour belief no longer dominates;
-on the most extreme day in the tails of the sample the skewness reaches $0.354$ and
-the variance falls to $0.370$. A single return sharpens belief about that day's
-variance and skews it to the right in log terms, exactly the asymmetry a Gaussian
-cannot produce and exactly what R-12.1 predicts.
+## Formal framework and derivation {#sec-methodology}
 
-## Methodology: an exact sampler for an intractable path {#sec-methodology}
+### Why introduce a hidden process?
 
-The repair is to stop pretending the integral in R-12.1 can be evaluated and
-instead sample the joint posterior of the path and the parameters directly, block
-by block, in the Metropolis-within-Gibbs spirit of Lecture 5. Because the state
-equation is a first-order Markov chain, the full conditional of a single date
-depends only on its two neighbours and the return observed that day, which is
-enough local structure to build an exact sampler even though the joint likelihood
-has none.
+A rolling variance smooths squared returns over a chosen window. It is
+a useful descriptive baseline, but the window does not itself specify
+how uncertainty about volatility evolves. An SV model supplies a
+probability law for that evolution. GARCH instead makes conditional
+variance a function of past observations and past conditional variances;
+SV gives the variance process its own innovation.
 
-### Result R-12.2: the full conditional of a single log-volatility
+The following simulation separates the hidden daily standard deviation
+from the returns it generates. A small return can occur while risk is
+high, and a large return can occur while risk is moderate. That is why
+we infer a distribution for the path rather than equating risk with
+the most recent absolute return.
 
-The full conditional of an interior date factorises as
+```{python}
+#| label: fig-sv-hidden-path
+#| fig-cap: "Simulated daily returns and their generating volatility. Absolute returns fluctuate much more than the underlying risk level."
+#| code-fold: true
+simulation_rng = np.random.default_rng(SEED + 10)
+SIM_T = 250
+sim_mu, sim_phi, sim_sigma_h = np.log(0.015**2), 0.97, 0.2
+sim_h = np.empty(SIM_T)
+sim_h[0] = simulation_rng.normal(
+    sim_mu, sim_sigma_h / np.sqrt(1 - sim_phi**2)
+)
+for t in range(1, SIM_T):
+    sim_h[t] = (
+        sim_mu + sim_phi * (sim_h[t - 1] - sim_mu)
+        + sim_sigma_h * simulation_rng.normal()
+    )
+sim_returns = np.exp(sim_h / 2) * simulation_rng.normal(size=SIM_T)
+fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+axes[0].plot(sim_returns * 100, color=GREY, lw=0.9)
+axes[0].set_ylabel("Daily return (%)")
+axes[1].plot(np.abs(sim_returns) * 100, color=GREY, alpha=0.5,
+             label="Absolute return")
+axes[1].plot(np.exp(sim_h / 2) * 100, color=BLUE, label="True volatility")
+axes[1].set(xlabel="Trading day", ylabel="Daily scale (%)")
+for ax in axes:
+    ax.grid(axis="y", alpha=0.3)
+axes[1].legend(loc="upper center", bbox_to_anchor=(0.5, -0.2),
+               ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
+```
 
+### Specify the return and state models
+
+For demeaned returns or a zero-mean approximation, write
+
+$$r_t=e^{h_t/2}z_t,\quad z_t\sim N(0,1),\qquad
+h_t=\mu+\phi(h_{t-1}-\mu)+\eta_t,\quad\eta_t\sim N(0,\sigma_h^2).$$
+
+Here $h_t$ is **log variance**, and $e^{h_t/2}$ is volatility.
+Assume independent shocks and $|\phi|<1$. A stationary initial state has
+$h_1\sim N(\mu,\sigma_h^2/(1-\phi^2))$.
+
+The exponential ensures a positive variance even though $h_t$ can be
+any real number. Multiplying a unit-variance shock by $e^{h_t/2}$
+gives conditional variance $e^{h_t}$; this explains the factor of one
+half in the observation equation.
+
+| Quantity | Interpretation |
+|:--|:--|
+| $\mu$ | Long-run mean of log variance |
+| $\phi$ | Persistence of deviations in log variance |
+| $\sigma_h$ | Standard deviation of innovations to log variance |
+| $e^{h_t/2}$ | Conditional return standard deviation at date $t$ |
+
+Do not confuse $\sigma_h$ with return volatility: it describes how
+volatility itself changes. Likewise $e^{\mu/2}$ is the stationary median
+volatility, not its mean. If $v_h=\sigma_h^2/(1-\phi^2)$, lognormal
+moments give $E[e^{h_t/2}]=e^{\mu/2+v_h/8}$.
+Returns measured in percent rather than decimals shift log variance by
+$2\log(100)$, so the prior for $\mu$ must use the same units as the data.
+
+Taking expectations in the state equation gives
+$$E[h_{t+k}\mid h_t,\theta]=\mu+\phi^k(h_t-\mu),$$
+where $\theta=(\mu,\phi,\sigma_h^2)$.
+Persistence governs how long a risk episode lasts, not the sign of returns.
+
+```{python}
+#| label: fig-sv-persistence
+#| fig-cap: "Expected log-variance deviations following the same unit innovation. Higher persistence makes the disturbance fade more slowly."
+#| code-fold: true
+horizons = np.arange(61)
+fig, ax = plt.subplots()
+for persistence, color in [(0.8, GREY), (0.95, BROWN), (0.99, BLUE)]:
+    ax.plot(horizons, persistence**horizons, color=color,
+             label=f"Persistence {persistence:.2f}")
+ax.set(xlabel="Trading days after the innovation",
+       ylabel="Expected log-variance deviation")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17),
+           ncol=3, frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+### Derive the observation likelihood and posterior
+
+Conditional on $h_t$, a Normal density has standard deviation
+$e^{h_t/2}$. Substituting it into the usual density gives
 $$
-p(h_t \mid h_{t-1}, h_{t+1}, r_t, \theta)
-\;\propto\; p(r_t \mid h_t)\, p(h_t \mid h_{t-1})\, p(h_{t+1} \mid h_t),
+p(r_t\mid h_t)=\frac1{\sqrt{2\pi}}e^{-h_t/2}
+\exp\left(-\frac{r_t^2}{2e^{h_t}}\right).
 $$
+The first factor penalises spreading probability too widely; the second
+penalises explaining a large return with too little variance.
+The observation log likelihood is
 
-and the two transition factors alone multiply to a Gaussian with
+$$\log p(r_t\mid h_t)=-\tfrac12h_t-\tfrac12r_t^2e^{-h_t}+\text{constant}.$$
 
+It is not quadratic in $h_t$, so the exact Gaussian Kalman correction does
+not apply. The joint posterior is nevertheless explicit up to a constant:
+
+$$p(h_{1:T},\mu,\phi,\sigma_h^2\mid r)
+\propto\prod_t p(r_t\mid h_t)\,p(h_1\mid\mu,\phi,\sigma_h^2)
+\prod_{t=2}^T p(h_t\mid h_{t-1},\mu,\phi,\sigma_h^2)
+p(\mu,\phi,\sigma_h^2).$$
+
+This factorisation is our sampling recipe: draw the hidden path conditional
+on parameters and returns, then draw parameters conditional on the path.
+Knowing the path turns the state equation into a regression. Knowing the
+parameters still leaves a non-Gaussian problem for the hidden states.
+We do not need the normalising constant of the joint posterior to perform
+these updates.
+
+### Derive a single-state conditional
+
+For an interior date, multiply the transitions involving $h_t$ and collect
+its quadratic terms. Conditional on neighbours, their Normal kernel has
+
+two squared deviations:
 $$
-h_t^\ast = \frac{\alpha(1-\phi) + \phi\,(h_{t-1}+h_{t+1})}{1+\phi^2},
+[h_t-\mu-\phi(h_{t-1}-\mu)]^2
++[h_{t+1}-\mu-\phi(h_t-\mu)]^2.
+$$
+The coefficient on $h_t^2$ is $1+\phi^2$. Equating the linear term to
+the linear term in $(1+\phi^2)(h_t-m_t)^2$ yields
+
+$$v_t=\frac{\sigma_h^2}{1+\phi^2},\qquad
+m_t=\mu+\frac{\phi[(h_{t-1}-\mu)+(h_{t+1}-\mu)]}{1+\phi^2}.$$
+
+Consequently
+
+$$p(h_t\mid\text{rest})\propto
+\exp\left[-\frac{(h_t-m_t)^2}{2v_t}\right]
+\exp\left[-\frac{h_t+r_t^2e^{-h_t}}2\right].$$
+
+The first factor borrows information from neighbours; the second uses today's
+return. A proposal from $N(m_t,v_t)$ cancels the first factor in an independence
+MH ratio, leaving the observation-likelihood ratio. This is a simple valid
+sampler, though highly persistent states can mix slowly.
+
+At the final date use $m_T=\mu+\phi(h_{T-1}-\mu)$, $v_T=\sigma_h^2$.
+Under the stationary initial distribution, the first date conditional on
+$h_2$ has $m_1=\mu+\phi(h_2-\mu)$ and $v_1=\sigma_h^2$.
+Endpoint conditionals cannot be replaced by the interior formula.
+
+```{python}
+#| label: fig-sv-state-update
+#| fig-cap: "One state update: neighbouring states supply a Gaussian density in log variance, and today's return reweights it. Curves are normalised on the displayed log-variance grid."
+#| code-fold: true
+h_grid = np.linspace(-12, -5, 700)
+neighbour_mean, neighbour_sd = np.log(0.015**2), 0.6
+neighbour_density = stats.norm.pdf(h_grid, neighbour_mean, neighbour_sd)
+fig, ax = plt.subplots()
+ax.plot(h_grid, neighbour_density, color=GREY, linestyle=":",
+         label="Neighbours only")
+for observed_return, color in [(0.005, BLUE), (0.04, BROWN)]:
+    log_density = (
+        stats.norm.logpdf(h_grid, neighbour_mean, neighbour_sd)
+        - 0.5 * (h_grid + observed_return**2 * np.exp(-h_grid))
+    )
+    density = np.exp(log_density - log_density.max())
+    density /= np.sum(density) * (h_grid[1] - h_grid[0])
+    ax.plot(h_grid, density, color=color,
+             label=f"After return {100 * observed_return:.1f}%")
+ax.set(xlabel="Log variance", ylabel="Density")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17),
+           ncol=3, frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+### The JPR construction used in the exercise
+
+Transform to variance $s=e^h$. The Jacobian is $dh/ds=1/s$, so the target
+density with respect to $ds$ is
+
+$$p(s\mid\text{rest})\propto
+s^{-3/2}\exp\left[-\frac{r_t^2}{2s}
+-\frac{(\log s-m_t)^2}{2v_t}\right].$$
+
+Approximate the lognormal transition factor by an Inverse-Gamma with matching
+mean and variance. For $s\sim\operatorname{Lognormal}(m,v)$,
+$E[s]=e^{m+v/2}$ and $\operatorname{Var}(s)=(e^v-1)e^{2m+v}$.
+Matching these with IG moments gives
+
+$$a=2+\frac1{e^v-1},\qquad b=(a-1)e^{m+v/2}.$$
+
+Multiplying that approximation by the return likelihood suggests the proposal
+$q(s)=IG(a+1/2,b+r_t^2/2)$. The approximation alone does not give an exact draw.
+
+Why choose this proposal? It already combines the neighbours' information
+with today's squared return. A large observation raises the proposal's
+scale before the accept-reject step starts. The earlier Gaussian proposal
+uses neighbours alone and asks the acceptance step to do all the adjustment
+for the observation.
+
+The essential distinction is between **an approximate proposal** and
+**an approximate posterior target**. The exercise uses the approximation
+to propose efficiently, then corrects it. Accepting every inverse-Gamma
+proposal would generally sample the wrong conditional.
+
+::: {.callout-note collapse="true"}
+## Optional derivation: the accept-reject and MH correction {.unnumbered}
+
+For unnormalised target $p$, choose $c>0$ and set
+$f(s)=\min\{p(s),cq(s)\}$. Repeatedly propose from $q$ and accept with
+$\min\{1,p(s)/(cq(s))\}$; accepted candidates have density proportional to $f$.
+Since this blanket need not globally dominate $p$, correct the candidate with
+MH probability
+$\min\{1,p(s')f(s)/(p(s)f(s'))\}$.
+All ratios must use the same measure, here $ds$. This correction makes the
+chain target the desired conditional even though the moment match is approximate.
+:::
+
+For parameter updates, include the stationary initial-state density too.
+Treating only the transitions as an ordinary regression and ignoring that density
+changes the specified model. The exercise implements its correction explicitly.
+
+### Learn persistence and the level of volatility
+
+Write $\alpha=(1-\phi)\mu$. Conditional on the path, the transitions are
+$$h_t=\alpha+\phi h_{t-1}+\eta_t,\qquad t=2,\ldots,T.$$
+Stack the lagged states and a column of ones in $Z$, put the current
+states in $h_+=(h_2,\ldots,h_T)^\top$, and define
+$g=(\alpha,\phi)^\top$. With a Normal prior $N(g_0,G_0)$ restricted
+to $|\phi|<1$, the transition-only conditional is a truncated Normal:
+$$
+G_1=\left(G_0^{-1}+\frac{Z^\top Z}{\sigma_h^2}\right)^{-1},
 \qquad
-v_t^\ast = \frac{\sigma_h^2}{1+\phi^2},
+g_1=G_1\left(G_0^{-1}g_0+\frac{Z^\top h_+}{\sigma_h^2}\right).
 $$
-
-with $\alpha = \mu(1-\phi)$, and the simplified means $\alpha + \phi h_{T-1}$ with
-variance $\sigma_h^2$ at $t=T$, and $\mu(1-\phi)+\phi h_2$ with the same variance at
-$t=1$, using the stationary prior in place of a missing predecessor. Proposing a
-candidate from this Gaussian and correcting with a Metropolis step makes the
-transition factors cancel out of the acceptance ratio, which collapses to the
-measurement likelihood ratio alone,
-
+This is the precision-addition calculation from Bayesian regression.
+However, the stationary model also contains $p(h_1\mid g,\sigma_h^2)$,
+which depends on both $\alpha$ and $\phi$. Propose $g'$ from the
+truncated Normal and accept with probability
 $$
-\log \alpha_{\text{MH}}
-= -\tfrac12\big(h_t^{\text{new}} - h_t^{\text{old}}\big)
-- \tfrac12\, r_t^2\Big(e^{-h_t^{\text{new}}} - e^{-h_t^{\text{old}}}\Big),
+\min\left\{1,\frac{p(h_1\mid g',\sigma_h^2)}
+{p(h_1\mid g,\sigma_h^2)}\right\}.
 $$
+The transition likelihood and coefficient prior cancel against the
+proposal ratio. The initial-state contribution remains.
+The exercise uses this update rather than dropping the first state.
 
-truncated above at zero. Because the conditional of $h_t$ involves only its
-neighbours, states at odd dates are conditionally independent given the states at
-even dates, so an entire half of the path can be updated in one vectorised sweep.
+For an independent prior $\sigma_h^2\sim IG(a_0,b_0)$, the conditional is
+$$
+\sigma_h^2\mid h,g\sim IG\left(
+a_0+\frac T2,\;
+b_0+\frac12\left[
+\sum_{t=2}^T(h_t-\alpha-\phi h_{t-1})^2
++(1-\phi^2)(h_1-\mu)^2\right]\right).
+$$
+Our convention is $p(s)\propto s^{-a-1}\exp(-b/s)$.
+There are $T-1$ transition residuals and one initial-state contribution,
+explaining the $T/2$ in the shape. Finally transform each parameter
+draw back to $\mu=\alpha/(1-\phi)$.
 
-R-12.2 is the general statement that makes single-move sampling possible at all.
-It says nothing yet about how good the Gaussian proposal is as a stand-in for the
-true, non-Gaussian target, only that whatever gap remains is entirely repaired by
-the acceptance step; a poor proposal shows up as a low acceptance rate rather than
-as a wrong answer. Jacquier, Polson and Rossi refine the proposal itself so that
-the gap the Metropolis step has to repair is small even when a return is extreme,
-which is the content of R-12.3.
+A prior on $(\alpha,\phi)$ induces a prior on $(\mu,\phi)$; they are not
+interchangeable specifications. Near $\phi=1$, a modest change in
+$\alpha$ can imply a large change in the long-run mean. Inspect posterior
+dependence rather than reporting parameter means alone. These details
+support the exercise; the main argument is the alternation between
+path and parameter draws.
 
-::: {.callout-note collapse="true"}
-## Derivation: completing the square, and why the acceptance ratio collapses
+### Connect back to the Kalman filter: the mixture idea
 
-Expanding the two transition log kernels in $h_t$, $-(h_t-\alpha-\phi h_{t-1})^2 -
-(h_{t+1}-\alpha-\phi h_t)^2$, all divided by $2\sigma_h^2$, and collecting the
-quadratic and linear terms in $h_t$ gives a Gaussian with precision
-$(1+\phi^2)/\sigma_h^2$ and mean solving
-$(1+\phi^2)h_t^\ast/\sigma_h^2 = \big[\alpha(1-\phi)+\phi(h_{t-1}+h_{t+1})\big]/\sigma_h^2$,
-which is the displayed $h_t^\ast$ and $v_t^\ast$. At $t=T$ only the incoming
-transition applies, giving mean $\alpha+\phi h_{T-1}$ and variance $\sigma_h^2$
-directly; at $t=1$ the stationary initial density
-$h_1 \sim \mathcal{N}\big(\mu, \sigma_h^2/(1-\phi^2)\big)$ plays the role of the
-missing predecessor and combines with the one transition to $h_2$ in the same way.
-
-For the acceptance ratio, write the full target as $p(r_t\mid h_t)\,g(h_t)$ with
-$g$ the Gaussian just derived, and propose $h_t^{\text{new}} \sim g$. The
-Metropolis acceptance probability for an independence proposal is
-$\min\{1, [\pi(h^{\text{new}})q(h^{\text{old}})] / [\pi(h^{\text{old}})q(h^{\text{new}})]\}$
-with $\pi = p(r_t\mid h_t)g(h_t)$ and $q=g$; the two factors of $g$ appear once in
-the numerator and once in the denominator and cancel exactly, leaving the ratio of
-$p(r_t\mid h_t)$ alone, which is the displayed $\log\alpha_{\text{MH}}$.
-:::
-
-### Result R-12.3: an accept-reject construction that samples the exact conditional, and the parameter blocks that complete the sweep
-
-Working instead with the variance scale $s_t = e^{h_t}$, its conditional density
-with respect to $\mathrm{d}s_t$ has kernel
-$s_t^{-3/2}\exp\big[-r_t^2/(2s_t) - (\log s_t - m_t)^2/(2v_t)\big]$, the same target
-as R-12.2 with a Jacobian attached and $m_t, v_t$ standing for $h_t^\ast, v_t^\ast$.
-Matching the mean and variance of a $\text{Lognormal}(m_t,v_t)$ to an inverse gamma
-gives a blanket $q = \text{IG}(a_L, b_L)$ with
-$a_L = 2 + 1/(e^{v_t}-1)$ and $b_L = (a_L-1)e^{m_t+v_t/2}$, and multiplying that
-blanket by the return kernel gives the tractable proposal
-$q' = \text{IG}(a_L + \tfrac12,\, b_L + r_t^2/2)$. An accept-reject step against
-$cq'$ followed by one further Metropolis correction draws exactly from the target
-for any finite $c$, matched here at the mode of the target rather than as a strict
-upper bound, because the Metropolis correction repairs whatever the accept-reject
-step leaves imperfect. This is the construction due to Jacquier, Polson and Rossi,
-and it is what makes single-move sampling of a whole eighteen-year path practical
-rather than merely correct in principle.
-
-The path is only half of the unknowns. Writing the state equation as a regression,
-$h_t = \alpha + \phi h_{t-1} + \sigma_h\zeta_t$, puts $(\alpha,\phi)$ in exactly the
-Normal linear regression setting of Lecture 2, and $\sigma_h^2$ follows the same
-inverse-gamma conditional, once the stationary initial state is added as one extra
-observation.
-
-::: {.callout-note collapse="true"}
-## Derivation: the moment-matched blanket, and the state-equation conjugate updates
-
-Since a lognormal has relative variance $e^{v_t}-1$ while an inverse gamma
-$\text{IG}(a,b)$ has relative variance $1/(a-2)$, setting them equal gives
-$a_L = 2+1/(e^{v_t}-1)$; matching means, $b_L/(a_L-1) = e^{m_t+v_t/2}$, gives the
-displayed $b_L$. Multiplying the return kernel $s_t^{-1}\exp(-r_t^2/(2s_t))$, which
-is itself proportional to an $\text{IG}(1/2, r_t^2/2)$ kernel with respect to
-$\mathrm{d}s_t$, by the blanket $q$ gives a product of two inverse-gamma kernels in
-the same variable, which is again inverse gamma with shapes and scales added,
-$q' = \text{IG}(a_L+\tfrac12,\, b_L+r_t^2/2)$. The accept-reject step retains a
-candidate from $q'$ with probability $\min\{1, p(s)/(cq'(s))\}$; its output has
-density proportional to $f(s)=\min\{p(s), cq'(s)\}$, which need not equal $p$
-itself, so a further independence Metropolis step with ratio $p(s')f(s)/(p(s)f(s'))$
-removes whatever discrepancy $f$ still carries, and the two steps together are
-exact regardless of how $c$ is chosen, provided $c>0$.
-
-For the parameter blocks, stack $Z = [\mathbf{1}, h_{1:T-1}]$ and $y = h_{2:T}$,
-give $\gamma=(\alpha,\phi)$ a Normal prior $\mathcal{N}(g_0, G_0)$ truncated to
-$|\phi|<1$, and complete the square exactly as in Lecture 2 to get the Gaussian
-posterior $\gamma \mid \sigma_h^2, h \sim \mathcal{N}(g_1, G_1)$ with
-$G_1 = (G_0^{-1}+Z^\top Z/\sigma_h^2)^{-1}$ and
-$g_1 = G_1(G_0^{-1}g_0 + Z^\top y/\sigma_h^2)$; because the truncation and the
-stationary initial-state density $h_1 \sim \mathcal{N}(\alpha/(1-\phi),
-\sigma_h^2/(1-\phi^2))$ are not part of the Normal-regression likelihood, a
-candidate drawn from this Gaussian is accepted with an extra Metropolis step whose
-ratio is the ratio of the two candidates' stationary initial-state densities alone,
-since everything else cancels. Finally
-$\sigma_h^2 \mid \gamma, h \sim \text{IG}\big(c_0+T/2,\, d_0 + \tfrac12[\lVert
-y-Z\gamma\rVert^2 + (1-\phi^2)(h_1-\alpha/(1-\phi))^2]\big)$, the usual
-inverse-gamma update with one extra quadratic term contributed by the initial
-state, so that every block conditions on the same stationary starting density
-rather than only some of them.
-:::
-
-Together R-12.2 and R-12.3 turn an intractable integral into a sequence of exact,
-cheap draws: a Gaussian-proposal Metropolis step for the bulk of the path, an
-accept-reject and Metropolis construction for the full non-Gaussian conditional
-when precision matters, and a Normal-Inverse-Gamma block for the parameters that
-govern persistence and the scale of volatility shocks. What the sampler cannot fix
-is how slowly it explores a highly persistent path, and that is a cost paid in
-computation rather than in correctness, as the empirical section shows directly.
-
-## Data: the daily excess return on the US market, 2005-2022 {#sec-data}
-
-The chapter's dataset is the daily Fama-French factor file,
-`data/ff_factors_daily.parquet`, and the single series used anywhere in this
-chapter is the excess return on the US market portfolio. The window, January 2005
-to December 2022, is chosen so that the sample contains more than one crisis rather
-than one: the financial crisis of 2008 and 2009, the flash crash of May 2010, the
-euro area and downgrade turmoil of August 2011, the pandemic crash of March 2020
-and the inflation and rate shock of 2022. Eighteen years is also short enough that
-the whole sampler, path and parameters together, runs in about ten seconds, so
-nothing in this chapter needs subsampling or a shortened chain. The series is
-demeaned before use, since the model has no intercept in its measurement equation
-and leaving one in would push the mean into the volatility state.
+Square the observation equation and take logs:
+$$\log r_t^2=h_t+\log z_t^2.$$
+The observation is now linear in the hidden state, but its error is
+log chi-squared with one degree of freedom, not Normal. Taking logs
+does not recover the assumptions of Chapter 8.
+Exactly zero recorded returns require explicit numerical treatment
+in a log-squared implementation; the original return likelihood avoids
+that transformation.
 
 ```{python}
-#| label: fig-market-returns
-#| fig-cap: "Daily US market excess return, January 2005 to December 2022, with the single worst and best day marked."
-fig, ax = plt.subplots(figsize=(9, 3.6))
-ax.plot(dates, r, lw=0.4, color="grey")
-i_min, i_max = int(r.argmin()), int(r.argmax())
-ax.plot(dates[i_min], r[i_min], "o", color="firebrick", ms=5)
-ax.plot(dates[i_max], r[i_max], "o", color="seagreen", ms=5)
-ax.set_xlabel("date"); ax.set_ylabel("daily excess return")
-ax.set_title("The single dataset used throughout this chapter")
-plt.tight_layout(); plt.show()
-
-print(f"{T} trading days, {dates[0]:%Y-%m-%d} to {dates[-1]:%Y-%m-%d}")
-print(f"mean daily excess return removed {window['mkt_rf'].mean():.6f}")
-print(f"standard deviation {r.std(ddof=1):.6f} ({r.std(ddof=1)*np.sqrt(252):.2%} annualised)")
-print(f"excess kurtosis {stats.kurtosis(r):.2f}, skewness {stats.skew(r):+.3f}")
-print(f"worst day {r.min():.4f} on {dates[i_min]:%Y-%m-%d}, "
-      f"best day {r.max():.4f} on {dates[i_max]:%Y-%m-%d}")
-```
-
-The sample is $4{,}531$ trading days. Its unconditional standard deviation is
-$1.257\%$ a day, an annualised $19.95\%$, and its excess kurtosis is $11.14$ with a
-skewness of $-0.314$, both far from the zero a Gaussian return would deliver. The
-worst day is $-12.05\%$ on 16 March 2020, marked in red, and the best is $11.32\%$
-on 13 October 2008, marked in green, and it is not a coincidence that the two
-largest moves of either sign sit inside the two largest crises: fat tails and
-volatility clustering are two descriptions of the same phenomenon, which is
-precisely what the stochastic-volatility model is built to connect.
-
-## Empirical analysis: fitting the model to eighteen years of daily returns {#sec-empirical}
-
-```{python}
-from scipy.special import gammaln
-
-def log_variance_target(log_s, r2, mean, variance):
-    """Conditional variance density evaluated at log(s), with respect to ds."""
-    return -1.5*log_s-r2*np.exp(-log_s)/2-(log_s-mean)**2/(2*variance)
-
-def log_ig_at_log(log_s, shape, scale):
-    """Inverse-Gamma log density with respect to ds, evaluated at log(s)."""
-    return shape*np.log(scale)-gammaln(shape)-(shape+1)*log_s-scale*np.exp(-log_s)
-
-def jpr_update(old, r2, mean, variance, rng):
-    """JPR accept-reject/MH update using a moment-matched inverse-Gamma blanket."""
-    a_ln = 2+1/np.expm1(variance)
-    b_ln = (a_ln-1)*np.exp(mean+variance/2)
-    shape, scale = a_ln+.5, b_ln+r2/2
-    log_c = (log_variance_target(mean,r2,mean,variance)
-             -log_ig_at_log(mean,shape,scale))
-    proposal = old.copy()
-    pending = np.arange(len(old))
-    while len(pending):
-        candidate = -np.log(rng.gamma(shape[pending],1/scale[pending]))
-        lp = log_variance_target(candidate,r2[pending],mean[pending],variance[pending])
-        lq = log_ig_at_log(candidate,shape[pending],scale[pending])
-        keep = np.log(rng.random(len(pending))) < np.minimum(0,lp-log_c[pending]-lq)
-        proposal[pending[keep]] = candidate[keep]
-        pending = pending[~keep]
-    old_p = log_variance_target(old,r2,mean,variance)
-    new_p = log_variance_target(proposal,r2,mean,variance)
-    old_f = np.minimum(old_p,log_c+log_ig_at_log(old,shape,scale))
-    new_f = np.minimum(new_p,log_c+log_ig_at_log(proposal,shape,scale))
-    accept = np.log(rng.random(len(old))) < new_p-old_p+old_f-new_f
-    return np.where(accept,proposal,old), int(accept.sum())
-
-def initial_log_density(h0, alpha, phi, s2):
-    """Stationary initial-state density, omitting a parameter-independent constant."""
-    return float(.5*np.log(1-phi**2)-.5*np.log(s2)
-                 -(1-phi**2)*(h0-alpha/(1-phi))**2/(2*s2))
-
-g0, G0 = np.array([0.0, 0.9]), np.diag([10.0, 0.25])
-G0_inv = np.linalg.inv(G0)
-c0, d0 = 6.0, 0.20                       # prior mean of sigma_h^2 equals 0.04
-n_iter, burn = 10_000, 3000
-h, phi, s2 = np.full(T, np.log(r.var())), 0.9, 0.05
-alpha = np.log(r.var()) * (1 - phi)
-even, odd, r2 = np.arange(0, T, 2), np.arange(1, T, 2), r**2
-par_draws, h_draws = np.empty((n_iter - burn, 3)), np.empty((n_iter - burn, T))
-acc = n_prop = 0
-
-for it in range(n_iter):
-    mu = alpha / (1 - phi)
-    for grp in (even, odd):              # two conditionally independent half-sweeps
-        m, v = np.empty(T), np.full(T, s2)
-        m[1:-1] = (alpha * (1 - phi) + phi * (h[:-2] + h[2:])) / (1 + phi**2)
-        v[1:-1] = s2 / (1 + phi**2)
-        m[0], m[-1] = mu * (1 - phi) + phi * h[1], alpha + phi * h[-2]
-        h[grp], accepted = jpr_update(h[grp], r2[grp], m[grp], v[grp], rng)
-        acc += accepted
-        n_prop += grp.size
-    Z, y = np.column_stack([np.ones(T - 1), h[:-1]]), h[1:]
-    G1 = np.linalg.inv(G0_inv + Z.T @ Z / s2)
-    L = np.linalg.cholesky(G1)
-    g1 = G1 @ (G0_inv @ g0 + Z.T @ y / s2)
-    cand = g1 + L @ rng.standard_normal(2)
-    while abs(cand[1]) >= 1:
-        cand = g1 + L @ rng.standard_normal(2)
-    log_ratio = (initial_log_density(h[0], cand[0], cand[1], s2)
-                 - initial_log_density(h[0], alpha, phi, s2))
-    if np.log(rng.random()) < log_ratio:
-        alpha, phi = cand
-    e = y - Z @ np.array([alpha, phi])
-    initial_ss = (1-phi**2)*(h[0]-alpha/(1-phi))**2
-    s2 = 1.0 / rng.gamma(c0 + T/2, 1.0 / (d0 + 0.5*(e @ e + initial_ss)))
-    if it >= burn:
-        par_draws[it - burn] = [alpha / (1 - phi), phi, np.sqrt(s2)]
-        h_draws[it - burn] = h
-
-print(f"kept {par_draws.shape[0]} draws, acceptance rate {acc / n_prop:.3f}")
-```
-
-Seven thousand draws are kept after a burn-in of three thousand, and the reported
-acceptance rate concerns only the final Metropolis correction; the accept-reject
-step inside it also carries a computational cost, and neither a high rate nor a
-completed run by itself establishes good mixing, which the trace below checks
-directly.
-
-```{python}
-def inefficiency(x, lag_max=250):
-    z = x - x.mean()
-    ac = np.correlate(z, z, "full")[len(z) - 1:] / (len(z) * z.var())
-    return 1.0 + 2.0 * ac[1:lag_max + 1].sum()
-
-q = np.quantile(par_draws, [0.05, 0.95], axis=0)
-print(pd.DataFrame({
-    "post mean": par_draws.mean(axis=0),
-    "5%": q[0], "95%": q[1],
-    "inefficiency": [inefficiency(par_draws[:, j]) for j in range(3)],
-}, index=["mu", "phi", "sigma_h"]).round(4))
-
-phi_hat, sig_hat, mu_hat = par_draws[:, 1].mean(), par_draws[:, 2].mean(), par_draws[:, 0].mean()
-print(f"half-life of a volatility shock: {np.log(0.5)/np.log(phi_hat):.1f} days")
-print(f"annualised volatility at the long-run level: {np.exp(mu_hat/2)*np.sqrt(252):.2%}")
-```
-
-Persistence has posterior mean $0.9773$ with a ninety percent credible interval
-from $0.9707$ to $0.9836$, comfortably below the unit root that would make
-volatility shocks permanent. Read as a half-life, a shock to log variance decays by
-half in $30.2$ days, about six trading weeks, which is why a crisis that is over in
-the news is not over in a risk model. The volatility of volatility has posterior
-mean $0.2255$, and the long-run level $\mu$ corresponds to an annualised volatility
-of $13.93\%$, below the unconditional $19.95\%$ of the whole window because the log
-scale means the average log variance sits below the log of the average variance.
-The inefficiency factors, well above one for every parameter, are the warning
-attached to all of this: a sampler that shifts one date at a time moves through the
-posterior's dependence slowly, so seven thousand nominal draws deliver far fewer
-effectively independent ones, an effective sample size of about $2{,}750$ for
-$\mu$ but only around $55$ for the far more persistent $\sigma_h$. Combining the
-two estimated parameters gives a stationary standard deviation of the log variance
-of $\sigma_h/\sqrt{1-\phi^2} = 1.065$, which is the sense in which volatility
-varies over an enormous range in this model: plus or minus two of those is a
-factor of $e^{2\times 1.065}\approx 8.4$ in variance, entirely from the state
-equation and before any single day's return is even observed.
-
-```{python}
-#| label: fig-param-histograms
-#| fig-cap: "Marginal posteriors of persistence and volatility of volatility, from the same retained draws as the summary table."
-fig, (axL, axR) = plt.subplots(1, 2, figsize=(10, 4))
-axL.hist(par_draws[:, 1], bins=40, density=True, color="C1", alpha=0.75)
-axL.set_xlabel(r"$\phi$"); axL.set_ylabel("posterior density"); axL.set_title("Persistence")
-axR.hist(par_draws[:, 2], bins=40, density=True, color="C0", alpha=0.75)
-axR.set_xlabel(r"$\sigma_h$"); axR.set_title("Volatility of volatility")
-plt.tight_layout(); plt.show()
-```
-
-Persistence is left-skewed with a long tail towards lower values and a hard
-economic ceiling at one, while the volatility of volatility is mildly right-skewed;
-neither marginal is well described by its mean alone, which is the first reason to
-report intervals rather than point estimates. The two shapes are a visible
-signature of R-12.2 and R-12.3 at work: $\phi$ is pinned down by how the path as a
-whole moves from date to date, a quantity the accept-reject construction estimates
-only through many correlated single-date draws, while $\sigma_h$ is pinned down by
-the size of those moves and inherits the same dependence, so both histograms are
-smoother summaries of a chain that itself mixes slowly, which the next figure
-shows directly.
-
-```{python}
-#| label: fig-trace-phi
-#| fig-cap: "Retained draws of persistence together with their running mean, showing how slowly the chain settles."
-phi_chain = par_draws[:, 1]
-running_mean_phi = np.cumsum(phi_chain) / np.arange(1, len(phi_chain) + 1)
-
+#| label: fig-sv-log-square-noise
+#| fig-cap: "The log of a squared standard Normal shock has an asymmetric density. A moment-matched Normal does not reproduce its shape."
+#| code-fold: true
+noise_grid = np.linspace(-12, 4, 700)
+log_chi_density = np.exp(
+    0.5 * noise_grid - 0.5 * np.exp(noise_grid) - 0.5 * np.log(2 * np.pi)
+)
 fig, ax = plt.subplots()
-ax.plot(phi_chain, color="C1", lw=0.4, alpha=0.6, label="retained draws of phi")
-ax.plot(running_mean_phi, color="black", lw=1.5, label="running mean")
-ax.set_xlabel("retained iteration"); ax.set_ylabel(r"$\phi$")
-ax.legend(fontsize=9); ax.set_title("Persistence draws mix slowly")
-plt.tight_layout(); plt.show()
+ax.plot(noise_grid, log_chi_density, color=BLUE, label="Log chi-squared")
+ax.plot(noise_grid, stats.norm.pdf(noise_grid, -1.27036, np.pi / np.sqrt(2)),
+         color=BROWN, linestyle="--", label="Moment-matched Normal")
+ax.set(xlabel="Log squared shock", ylabel="Density")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17),
+           ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
 ```
 
-The running mean keeps drifting well into the chain rather than flattening out
-after a few hundred iterations, visual confirmation of the inefficiency factor
-printed above: consecutive draws of $\phi$ carry much less information than
-consecutive independent draws would, which is the price paid for a sampler that
-moves the path one date at a time. None of this calls the answer into question,
-since the reported credible interval already accounts for the dependence through
-the inefficiency-adjusted standard error, but it is the reason ten thousand
-iterations rather than one thousand were budgeted at the start of this section,
-and it is exactly the cost the mixture sampler of the exercise session trades away
-by drawing the whole path in one block instead of one date at a time.
+The Kim–Shephard–Chib approach approximates this error distribution with
+a finite mixture of Normals. Conditional on mixture indicators, subtract
+the relevant component mean and use its variance: the state problem
+becomes linear Gaussian. A simulation smoother can then draw the whole
+path, linking directly back to Chapter 8.
+
+This is an alternative to updating one state at a time. Joint path moves
+can help when neighbouring states are strongly dependent. The Normal
+mixture is an approximation; an exact-target implementation requires an
+appropriate correction. We discuss its principle here, while the exercise
+implements the scheduled JPR construction. Students need not implement
+both algorithms to understand the model.
+
+## Economic application and interpretation {#sec-empirical}
+
+Use daily US market excess returns during 2020. For a short, readable
+illustration, condition on $\mu=\log(0.015^2)$, $\phi=0.97$, $\sigma_h=0.2$.
+These are teaching parameter choices, not posterior estimates. The following
+sampler illustrates the neighbour-Normal proposal; the lab implements JPR and
+also learns the parameters.
 
 ```{python}
-#| label: fig-vol-path
-#| fig-cap: "Posterior mean annualised volatility with a 90% credible band, market excess returns 2005-2022. The six marked points are local peaks at least 90 trading days apart."
-ann = np.sqrt(252)
-vol_draws = ann * np.exp(h_draws / 2)
-vol_mean = vol_draws.mean(axis=0)
-vol_lo, vol_hi = np.quantile(vol_draws, [0.05, 0.95], axis=0)
-
-available = np.ones(T, bool)
-peaks = []
-for i in np.argsort(-vol_mean):
-    if len(peaks) == 6:
-        break
-    if available[i]:
-        peaks.append(i)
-        available[max(0, i - 90):i + 90] = False
-peaks = sorted(peaks)
-
-fig, ax = plt.subplots(figsize=(9, 4.4))
-ax.fill_between(dates, vol_lo, vol_hi, color="C0", alpha=0.25, label="90% credible band")
-ax.plot(dates, vol_mean, color="C0", lw=1.0, label="posterior mean")
-ax.plot(dates[peaks], vol_mean[peaks], "o", color="black", ms=5)
-for i in peaks:
-    ax.annotate(f"{dates[i]:%b %Y}", (dates[i], vol_mean[i]),
-                textcoords="offset points", xytext=(4, 7), fontsize=8)
-ax.set_xlabel("date"); ax.set_ylabel("annualised volatility")
-ax.set_title("Posterior stochastic volatility of the US market, 2005-2022")
-ax.legend(fontsize=9)
-plt.tight_layout(); plt.show()
-
-print(f"calmest day {dates[vol_mean.argmin()]:%Y-%m-%d} at {vol_mean.min():.2%}, "
-      f"most turbulent {dates[vol_mean.argmax()]:%Y-%m-%d} at {vol_mean.max():.2%}")
-print(f"width of the band on the most turbulent day: "
-      f"[{vol_lo[vol_mean.argmax()]:.2%}, {vol_hi[vol_mean.argmax()]:.2%}]")
+#| label: sv-state-sampler
+#| code-fold: true
+daily = pd.read_parquet(DATA / "ff_factors_daily.parquet")
+returns = daily.loc["2020", "mkt_rf"].dropna()
+r = returns.to_numpy()
+mu, phi, state_var = np.log(.015**2), .97, .2**2
+h = np.full(len(r), mu)
+N_ITER, BURN = 1200, 400
+paths = []
+for iteration in range(N_ITER):
+    for t in range(len(r)):
+        if t == 0:
+            mean, variance = mu+phi*(h[1]-mu), state_var
+        elif t == len(r)-1:
+            mean, variance = mu+phi*(h[t-1]-mu), state_var
+        else:
+            mean = mu+phi*(h[t-1]+h[t+1]-2*mu)/(1+phi**2)
+            variance = state_var/(1+phi**2)
+        candidate = rng.normal(mean, np.sqrt(variance))
+        log_ratio = -.5*(candidate-h[t]+r[t]**2*(np.exp(-candidate)-np.exp(-h[t])))
+        if np.log(rng.random()) < min(0., log_ratio):
+            h[t] = candidate
+    if iteration >= BURN:
+        paths.append(h.copy())
+paths = np.array(paths)
 ```
 
-The six marked peaks are a list of the last two decades of financial history, and
-the sampler was never told any of the dates: 16 March 2020, the Monday the Federal
-Reserve cut to zero after the pandemic was declared; 13 October 2008, a month after
-Lehman Brothers failed; and four more that any market historian would recognise on
-sight. The calmest day of the whole eighteen years reaches only $4.63\%$ annualised
-while the most turbulent reaches $92.97\%$, a factor of twenty that a model with a
-single $\sigma$ cannot represent. The band is wide and widest exactly where
-volatility is high, because the log scale makes uncertainty multiplicative: on the
-worst day it runs from $70.7\%$ to $121.9\%$, so even at the peak of a crisis the
-model declines to say whether volatility was seventy percent or a hundred and
-twenty. That width is intrinsic rather than a defect of the sampler, since a single
-squared return is a noisy $\chi^2_1$ signal about the variance that produced it,
-and no amount of extra iterations narrows it, because the uncertainty is about the
-world rather than about the chain. Each draw underlying this figure conditions on
-the entire eighteen-year sample, so the path shown is smoothed rather than
-filtered: the estimate on a given day already uses returns that came after it as
-well as before, which is the right object for describing history and the wrong one
-for a forecast made in real time, a distinction the next chapter returns to.
+Every updated state conditions on the current neighbouring values.
+These retained paths condition on the full return sample, so they describe
+**smoothing**, not real-time filtering. The credible bands also condition on
+the fixed parameters and omit their uncertainty.
+
+The units in the plot are daily percentage standard deviations.
+We transform every retained log-variance draw using $100e^{h_t/2}$
+before summarising. Transforming the mean log variance would not give
+the mean volatility, because exponentiation is nonlinear. Quantiles,
+in contrast, transform consistently under this monotone mapping.
+
+The shaded region is a collection of pointwise 90% posterior intervals.
+It does not say that the entire path lies in the shaded region with
+90% probability. Nor is it an interval for returns: a return interval
+must additionally include the observation shock.
+
+When reading the crisis period, ask what information supports each part
+of the path. Several large absolute returns favour sustained high risk.
+A small return inside that episode is weaker evidence for an immediate
+return to calm because the persistence model and adjacent dates also
+inform the state. Conversely, a single large return need not imply a
+permanent regime change. This is the practical meaning of combining
+an observation likelihood with a state transition.
+
+The intentionally short chain makes the algorithm inspectable, not
+automatically reliable. Compare independent chains and inspect selected
+state traces, especially around turbulent dates. Smoothness in a plot
+reflects the model's persistence as well as the data; it is not a
+convergence diagnostic. The exercise learns parameters too, which can
+add uncertainty and stronger posterior dependence.
 
 ```{python}
-#| label: fig-ewma-comparison
-#| fig-cap: "Three volatility measures on the same returns: a model-free centred realised measure, the industry-standard exponentially weighted average, and the posterior mean of the stochastic-volatility model."
-lam = 0.94
-ewma_var = np.empty(T)
-ewma_var[0] = r[:50].var()
-for t in range(1, T):
-    ewma_var[t] = lam * ewma_var[t - 1] + (1 - lam) * r[t - 1] ** 2
-ewma_vol = ann * np.sqrt(ewma_var)
+#| label: fig-sv-market-path
+#| fig-cap: "Daily market returns and a smoothed volatility distribution conditional on the teaching parameters. Volatility remains uncertain even after observing the return."
+#| code-fold: true
+import matplotlib.dates as mdates
 
-realised = ann * (pd.Series(r).rolling(11, center=True, min_periods=11)
-                  .apply(lambda z: np.sqrt((z ** 2).mean()), raw=True).to_numpy())
-ok = ~np.isnan(realised)
-
-fig, ax = plt.subplots(figsize=(9, 4.4))
-ax.plot(dates, realised, color="grey", lw=0.8, label="centred 11-day realised volatility")
-ax.plot(dates, ewma_vol, color="C3", lw=0.9, label="EWMA, $\\lambda = 0.94$")
-ax.plot(dates, vol_mean, color="C0", lw=1.1, label="stochastic volatility, posterior mean")
-ax.set_yscale("log")
-ax.set_xlabel("date"); ax.set_ylabel("annualised volatility (log scale)")
-ax.set_title("Three volatility measures on the same returns")
-ax.legend(fontsize=9)
-plt.tight_layout(); plt.show()
-
-for name, v in (("stochastic volatility", vol_mean), ("EWMA(0.94)", ewma_vol)):
-    print(f"{name:22s} correlation with realised {np.corrcoef(v[ok], realised[ok])[0, 1]:.4f}   "
-          f"log RMSE {np.sqrt(np.mean((np.log(v[ok])-np.log(realised[ok]))**2)):.4f}")
-print(f"share of days EWMA lies inside the 90% credible band: "
-      f"{np.mean((ewma_vol >= vol_lo) & (ewma_vol <= vol_hi)):.4f}")
+low, median, high = np.quantile(100*np.exp(paths/2), [.05, .5, .95], axis=0)
+fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+axes[0].plot(returns.index, 100*r, color=GREY, lw=.8)
+axes[0].set_ylabel("Daily excess return (%)")
+axes[1].plot(returns.index, median, color=BLUE)
+axes[1].fill_between(returns.index, low, high, color=BLUE, alpha=.2)
+axes[1].set(ylabel="Daily volatility (%)", xlabel="Date")
+for ax in axes:
+    ax.grid(axis="y", alpha=.3)
+axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+plt.tight_layout()
+plt.show()
 ```
 
-Against the centred realised measure the stochastic-volatility path has a
-correlation of $0.9757$ and a log root mean squared error of $0.1691$, while the
-exponentially weighted average manages $0.8437$ and $0.3326$, roughly twice as
-large in log terms. The exponentially weighted line jumps the day after every
-large return and then decays mechanically, so it lags at the start of each crisis
-and overshoots on the way out, while the smoothed posterior path turns before the
-peak because it is allowed to use both sides of the data. The two are rarely in
-outright conflict, since the EWMA line lies inside the ninety percent credible band
-on $86.2\%$ of days, but what the Bayesian treatment adds is not usually a
-different number. It is an honest band on a crisis day nearly a factor of two wide,
-where the EWMA line conceals that same uncertainty entirely; an estimated rather
-than assumed decay, $\phi = 0.9773$ against the fixed convention $\lambda = 0.94$;
-and mean reversion to $13.93\%$, which the exponentially weighted recursion has no
-mechanism to produce at all, since a fixed $\lambda$ implies a random walk in
-variance with no pull back towards any long-run level. The price for all of this
-is computational rather than conceptual: the exponentially weighted average is one
-line of arithmetic evaluated once, while the posterior path took a ten-thousand
-iteration sampler whose inefficiency factors were printed two figures ago, and a
-risk desk choosing between the two is choosing between a convention that costs
-nothing and a measurement that costs ten seconds and reports its own uncertainty.
+### From a hidden path to tomorrow's return distribution
 
-## Discussion: what the path buys, and the limit of a single volatility state {#sec-discussion}
+At the end of the observed sample, retain each draw of $h_T$ and the
+parameters. A one-step prediction has two stages:
+$$
+h_{T+1}^{(s)}=\mu^{(s)}+\phi^{(s)}(h_T^{(s)}-\mu^{(s)})
++\sigma_h^{(s)}u^{(s)},\qquad
+r_{T+1}^{(s)}=e^{h_{T+1}^{(s)}/2}z^{(s)},
+$$
+where $u^{(s)}$ and $z^{(s)}$ are independent standard Normal draws.
+The first adds uncertainty about tomorrow's risk; the second adds
+uncertainty about the return conditional on that risk. Replacing both
+stages with a Normal distribution at one estimated volatility loses
+part of the predictive uncertainty.
+
+The market illustration below keeps parameters fixed, as in its state
+sampler. The lab's parameter draws can be used in exactly the same
+formula for fuller inference. Forecasting from the final observed state
+uses information through that date only; using a smoothed state at an
+earlier date would also use subsequent observations.
 
 ```{python}
-#| label: fig-fat-tails
-#| fig-cap: "Standardised market returns against a Gaussian benchmark, on a log density scale so the tails are visible."
-r_std = (r - r.mean()) / r.std()
-grid_r = np.linspace(-10, 10, 400)
-
+#| label: fig-sv-predictive-risk
+#| fig-cap: "One-day-ahead return risk after the final sample date, integrating over the final state and its next innovation. Parameter uncertainty is omitted in this teaching example."
+#| code-fold: true
+forecast_rng = np.random.default_rng(SEED + 20)
+next_h = (
+    mu + phi * (paths[:, -1] - mu)
+    + np.sqrt(state_var) * forecast_rng.normal(size=len(paths))
+)
+next_returns = np.exp(next_h / 2) * forecast_rng.normal(size=len(paths))
+risk_grid = np.linspace(-0.10, 0.10, 700)
+predictive_density = stats.norm.pdf(
+    risk_grid[:, None], 0, np.exp(next_h / 2)[None, :]
+).mean(axis=1)
+constant_sd = r.std(ddof=1)
 fig, ax = plt.subplots()
-ax.hist(r_std, bins=80, density=True, alpha=0.6, color="C0",
-        label="market excess returns (standardised)")
-ax.plot(grid_r, stats.norm.pdf(grid_r), color="black", lw=1.5, label="Gaussian benchmark")
-ax.set_yscale("log")
-ax.set_xlabel("standardised return"); ax.set_ylabel("density (log scale)")
-ax.legend(); ax.set_title("Stochastic volatility generates fat tails from Gaussian shocks")
-plt.tight_layout(); plt.show()
-
-kurt_model = 3 * np.exp(sig_hat ** 2 / (1 - phi_hat ** 2)) - 3
-print(f"excess kurtosis: sample {stats.kurtosis(r):.2f}, "
-      f"model-implied 3*exp(sigma_h^2/(1-phi^2))-3 = {kurt_model:.2f}")
-print(f"posterior correlation of phi and sigma_h: "
-      f"{np.corrcoef(par_draws[:, 1], par_draws[:, 2])[0, 1]:.3f}")
+ax.plot(100 * risk_grid, predictive_density / 100,
+         color=BLUE, label="SV predictive mixture")
+ax.plot(100 * risk_grid, stats.norm.pdf(risk_grid, 0, constant_sd) / 100,
+         color=BROWN, linestyle="--", label="Full-sample constant SD")
+ax.set(xlabel="Next daily excess return (%)", ylabel="Density per percentage point")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17),
+           ncol=2, frameon=False)
+plt.tight_layout()
+plt.show()
+print("Predictive probability of a loss exceeding 2%:",
+      stats.norm.cdf(-0.02 / np.exp(next_h / 2)).mean())
+print("Predictive 5% return quantile:", np.quantile(next_returns, 0.05))
 ```
 
-The check against something already known is the fat tails documented since
-Lecture 4 asked what a Student-t error buys over a Normal one. Every shock in this
-model, $u_t$ and $\zeta_t$, is Gaussian, yet the histogram sits visibly above the
-Gaussian curve away from the centre. The sample excess kurtosis is $11.14$ and the
-value implied by the posterior means of $\phi$ and $\sigma_h$ is $6.33$: both are
-far above the Gaussian benchmark of zero, so a randomly moving variance is clearly
-the right mechanism, though it accounts for only part of the observed tail
-thickness, the remainder being a handful of crash days a fourth moment estimates
-very imprecisely. Fat tails here are not an add-on but a direct, quantifiable
-consequence of letting the variance itself be random, exactly the connection the
-Overview promised.
+The density averages conditional Normal densities across volatility
+draws, which is less noisy than a histogram of one return per draw.
+The return draws remain useful for quantiles and later portfolio decisions.
+A constant-volatility benchmark is fitted to all returns observed at this
+forecast origin. It need not be narrower than the SV forecast: after a
+calm period, the estimated current risk can lie below the sample average.
 
-The limitation is a posterior correlation of $-0.565$ between $\phi$ and
-$\sigma_h$: the data speak mainly to their product, the stationary variance
-$\sigma_h^2/(1-\phi^2)$, and much less to the two ingredients separately, so a
-jagged path with high $\sigma_h$ and low $\phi$ and a smooth path with low
-$\sigma_h$ and high $\phi$ can generate return series that are nearly
-indistinguishable. Eighteen years of daily data is already a long sample, and the
-identification is still loose, which is the reason the credible intervals on
-$\phi$ reported earlier matter as much as the point estimate.
+The probability of a loss exceeding 2% is a property of the full predictive
+distribution. It is not the probability that volatility exceeds 2%.
+Likewise a 5% return quantile is a return threshold; volatility is a
+standard deviation. Keeping these objects distinct matters when communicating
+risk to a portfolio manager.
 
-What the whole exercise delivers is a path and two interpretable parameters where
-the industry default delivers one line and a convention. What it still assumes is
-that risk is the only thing a portfolio needs to know about the return
-distribution, and that estimating that risk is the hard part. Lecture 13 keeps
-this same idea, a predictive distribution rather than a plug-in estimate, and asks
-the harder question a risk desk actually faces: not how volatile an asset is, but
-how much of it to hold, once the uncertainty in both the mean and the variance is
-taken seriously.
+Mixtures over changing variance can generate heavier tails than a Normal
+with a fixed variance. This does not mean the basic SV model explains
+every market feature. Its independent shocks impose symmetry and exclude
+leverage effects; a negative return does not automatically trigger a
+larger volatility response than a positive return of the same size.
+Leverage, Student-t shocks and jumps are possible extensions, but the
+latent-scale model should be understood first.
 
-## Exercises
+### What changes when parameters are uncertain too?
 
-These are the chapter's practice questions; the [Week 12 exercise
-session](../exercise-sessions/12-stochastic-volatility.qmd) works through them and
-adds the lab.
+The preceding illustration fixed three teaching parameters. To isolate
+the role of parameter uncertainty more cleanly, fit the parameters to
+the same 2020 returns first. Then compare two forecasts at the same
+end-of-sample date:
 
-1. By hand. Starting from the two transition densities in R-12.2, complete the
-   square to rederive $h_t^\ast$ and $v_t^\ast$ for an interior date, and then
-   redo the calculation for $t=1$ using the stationary initial density in place of
-   a missing predecessor. Confirm that the acceptance ratio of R-12.2 depends only
-   on $r_t$ and not on $h_{t-1}$ or $h_{t+1}$.
+- **Joint posterior:** retain each final state together with its parameter
+  draw, then simulate tomorrow's log variance.
+- **Fixed-parameter approximation:** fix parameters at their posterior
+  means, resample the states conditional on those values, then simulate
+  tomorrow's log variance.
 
-2. Computational. Refit the sampler of @sec-empirical with the prior mean of
-   $\sigma_h^2$ doubled and halved in turn, holding $c_0$ fixed, and report how the
-   posterior mean and interval of $\phi$ and $\sigma_h$ move. Then compute the
-   inefficiency factor of the path itself, at three representative dates, one in a
-   calm period and two in different crises, and relate the differences to the
-   local persistence of the path.
+Both integrate over hidden-state uncertainty and tomorrow's innovations.
+The second omits parameter uncertainty. Resampling its states matters:
+combining fixed parameters with states drawn under varying parameters
+would not represent their conditional posterior.
 
-3. On real data. Refit the model on the daily excess return of a single industry
-   portfolio from the same file rather than the market, over the same window, and
-   compare its estimated persistence, volatility of volatility and long-run level
-   with the market's. Report whether the industry's volatility peaks fall on the
-   same dates as the market's, and whether its posterior correlation between
-   $\phi$ and $\sigma_h$ is as strong as the one found here.
+The implementation uses the simple neighbour-Normal state proposal already
+explained above, with the parameter updates derived in this chapter.
+It targets the same SV model as the lab's JPR implementation, through
+a different state proposal. The prior is the lab's truncated Normal
+prior for $(\alpha,\phi)$ and independent inverse-Gamma prior for
+$\sigma_h^2$. These choices should be checked for sensitivity.
 
-Exercise 1 is worth doing before the session, since the same completing-the-square
-step reappears with a more elaborate accept-reject construction in R-12.3.
-Exercises 2 and 3 reuse the code of @sec-empirical with the prior or the input
-series changed, and the exercise session also works through the Kim, Shephard and
-Chib mixture sampler as an alternative to the single-move construction used here.
+```{python}
+#| label: sv-parameter-uncertainty
+#| code-fold: true
+def stationary_log_density(
+    initial_h: float, alpha: float, persistence: float, innovation_var: float
+) -> float:
+    """Stationary initial-state log density up to a constant."""
+    long_run = alpha / (1 - persistence)
+    return float(
+        0.5 * np.log(1 - persistence**2) - 0.5 * np.log(innovation_var)
+        - (1 - persistence**2) * (initial_h - long_run)**2
+        / (2 * innovation_var)
+    )
 
-## Reading and references
 
-The Metropolis-within-Gibbs logic follows Geweke (2005), Section 4.6.2. The single-
-move sampler of R-12.2 and R-12.3, the moment-matched inverse-gamma blanket and the
-stationary initial-state correction all follow Jacquier, Polson and Rossi (1994);
-this material is not covered directly by the UPM examples used elsewhere in the
-course. The mixture-of-normals alternative due to Kim, Shephard and Chib (1998),
-which restores linearity by approximating the log-chi-squared observation error
-with a fixed mixture of normals, is taken up in the Week 12 exercise session rather
-than here, together with the two-state Bayesian illustration behind the Overview's
-opening intuition.
+def update_sv_states(
+    states: np.ndarray, returns: np.ndarray, long_run: float,
+    persistence: float, innovation_var: float,
+    generator: np.random.Generator,
+) -> np.ndarray:
+    """Return one sequential MH sweep of the log-variance states."""
+    states = states.copy()
+    for t in range(len(states)):
+        if t == 0:
+            mean = long_run + persistence * (states[1] - long_run)
+            variance = innovation_var
+        elif t == len(states) - 1:
+            mean = long_run + persistence * (states[t - 1] - long_run)
+            variance = innovation_var
+        else:
+            mean = long_run + persistence * (
+                states[t - 1] + states[t + 1] - 2 * long_run
+            ) / (1 + persistence**2)
+            variance = innovation_var / (1 + persistence**2)
+        proposal = generator.normal(mean, np.sqrt(variance))
+        log_ratio = -0.5 * (
+            proposal - states[t]
+            + returns[t]**2 * (np.exp(-proposal) - np.exp(-states[t]))
+        )
+        if np.log(generator.random()) < min(0.0, log_ratio):
+            states[t] = proposal
+    return states
 
-The explanations and exercises are adapted to this course's notation and weekly
-structure; consult the cited originals for the full treatments.
 
-Jacquier, Polson, and Rossi (1994), "Bayesian Analysis of Stochastic Volatility
-Models," *Journal of Business and Economic Statistics*. Kim, Shephard, and Chib
-(1998), "Stochastic Volatility: Likelihood Inference and Comparison with ARCH
-Models," *Review of Economic Studies*. Chan, Koop, Poirier, and Tobias, *Bayesian
-Econometric Methods* (2nd ed.), ch. on state-space models and stochastic
-volatility. Koop, *Bayesian Econometrics*, ch. 8.
+COMPARISON_ITER, COMPARISON_BURN = 4000, 1500
+comparison_rng = np.random.default_rng(SEED + 30)
+prior_g = np.array([0.0, 0.9])
+prior_precision = np.diag([1 / 10.0, 1 / 0.25])
+prior_shape, prior_scale = 6.0, 0.20
+joint_states = np.full(len(r), np.log(r.var()))
+joint_phi, joint_var = 0.9, 0.05
+joint_alpha = (1 - joint_phi) * np.log(r.var())
+joint_parameters = []
+joint_terminal = []
+
+for iteration in range(COMPARISON_ITER):
+    joint_mu = joint_alpha / (1 - joint_phi)
+    joint_states = update_sv_states(
+        joint_states, r, joint_mu, joint_phi, joint_var, comparison_rng
+    )
+    Z = np.column_stack([np.ones(len(r) - 1), joint_states[:-1]])
+    state_outcome = joint_states[1:]
+    covariance = np.linalg.solve(
+        prior_precision + Z.T @ Z / joint_var, np.eye(2)
+    )
+    mean = covariance @ (
+        prior_precision @ prior_g + Z.T @ state_outcome / joint_var
+    )
+    candidate = comparison_rng.multivariate_normal(mean, covariance)
+    while abs(candidate[1]) >= 1:
+        candidate = comparison_rng.multivariate_normal(mean, covariance)
+    log_ratio = stationary_log_density(
+        joint_states[0], candidate[0], candidate[1], joint_var
+    ) - stationary_log_density(
+        joint_states[0], joint_alpha, joint_phi, joint_var
+    )
+    if np.log(comparison_rng.random()) < min(0.0, log_ratio):
+        joint_alpha, joint_phi = candidate
+    joint_mu = joint_alpha / (1 - joint_phi)
+    residual = state_outcome - Z @ np.array([joint_alpha, joint_phi])
+    initial_ss = (1 - joint_phi**2) * (joint_states[0] - joint_mu)**2
+    joint_var = 1 / comparison_rng.gamma(
+        prior_shape + len(r) / 2,
+        1 / (prior_scale + 0.5 * (residual @ residual + initial_ss)),
+    )
+    if iteration >= COMPARISON_BURN:
+        joint_parameters.append([joint_mu, joint_phi, joint_var])
+        joint_terminal.append(joint_states[-1])
+
+joint_parameters = np.asarray(joint_parameters)
+joint_terminal = np.asarray(joint_terminal)
+fixed_mu, fixed_phi, fixed_var = joint_parameters.mean(axis=0)
+fixed_states = joint_states.copy()
+fixed_terminal = []
+for iteration in range(COMPARISON_ITER):
+    fixed_states = update_sv_states(
+        fixed_states, r, fixed_mu, fixed_phi, fixed_var, comparison_rng
+    )
+    if iteration >= COMPARISON_BURN:
+        fixed_terminal.append(fixed_states[-1])
+fixed_terminal = np.asarray(fixed_terminal)
+
+# Shared innovations reduce noise in the comparison of predictive mixtures.
+prediction_rng = np.random.default_rng(SEED + 31)
+innovations = prediction_rng.normal(size=(len(joint_terminal), 20))
+joint_next_h = (
+    joint_parameters[:, 0, None]
+    + joint_parameters[:, 1, None]
+    * (joint_terminal[:, None] - joint_parameters[:, 0, None])
+    + np.sqrt(joint_parameters[:, 2, None]) * innovations
+)
+fixed_next_h = (
+    fixed_mu + fixed_phi * (fixed_terminal[:, None] - fixed_mu)
+    + np.sqrt(fixed_var) * innovations
+)
+joint_next_sd = np.exp(joint_next_h.ravel() / 2)
+fixed_next_sd = np.exp(fixed_next_h.ravel() / 2)
+```
+
+Each row of the joint calculation preserves dependence between the final
+state and the parameters. Averaging those parameters first is precisely
+the approximation being examined. Twenty future innovations per retained
+draw reduce forecast simulation noise; they do not create additional
+independent posterior draws or improve chain mixing.
+
+```{python}
+#| label: fig-sv-parameter-risk-comparison
+#| fig-cap: "One-day loss probabilities with parameters fixed at posterior means versus integrated over their joint posterior. Both forecasts include state uncertainty. Neither curve is required to lie above the other."
+#| code-fold: true
+loss_thresholds = np.linspace(0.005, 0.06, 100)
+joint_loss = np.array([
+    stats.norm.cdf(-threshold / joint_next_sd).mean()
+    for threshold in loss_thresholds
+])
+fixed_loss = np.array([
+    stats.norm.cdf(-threshold / fixed_next_sd).mean()
+    for threshold in loss_thresholds
+])
+fig, ax = plt.subplots()
+ax.plot(100 * loss_thresholds, joint_loss, color=BLUE,
+         label="Joint posterior")
+ax.plot(100 * loss_thresholds, fixed_loss, color=BROWN, linestyle="--",
+         label="Parameters fixed at posterior means")
+ax.set(xlabel="Daily loss threshold (%)",
+       ylabel="Predictive probability of exceeding the loss")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
+plt.tight_layout()
+plt.show()
+
+comparison = pd.DataFrame({
+    "Method": ["Fixed parameters", "Joint posterior"],
+    "Predictive daily SD (%)": [
+        100 * np.sqrt(np.mean(fixed_next_sd**2)),
+        100 * np.sqrt(np.mean(joint_next_sd**2)),
+    ],
+    "Probability of loss > 2%": [
+        stats.norm.cdf(-0.02 / fixed_next_sd).mean(),
+        stats.norm.cdf(-0.02 / joint_next_sd).mean(),
+    ],
+})
+print(comparison.to_string(index=False))
+```
+
+The predictive daily SD uses $E[e^{h_{T+1}}\mid r]$, since the conditional
+return mean is zero. It is not the average conditional SD
+$E[e^{h_{T+1}/2}\mid r]$. The loss probabilities integrate the Normal
+tail analytically conditional on each volatility draw.
+
+Read the results without assuming that the joint forecast must imply
+greater risk. Plug-in prediction and integration are different nonlinear
+operations; a particular tail probability can move either way.
+Nearly overlapping curves suggest parameter uncertainty has little effect
+on this one-day summary at this forecast origin, not that it never matters.
+Any difference also depends on the priors and Monte Carlo accuracy.
+
+These are teaching chains, not a convergence certificate. Before making a
+substantive comparison, repeat with independent seeds and inspect parameter
+and terminal-state mixing. Differences smaller than simulation variation
+should not be presented as an economic result. The purpose is to show
+where the Bayesian contribution enters, then let the evidence determine
+its practical size.
+
+## Discussion and connection to the exercises {#sec-discussion}
+
+The [Week 12 lab](../exercise-sessions/12-stochastic-volatility.qmd) implements
+the JPR construction and parameter learning on a simulated path. Use the
+simulation to check known truths and the real series to discuss interpretation.
+
+1. Derive the two-neighbour Normal mean and variance.
+2. Explain why the variance transformation needs a Jacobian.
+3. Distinguish an approximate proposal from an exact stationary target.
+4. Explain why full-sample volatility estimates cannot be used retrospectively
+   as though they were real-time trading signals.
+5. Starting from a posterior draw, describe the two random steps needed
+   to obtain tomorrow's return.
+
+Inspect multiple chains, parameter traces and state-specific effective sample
+sizes. Long persistence can make a smooth-looking path deceptively slow to mix.
+Next chapter uses predictive uncertainty to choose an allocation.
+
+### Reading guide
+
+Bauwens, Lubrano and Richard (1999), *Bayesian Inference in Dynamic Econometric
+Models*, on volatility models; Koop (2003), *Bayesian Econometrics*,
+for latent-variable modelling and posterior simulation; Robert and Casella
+(2004), *Monte Carlo Statistical Methods*, on accept-reject and MH sampling.
+The scheduled Jacquier, Polson and Rossi (1994) and Kim, Shephard and Chib
+(1998) readings provide the specialised single-state and mixture approaches.
