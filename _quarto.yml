@@ -13,6 +13,10 @@ website:
   description: "Master-level course on Bayesian inference for economics and finance, University of Freiburg."
   site-url: "https://bayesian-econometrics.github.io/applied-bayesian-econometrics-homepage/"
   page-navigation: true
+  sidebar:
+    title: "Lecture notes"
+    style: docked
+    contents: "lecture-notes/*.qmd"
   navbar:
     background: primary
     logo: theme/freiburg_logo.svg
@@ -46,6 +50,7 @@ format:
       - cosmo
       - theme/freiburg_web.scss
     toc: true
+    toc-location: right
     toc-depth: 3
     code-copy: true
     smooth-scroll: true
