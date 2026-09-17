@@ -1,827 +1,540 @@
 ---
-title: "Review"
+title: "Q&A and review"
 subtitle: "Lecture 15"
+format:
+  html:
+    include-in-header:
+      text: |
+        <style>
+        .cell-output-display img, .cell figure img, figure img {
+          width: 100%; max-width: 100%; height: auto;
+        }
+        </style>
 ---
 
-## Overview
+::: {.callout-tip icon=false}
+## Key takeaways {.unnumbered}
 
-By the end of this lecture you can state the three results that carried this course from
-a single unknown probability to a decision made under model uncertainty, and show, on one
-dataset, exactly what each successive repair bought over the one before it.
-
-::: {.callout-important}
-## The result of this chapter
-
-Every model in this course is the same four objects, in the same order,
-
-$$
-p(\theta) \quad\text{prior}, \qquad
-p(y \mid \theta) \quad\text{likelihood}, \qquad
-p(\theta \mid y) \;\propto\; p(y\mid\theta)\,p(\theta) \quad\text{posterior}, \qquad
-p(y_\ast \mid y) = \int p(y_\ast \mid \theta)\, p(\theta \mid y)\, d\theta \quad\text{posterior predictive},
-$$
-
-whether $\theta$ is a single probability, a coefficient vector, or a whole vector
-autoregression. The posterior is always this proportionality statement. The difficulty
-the course spent fourteen weeks on is that the sums and integrals needed to summarise the
-posterior, and above all the integral defining the posterior predictive, are almost never
-available in closed form once $\theta$ has more than a couple of dimensions or more than
-one model is on the table.
+- **Start by stating the target.** Prior, likelihood, posterior, predictive distribution and decision are different objects.
+- **Choose computation to match that target.** Conjugate algebra, direct simulation, importance sampling and MCMC are tools, not different definitions of Bayesian inference.
+- **An uncertainty statement must say what it conditions on.** Parameter uncertainty, future shocks, model uncertainty and numerical error are not interchangeable.
+- **Check assumptions before increasing computation.** More draws do not fix a wrong likelihood, unidentified effect or contaminated backtest.
 :::
 
-After working through this chapter you can
+## Course synthesis
 
-1. state the four objects, prior, likelihood, posterior, posterior predictive, for a model
-   given only its assumptions;
-2. diagnose which of the course's three recurring difficulties, intractability, estimation
-   error or identification and model error, a given empirical failure belongs to;
-3. derive the general Normal-Inverse-Gamma posterior and read its mean as a
-   matrix-weighted average of the prior mean and least squares;
-4. derive the model-averaged posterior predictive and interpret posterior model
-   probabilities and inclusion probabilities;
-5. implement one conjugate model three ways, in closed form, by direct simulation and by
-   a Gibbs sampler, and check that the three agree;
-6. compare a single fitted model against a shrinkage prior and a model average on
-   identical out-of-sample data, and rank them without flattering any of the three;
-7. read a chapter's Discussion section as a record of what the course settled and what it
-   left to judgement.
+The final session connects the methods and practises explaining them.
+Use the first part as a concise revision map, then spend most of the
+session attempting questions before opening their solutions. These are
+format-neutral practice questions, not an announcement of the final
+exam's format, permitted materials or precise coverage.
 
-Week 15 of 15, the review, paired with the [Week 15 exercise
-session](../exercise-sessions/15-review.qmd). The chapter assumes every earlier lecture
-and introduces no new machinery; its only job is to run the whole chain once more, on one
-dataset, from the same starting point as Lecture 1 to the same kind of decision as
-Lectures 9 and 13.
-
-## Motivation: one probability, then a decision under model uncertainty {#sec-motivation}
-
-Lecture 1 began with a single unknown probability, whether next month brought a loss, and
-turned it into a posterior over that one number by Bayes' theorem. Lecture 9 ended a very
-different way, with a decision that had to be made without knowing which of several
-models was right, so the decision used a predictive distribution averaged over all of
-them. The whole course is the distance between those two moves. In between, the unknown
-stopped being a single probability and became first a coefficient vector, then a vector of
-coefficients too large for the sample to pin down, then a coefficient that changed every
-month, then a variance that changed every month, then a set of models rather than one. At
-every step the four objects of the Overview box stayed the same; what changed was what
-$\theta$ was, and how hard the posterior and the posterior predictive were to get at.
-
-Watch the first move happen on data before taking the rest on faith. Section 5 below
-introduces this chapter's one dataset properly, a monthly panel used to forecast core
-inflation a year ahead. Ask the Lecture 1 question of it directly: unconditionally, in how
-many months of the last sixty-five years was inflation over the following twelve months
-above three percent a year, a plausible line in the sand for a policy maker.
+A useful answer states the target, gives the necessary assumptions,
+shows the key calculation, and interprets the result. Naming an algorithm
+without explaining what it targets is not enough.
 
 ```{python}
-#| label: fig-motivation-conditioning
-#| fig-cap: "The probability that inflation over the next twelve months exceeds three percent, computed three ways: ignoring today's information, and conditioning on whether inflation over the past twelve months was above or below four percent."
+#| label: setup-review
+#| include: false
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
-plt.rcParams.update({"figure.figsize": (7, 4.2), "axes.grid": True,
-                     "grid.alpha": 0.3, "font.size": 11})
-
-fred_c = pd.read_parquet(DATA / "fred_macro_monthly.parquet").dropna()
-lpce, lip_c = np.log(fred_c["core_pce"]), np.log(fred_c["industrial_prod"])
-panel_c = pd.DataFrame({
-    "infl_next": 100 * (lpce.shift(-12) - lpce),
-    "infl_past": 100 * (lpce - lpce.shift(12)),
-    "unemp": fred_c["unemployment"],
-    "spread": fred_c["yield_10y"] - fred_c["fed_funds"],
-    "d_ff": fred_c["fed_funds"].diff(12),
-    "ipg": 100 * (lip_c - lip_c.shift(12)),
-    "y10": fred_c["yield_10y"],
-}).dropna()
-
-thr = 3.0
-p_naive = float((panel_c["infl_next"] > thr).mean())
-hi_mask = panel_c["infl_past"] > 4.0
-p_hi = float((panel_c.loc[hi_mask, "infl_next"] > thr).mean())
-p_lo = float((panel_c.loc[~hi_mask, "infl_next"] > thr).mean())
-
-fig, ax = plt.subplots()
-bars = ax.bar(["unconditional\n(all 774 months)",
-               "recent inflation\nabove 4%  (n=221)",
-               "recent inflation\nat or below 4%  (n=553)"],
-              [p_naive, p_hi, p_lo], color=["grey", "firebrick", "steelblue"])
-ax.set_ylabel("share of months with inflation above 3% next year")
-ax.set_ylim(0, 1.05)
-for b, v in zip(bars, [p_naive, p_hi, p_lo]):
-    ax.text(b.get_x() + b.get_width() / 2, v + 0.02, f"{v:.3f}", ha="center")
-ax.set_title("One number hides what the data are ready to say")
-plt.tight_layout(); plt.show()
-
-print(f"unconditional P(inflation next year > 3%) = {p_naive:.3f}")
-print(f"conditional on recent inflation above 4%:  {p_hi:.3f}  (n = {hi_mask.sum()})")
-print(f"conditional on recent inflation at or below 4%: {p_lo:.3f}  (n = {(~hi_mask).sum()})")
-```
-
-The unconditional share is $0.437$, a Beta-Binomial calculation exactly like Lecture 1's,
-treating every month as an exchangeable draw from one fixed probability. It is not wrong,
-but it is not what a forecaster standing in a particular month wants, because it throws
-away everything known about that month. Split the sample by whether inflation over the
-past year was already running above four percent and the single number comes apart:
-$0.964$ of the months that started hot stayed above three percent, against $0.226$ of the
-months that did not. The unconditional probability of $0.437$ is a population average of
-two very different regimes, and no policy maker is ever standing in the unconditional
-regime. They are always standing in one month, with one set of numbers in front of them,
-which is exactly the conditioning problem Lecture 2 introduces with a regression in place
-of a two-way split.
-
-That is as far as splitting the sample by hand can go. A regression conditions on
-continuous information rather than a single cutoff, a shrinkage prior conditions when
-there are too many predictors to trust unregularised, and averaging over models conditions
-on the fact that several regressions look equally defensible and disagree. Sections 5 and 6
-run exactly that sequence, on this dataset, so that the last of it is not merely asserted:
-by the end there is a genuine decision, which predictors to trust and how much, made while
-admitting that the model itself is not known.
-
-## The problem: model uncertainty is a variance term, not a footnote {#sec-problem}
-
-### Result R-15.1: the variance a point estimate and a single model leave out
-
-Let $y_\ast$ be a quantity of interest that depends on an unknown parameter vector
-$\theta$ within a model $M$, and let $M$ itself be one of several candidate models. Applying
-the law of total variance twice, once inside a model and once across models,
-
-$$
-\operatorname{Var}(y_\ast \mid y) =
-\underbrace{\mathbb{E}_M\!\big[\operatorname{Var}(y_\ast \mid M, y)\big]}_{\text{averaged within-model variance}}
-+ \underbrace{\operatorname{Var}_M\!\big[\mathbb{E}(y_\ast \mid M, y)\big]}_{\text{disagreement between models}},
-\qquad
-\operatorname{Var}(y_\ast \mid M, y) =
-\mathbb{E}_\theta\!\big[\operatorname{Var}(y_\ast \mid \theta, M, y)\big]
-+ \operatorname{Var}_\theta\!\big[\mathbb{E}(y_\ast \mid \theta, M, y)\big].
-$$
-
-A procedure that fixes $\theta$ at a point estimate inside one chosen model reports only
-the innermost term, $\operatorname{Var}(y_\ast \mid \theta, M, y)$, usually just an
-estimated residual variance, and sets the other two terms to zero by construction. Nothing
-in the mathematics licenses that; it is a choice, and the two omitted terms do not vanish
-just because they are not reported.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-For any two random quantities $A$ and $B$, $\operatorname{Var}(A) =
-\mathbb{E}_B[\operatorname{Var}(A \mid B)] + \operatorname{Var}_B[\mathbb{E}(A \mid B)]$,
-by expanding $\operatorname{Var}(A) = \mathbb{E}[A^2] - \mathbb{E}[A]^2$ and conditioning
-both terms on $B$. Apply this once with $A = y_\ast$ and $B = M$, conditioning throughout
-on the data $y$, to get the outer decomposition. Apply it again inside the first term, now
-with $A = y_\ast$ conditional on $M$ and $B = \theta$, to get the inner one. Both
-applications are the same one-line identity; the only content here is applying it twice
-rather than once.
-:::
-
-The two omitted terms are not exotic. The second, model disagreement, is the whole subject
-of Lecture 9, and the sharper version of it, that not even every parameter within a model
-is identified by the data, is the subject of Lectures 7 and 10. Fit two defensible
-regressions for the inflation forecast of @sec-motivation on the same training data,
-intercept, past inflation and the change in the funds rate in both, one of them adding the
-unemployment rate.
-
-```{python}
-#| label: fig-problem-model-gap
-#| fig-cap: "Two regressions that fit almost equally well in sample give forecasts that agree near the historical average unemployment rate and diverge by more than half a point at its extremes."
-pred_c = ["infl_past", "unemp", "spread", "d_ff", "ipg", "y10"]
-X_c = np.column_stack([np.ones(len(panel_c))] + [panel_c[c].to_numpy() for c in pred_c])
-y_c = panel_c["infl_next"].to_numpy()
-idx_c = panel_c.index
-train_end = int(np.searchsorted(idx_c, pd.Timestamp("1989-01-01")))
-X_train_c, y_train_c = X_c[:train_end], y_c[:train_end]
-
-cols_A, cols_B = [0, 1, 2, 4], [0, 1, 4]        # +unemployment, and without it
-beta_A, *_ = np.linalg.lstsq(X_train_c[:, cols_A], y_train_c, rcond=None)
-beta_B, *_ = np.linalg.lstsq(X_train_c[:, cols_B], y_train_c, rcond=None)
-resid_A = y_train_c - X_train_c[:, cols_A] @ beta_A
-resid_B = y_train_c - X_train_c[:, cols_B] @ beta_B
-n_tr, kA, kB = len(y_train_c), len(cols_A), len(cols_B)
-
-means_tr = X_train_c.mean(axis=0)
-u_grid = np.array([3.5, 5.0, 6.5, 8.0, 9.5])
-pred_A = [float(np.array([1.0, means_tr[1], u, means_tr[4]]) @ beta_A) for u in u_grid]
-pred_B = [float(np.array([1.0, means_tr[1], means_tr[4]]) @ beta_B) for _ in u_grid]
-
-fig, ax = plt.subplots()
-ax.plot(u_grid, pred_A, "o-", color="C0", label="with unemployment")
-ax.plot(u_grid, pred_B, "s--", color="C1", label="without unemployment")
-ax.fill_between(u_grid, pred_A, pred_B, color="grey", alpha=0.25)
-ax.axvline(panel_c["unemp"].mean(), color="black", lw=0.8, ls=":")
-ax.set_xlabel("unemployment rate held at this value (%)")
-ax.set_ylabel("forecast: inflation over the next 12 months (%)")
-ax.legend(fontsize=9)
-ax.set_title("Two models, one training sample, one disagreement")
-plt.tight_layout(); plt.show()
-
-print(f"in-sample residual sd: with unemployment {np.sqrt(resid_A @ resid_A / (n_tr - kA)):.4f}, "
-      f"without {np.sqrt(resid_B @ resid_B / (n_tr - kB)):.4f}")
-print(f"forecast gap at unemployment = {u_grid[0]}: {pred_A[0] - pred_B[0]:.3f} points")
-print(f"forecast gap at unemployment = {u_grid[-1]}: {pred_A[-1] - pred_B[-1]:.3f} points")
-```
-
-The two models fit the training sample almost identically, a residual standard deviation
-of $1.076$ with unemployment in the equation against $1.093$ without it, so nothing in
-sample forces a choice between them. Near the historical average unemployment rate of
-about six percent the two forecasts agree to a few hundredths. Away from it, at an
-unemployment rate of $3.5$ or $9.5$, they disagree by more than half a percentage point,
-a gap comparable in size to the effect the whole shrinkage exercise of @sec-empirical will
-have on this same forecast. A report that picked one of these two regressions and quoted
-its residual standard deviation as the forecast uncertainty would never see that gap. It is
-exactly the term $\operatorname{Var}_M[\mathbb{E}(y_\ast\mid M,y)]$ in R-15.1, and
-@sec-methodology below gives it a name and a formula rather than leaving it as a picture.
-
-The course met two further difficulties before this one, and it is worth being precise
-about which is which. The first three lectures fought intractability: a posterior that
-exists in principle but cannot be written down or integrated, repaired by simulation.
-Lectures 6 through 9 fought estimation error: a posterior that can be written down but is
-too noisy to trust once the parameter count approaches the sample size, repaired by a
-prior that supplies the missing restrictions. This section's difficulty, and the one
-Lectures 7, 10 and 11 spend the most effort on, is identification and model error, and it
-is the one enemy this course only partly defeats. More data shrinks estimation error
-essentially without limit; it does not, by itself, tell two structurally different but
-equally well-fitting explanations of the same reduced-form residuals apart.
-
-## Methodology: two repairs in general notation, and one that stays open {#sec-methodology}
-
-Each of the course's difficulties has a general repair, and each repair is a different
-one of the four objects from the Overview box doing new work. Intractability was repaired
-by changing how the posterior is computed, from an integral to an average over simulated
-draws, the subject of Lectures 3 to 5 and not revisited here since nothing about it is
-specific to a review. Estimation error is repaired by changing the prior, and Result R-15.2
-is the one behind every conjugate model in this course from Lecture 2 onward: it is what
-makes the innermost variance term in R-15.1, the one a single fitted model reports on its
-own, something to be computed exactly rather than merely estimated from a fixed formula.
-Model uncertainty is repaired by changing which object answers the question at all, from a
-single posterior predictive to a mixture of them, and Result R-15.3 is what turns the gap
-of @fig-problem-model-gap from a picture into the middle term of R-15.1, with a weight
-attached to each of the two disagreeing models rather than a shrug.
-
-### Result R-15.2: the Normal-Inverse-Gamma posterior, for any $n$ and $k$
-
-For $y = X\beta + \varepsilon$ with $\varepsilon \sim \mathcal N(0, \sigma^2 I_n)$,
-$\beta \mid \sigma^2 \sim \mathcal N(b_0, \sigma^2 B_0)$ and
-$\sigma^2 \sim \mathrm{IG}(\alpha_0, \delta_0)$, the posterior is exactly
-
-$$
-\beta \mid \sigma^2, y \sim \mathcal N(b_T, \sigma^2 B_T), \qquad
-\sigma^2 \mid y \sim \mathrm{IG}(\alpha_T, \delta_T),
-$$
-
-$$
-B_T = \big(B_0^{-1} + X^\top X\big)^{-1}, \qquad
-b_T = B_T\big(B_0^{-1} b_0 + X^\top y\big), \qquad
-\alpha_T = \alpha_0 + \tfrac{n}{2}, \qquad
-\delta_T = \delta_0 + \tfrac12\big(y^\top y + b_0^\top B_0^{-1} b_0 - b_T^\top B_T^{-1} b_T\big),
-$$
-
-for any $n$, any $k$ and any design $X$, singular or not. Marginalising $\sigma^2$ gives a
-Student predictive for a new observation at $x_\ast$,
-$y_\ast \mid y \sim t_{2\alpha_T}\big(x_\ast^\top b_T,\, (\delta_T/\alpha_T)(1 + x_\ast^\top B_T x_\ast)\big)$,
-in which the $1$ is the shock that hits regardless of how well $\beta$ is known and
-$x_\ast^\top B_T x_\ast$ is exactly the innermost term of R-15.1, the part contributed by
-not knowing $\beta$; it shrinks as the sample grows, the $1$ never does. Whenever $X^\top X$
-is invertible, $b_T$ can be written as $W\hat\beta_{\mathrm{OLS}} + (I_k - W)b_0$ with
-$W = (X^\top X/\sigma^2 + B_0^{-1})^{-1}(X^\top X/\sigma^2)$, a matrix whose eigenvalues lie
-in $(0,1)$: the posterior mean is always a compromise between the prior and least squares,
-weighted by precision, never a free choice of how much to trust either one.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-Drop constants and collect powers of $\beta$ in the log posterior, exactly as in Lecture 2:
-the likelihood contributes $-(y-X\beta)^\top(y-X\beta)/2\sigma^2$ and the prior contributes
-$-(\beta-b_0)^\top B_0^{-1}(\beta-b_0)/2\sigma^2$. Completing the square in $\beta$ gives
-$B_T$ and $b_T$ as displayed, with the leftover constant term feeding directly into
-$\delta_T$; matching this against an $\mathrm{IG}(\alpha_T,\delta_T)$ kernel in $\sigma^2$
-identifies $\alpha_T$ and $\delta_T$. For the predictive, $y_\ast = x_\ast^\top\beta +
-\varepsilon_\ast$ given $\sigma^2$ is $\mathcal N(x_\ast^\top b_T,\, \sigma^2(1+x_\ast^\top
-B_T x_\ast))$, since $\beta\mid\sigma^2,y$ and $\varepsilon_\ast$ are independent Normals;
-integrating $\sigma^2$ against its $\mathrm{IG}(\alpha_T,\delta_T)$ posterior is the same
-scale-mixture calculation used for the Student-$t$ likelihood in Lectures 3 and 4, and
-returns the displayed $t_{2\alpha_T}$ distribution. For the matrix-weighted form, substitute
-$X^\top y = X^\top X\,\hat\beta_{\mathrm{OLS}}$ into $b_T$ and use $B_T B_0^{-1} = I_k - W$;
-this is the same algebra as R-6.2, restated here for a general prior $B_0$ rather than the
-Minnesota specialisation.
-:::
-
-R-15.2 is instanced differently every time it is used: a vague $B_0$ recovers ordinary
-least squares up to a Bayesian wrapper, a Minnesota $B_0$ gives Lecture 6's shrinkage
-across a whole vector autoregression, and a spike-and-slab prior in Lecture 11 puts the
-same posterior mean inside each of exponentially many models rather than one. Every one of
-these is the identical formula with a different $B_0$, which is the sense in which
-estimation error has one repair, not fourteen.
-
-### Result R-15.3: the model-averaged posterior predictive
-
-Let $M_1,\dots,M_J$ be candidate models with prior probabilities $p(M_j)$ and let
-$p(y\mid M_j)$ be model $j$'s marginal likelihood, $\int p(y\mid\theta_j,M_j)p(\theta_j\mid
-M_j)\,d\theta_j$. The posterior model probabilities and the model-averaged predictive are
-
-$$
-p(M_j \mid y) = \frac{p(y\mid M_j)\,p(M_j)}{\sum_{i=1}^J p(y\mid M_i)\,p(M_i)},
-\qquad
-p(y_\ast \mid y) = \sum_{j=1}^J p(M_j \mid y)\, p(y_\ast \mid y, M_j),
-$$
-
-a mixture over models rather than a choice among them, with mean $\sum_j p(M_j\mid
-y)\,\mathbb E(y_\ast\mid y,M_j)$ and variance given exactly by the two-term split of R-15.1,
-the weighted average of the within-model variances plus the weighted variance of the
-within-model means across $j$. A predictor's posterior inclusion probability, $\sum_{j:
-\,\text{predictor}\in M_j} p(M_j\mid y)$, summarises how much of the model mass uses it at
-all.
-
-::: {.callout-note collapse="true"}
-## Derivation
-
-Bayes' theorem applied to the discrete unknown $M$ gives $p(M_j\mid y) \propto p(y\mid
-M_j)p(M_j)$, normalising over $j$ gives the displayed posterior model probability. The
-posterior predictive marginalises both $\theta$ and $M$: $p(y_\ast\mid y) = \sum_j
-p(y_\ast, M_j \mid y) = \sum_j p(y_\ast \mid y, M_j)\, p(M_j\mid y)$, which is the displayed
-mixture. Its mean is $\mathbb E_M[\mathbb E(y_\ast\mid M,y)]$ by the tower property, and its
-variance is R-15.1's outer decomposition read backwards: the same two terms that were
-diagnosed as missing in @sec-problem are exactly the two terms this mixture supplies.
-When each $M_j$ is a linear regression with an NIG prior, $p(y\mid M_j)$ is the closed form
-of R-15.2's derivation with $\beta$ and $\sigma^2$ both integrated out, so R-15.2 and
-R-15.3 use the same completed square twice, once per model and once across models.
-:::
-
-One difficulty is not repaired by either result. Identification asks whether the
-parameters of a single, correctly specified model are pinned down by the data at all, and
-R-15.2 and R-15.3 are both silent on it: they average or shrink across what the likelihood
-can see, and a structural parameter the likelihood cannot see is invisible to both, however
-many models are in the average. Lecture 7's reduced-form vector autoregression fits the
-inflation, unemployment and policy-rate data as well as any structural model that could
-generate it, and the residual covariance alone cannot say which of the many candidate maps
-from those residuals to a monetary-policy shock is the right one; recursive ordering and
-sign restrictions are extra assumptions bolted on from outside the likelihood, not
-consequences of it. Lecture 10's potential-outcomes framework makes the same point about a
-single treatment effect: no likelihood written on observed data alone can distinguish the
-effect of a policy from the reasons the policy was chosen, and the course's causal chapter
-spends its effort on stating assumptions precisely rather than on a sampler. R-15.2 and
-R-15.3 both integrate over what the likelihood can see; a parameter the likelihood cannot
-see stays exactly as unresolved after averaging over sixty-four models as after fitting
-one. That is why this course carries three results and not four: two are general repairs,
-and the third enemy's honest general statement is that more data is not always the answer.
-
-## Data: core inflation and six predictors, 1961 to 2025 {#sec-data}
-
-The chapter's one dataset is the monthly FRED macroeconomic panel used throughout
-@sec-motivation, restricted to the six predictors used from here on: inflation over the
-trailing twelve months, the unemployment rate, the term spread between the ten-year
-Treasury yield and the federal funds rate, the change in the funds rate over the trailing
-twelve months, industrial production growth over the trailing twelve months, and the level
-of the ten-year yield. The target is core PCE inflation over the following twelve months.
-Every predictor is observable at the forecast date; nothing in the panel looks into the
-future.
-
-```{python}
-#| label: fig-data-panel
-#| fig-cap: "Left: realised twelve-month-ahead core inflation over the full sample. Right: the correlation of each predictor, observed today, with inflation over the following year."
-fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.0))
-axes[0].plot(panel_c.index, panel_c["infl_next"], lw=0.7, color="steelblue")
-axes[0].axhline(3.0, color="black", lw=0.8, ls=":")
-axes[0].set_ylabel("inflation, next 12 months (%)")
-axes[0].set_title("Core inflation, one year ahead")
-
-corr_c = panel_c.corr()["infl_next"].drop("infl_next")
-axes[1].bar(range(len(corr_c)), corr_c.to_numpy(), color="steelblue")
-axes[1].axhline(0, color="black", lw=0.8)
-axes[1].set_xticks(range(len(corr_c))); axes[1].set_xticklabels(corr_c.index, rotation=30, fontsize=8)
-axes[1].set_title("Correlation with next year's inflation")
-plt.tight_layout(); plt.show()
-
-print(f"{len(panel_c)} months, {panel_c.index[0]:%Y-%m} to {panel_c.index[-1]:%Y-%m}")
-print(panel_c.describe().loc[["mean", "std", "min", "max"]].round(2))
-```
-
-The transformed panel runs $774$ months, January 1961 to June 2025. Twelve-month-ahead
-core inflation averages $3.22$ percent with a standard deviation of $2.00$, ranging from
-$0.62$ to $9.73$; the trailing twelve-month figure that predicts it has almost the same
-distribution, which is why persistence dominates everything else in the right-hand panel,
-a correlation of $0.863$. The ten-year yield follows at $0.589$, the term spread at
-$-0.450$, the change in the funds rate at $0.247$, unemployment at $0.126$, the wrong sign
-for a textbook Phillips curve, and industrial production growth at essentially zero. The
-sign on unemployment is a warning worth keeping in mind for @sec-empirical: an unconditional
-correlation and a coefficient estimated alongside five other predictors are different
-objects, and only one of them answers the question a forecaster actually asks. The
-training window used throughout, January 1961 to December 1988, supplies $336$
-observations for the first four steps below; the remaining months are held out for the
-fifth.
-
-## Empirical analysis: one forecast, five verdicts {#sec-empirical}
-
-Everything above is now run on the panel of @sec-data, one method at a time, the same
-question asked five times. Each step keeps the training window fixed at the $336$ months
-ending December 1988 until the final step, which forecasts forward month by month using
-only information available at each origin.
-
-### Step one: the conjugate posterior in closed form
-
-R-15.2 with a deliberately vague prior, $B_0 = 100\,I_7$, is the baseline: closed-form
-Bayesian regression, barely distinguishable from ordinary least squares with this much
-data relative to seven coefficients.
-
-```{python}
-from scipy.special import gammaln
 from scipy import stats
 
-alpha_0_c, delta_0_c = 3.0, 3.0
-
-def nig_posterior(X, y, B0, b0=None):
-    """R-15.2, in the course's b_0, B_0, alpha_0, delta_0 notation."""
-    k = X.shape[1]
-    b0 = np.zeros(k) if b0 is None else b0
-    B0_inv = np.linalg.inv(B0)
-    BT = np.linalg.inv(B0_inv + X.T @ X)
-    bT = BT @ (B0_inv @ b0 + X.T @ y)
-    aT = alpha_0_c + len(y) / 2
-    dT = delta_0_c + 0.5 * (y @ y + b0 @ B0_inv @ b0 - bT @ np.linalg.inv(BT) @ bT)
-    _, ld_BT = np.linalg.slogdet(BT)
-    _, ld_B0 = np.linalg.slogdet(B0)
-    lml = (gammaln(aT) - gammaln(alpha_0_c) + alpha_0_c * np.log(delta_0_c)
-           - aT * np.log(dT) + 0.5 * (ld_BT - ld_B0) - 0.5 * len(y) * np.log(2 * np.pi))
-    return bT, BT, aT, dT, lml
-
-def student_predictive(x_star, bT, BT, aT, dT):
-    return (float(x_star @ bT),
-            float(np.sqrt((dT / aT) * (1 + x_star @ BT @ x_star))), 2 * aT)
-
-names_c = ["intercept"] + pred_c
-B0_vague = np.eye(7) * 100.0
-bT1, BT1, aT1, dT1, lml1 = nig_posterior(X_train_c, y_train_c, B0_vague)
-sd1 = np.sqrt((dT1 / (aT1 - 1)) * np.diag(BT1))
-
-print(f"training sample: {len(y_train_c)} months, "
-      f"{idx_c[0]:%Y-%m} to {idx_c[train_end - 1]:%Y-%m}")
-print(pd.DataFrame({"post. mean": bT1, "post. sd": sd1}, index=names_c).round(4))
-print(f"E[sigma^2 | y] = {dT1 / (aT1 - 1):.4f}, log marginal likelihood {lml1:.2f}")
+SEED = 2026
+rng = np.random.default_rng(SEED)
+plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
+                     "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": False})
+BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
+DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
 ```
 
-Past inflation carries a posterior mean of $0.884$ with a posterior standard deviation of
-only $0.043$, and unemployment, once six other things are held fixed, is negative at
-$-0.155$, the Phillips-curve sign that the raw correlation of @sec-data hid. This is the
-answer @sec-motivation's split-sample calculation was reaching for, now conditioning on all
-six predictors at once instead of one cutoff.
+### Reconstruct the course from four probability operations
 
-### Step two: the same posterior by simulation
+First, update parameters:
 
-Nothing about the answer should depend on how it is computed, and checking that is the
-discipline of Lectures 3 to 5. Draw directly from the closed-form posterior, and separately
-run a Gibbs sampler for a model with an independent prior, $\beta \sim \mathcal N(0,
-\tau_0^2 I)$, which is not jointly conjugate and genuinely needs the sampler.
+$$p(\theta\mid y)\propto p(y\mid\theta)p(\theta).$$
 
-```{python}
-rng_c = np.random.default_rng(20260115)
-S_c, burn_c = 8000, 1000
+Second, average for prediction:
 
-sig2_mc = stats.invgamma(a=aT1, scale=dT1).rvs(size=S_c, random_state=rng_c)
-L_BT1 = np.linalg.cholesky(BT1)
-beta_mc = bT1 + np.sqrt(sig2_mc)[:, None] * (rng_c.standard_normal((S_c, 7)) @ L_BT1.T)
+$$p(y_*\mid y)=\int p(y_*\mid\theta)p(\theta\mid y)\,d\theta.$$
 
-tau0_c = 10.0
-XtX_c, Xty_c = X_train_c.T @ X_train_c, X_train_c.T @ y_train_c
-sig2_g, draws_g, sig2_g_draws = float(y_train_c.var()), np.empty((S_c, 7)), np.empty(S_c)
-for s in range(S_c):
-    Vg = np.linalg.inv(XtX_c / sig2_g + np.eye(7) / tau0_c ** 2)
-    beta_g = Vg @ Xty_c / sig2_g + np.linalg.cholesky(Vg) @ rng_c.standard_normal(7)
-    res_g = y_train_c - X_train_c @ beta_g
-    sig2_g = float(stats.invgamma(a=alpha_0_c + len(y_train_c) / 2,
-                                  scale=delta_0_c + 0.5 * res_g @ res_g).rvs(random_state=rng_c))
-    draws_g[s], sig2_g_draws[s] = beta_g, sig2_g
+Third, average across models:
 
-print(pd.DataFrame({"closed form": bT1, "direct Monte Carlo": beta_mc[burn_c:].mean(axis=0),
-                    "Gibbs, independent prior": draws_g[burn_c:].mean(axis=0)},
-                   index=names_c).round(4))
-print(f"E[sigma^2]: closed form {dT1 / (aT1 - 1):.4f}, "
-      f"direct MC {sig2_mc[burn_c:].mean():.4f}, Gibbs {sig2_g_draws[burn_c:].mean():.4f}")
-```
+$$p(y_*\mid y)=\sum_jp(M_j\mid y)p(y_*\mid y,M_j).$$
 
-The three columns agree to within a few thousandths on every coefficient, and the two
-routes to $\mathbb E[\sigma^2\mid y]$ agree to four figures, $1.1292$ against $1.1290$. That
-is the check every sampler in this course exists to pass: with $336$ observations and a
-near-flat prior, the algorithm used to reach the posterior does not change it, and neither
-does swapping the prior for one with the same practical looseness. The point of running the
-Gibbs sampler here at all, rather than only the direct draws, is that it would not agree by
-construction if there were a coding error in either route, and it is the sampler, not the
-closed form, that has to carry the argument once @sec-empirical's model average makes the
-joint posterior of sixty-four different coefficient vectors too awkward to write down in
-one line.
+Finally, choose an action using that predictive distribution:
 
-### Step three: a shrinkage prior
+$$a^*=\arg\max_{a\in\mathcal A}E[U(a,y_*)\mid y].$$
 
-Take the shrinkage view instead: centre the six slopes at zero, $B_0 = c\,I$ on the slopes
-with the intercept left vague, and let the marginal likelihood pick $c$ from a grid, exactly
-R-15.2 with a different $B_0$.
+A conditional posterior samples one block while holding the others fixed.
+A marginal posterior integrates them out. Replacing one by the other inside
+an algorithm can silently change its target.
+
+### What did each block of lectures contribute?
+
+| Lectures | Main question | What you should be able to explain |
+|:--|:--|:--|
+| 1–2 | How does evidence update beliefs? | Likelihood construction, completing the square, marginalisation. |
+| 3–5 | How do we calculate posterior quantities? | Averages, weights, full conditionals, acceptance correction and numerical error. |
+| 6–8 | How do we model macroeconomic dynamics? | Shrinkage, identification, evolving states and information timing. |
+| 9–10 | How do we predict or evaluate policy? | Predictive mixtures versus identifying assumptions for interventions. |
+| 11–12 | How do we handle many predictors and changing risk? | Selection uncertainty, latent volatility and dependent states. |
+| 13–14 | How do we choose actions and learn flexible relationships? | Expected utility, function priors and honest predictive evaluation. |
+
+
+### One workflow, many models
+
+An economic question determines the estimand and identifying assumptions.
+Prior and likelihood jointly define the posterior; computation approximates
+quantities under it. Prediction and decisions then use that uncertainty.
+Model checking can send us back to revise assumptions. The columns below
+are a map, not matched rows or a claim that identification happens last.
 
 ```{python}
-#| label: fig-shrinkage-evidence
-#| fig-cap: "Log marginal likelihood against the shrinkage prior's tightness. The evidence favours a moderate amount of shrinkage over both extremes."
-c_grid_c = [0.01, 0.05, 0.1, 0.5, 1.0, 10.0]
+#| label: fig-review-course-map
+#| fig-cap: "The course organised by modelling ingredients, computation and uses. Prior and likelihood enter jointly; entries across a row are not a particular model."
+#| code-fold: true
+from matplotlib.patches import Rectangle
 
-def B0_shrink(c):
-    B = np.eye(7) * c
-    B[0, 0] = 100.0
-    return B
-
-lmls_c = [nig_posterior(X_train_c, y_train_c, B0_shrink(c))[4] for c in c_grid_c]
-c_star = c_grid_c[int(np.argmax(lmls_c))]
-bT3, BT3, aT3, dT3, lml3 = nig_posterior(X_train_c, y_train_c, B0_shrink(c_star))
-sd3 = np.sqrt((dT3 / (aT3 - 1)) * np.diag(BT3))
-
-fig, ax = plt.subplots()
-ax.plot(c_grid_c, lmls_c, "o-")
-ax.axvline(c_star, color="firebrick", ls="--", lw=1, label=f"selected c = {c_star}")
-ax.set_xscale("log"); ax.set_xlabel("prior variance c on each slope"); ax.set_ylabel("log marginal likelihood")
-ax.legend(fontsize=9); ax.set_title("Evidence against the tightness of the shrinkage prior")
-plt.tight_layout(); plt.show()
-
-print(f"c = {c_star} selected; posterior mean on past inflation: {bT3[1]:.3f} "
-      f"(vague prior gave {bT1[1]:.3f})")
-```
-
-The curve rises from $c=0.01$ to a maximum at $c=0.1$ and falls back beyond it, an interior
-optimum rather than a monotone preference for more or less shrinkage, which is the same
-U-shape R-6.1 derives for a vector autoregression. At $c^\ast = 0.1$ the coefficient on past
-inflation moves only from $0.884$ to $0.870$; with $336$ observations and six predictors
-there is not much estimation error left for a prior to remove. The contrast with Lecture 6
-is instructive rather than accidental: there, $111$ coefficients competed for $120$
-observations and shrinkage rewrote the fitted system almost completely; here, seven
-coefficients have $336$ observations to themselves, and the same repair, applied to the
-same kind of prior, has almost nothing left to do. R-15.2 does not know in advance which
-situation it is in. It is the ratio of coefficients to observations, not the existence of a
-prior, that decides how much a prior can still buy.
-
-### Step four: averaging over which predictors belong
-
-R-15.3 needs $p(y\mid M_j)$ for each of the $2^6 = 64$ subsets of the six predictors, few
-enough to enumerate exactly rather than sample, each fitted with R-15.2 and a common vague
-prior.
-
-```{python}
-combos_c = [tuple(j for j in range(6) if mask & (1 << j)) for mask in range(64)]
-
-def bma_fit(X, y):
-    lmls, posts = [], []
-    for combo in combos_c:
-        cols = [0] + [i + 1 for i in combo]
-        out = nig_posterior(X[:, cols], y, np.eye(len(cols)) * 100.0)
-        lmls.append(out[4]); posts.append((cols, out))
-    lmls = np.array(lmls)
-    wts = np.exp(lmls - lmls.max()); wts /= wts.sum()
-    return wts, posts
-
-w_bma, posts_bma = bma_fit(X_train_c, y_train_c)
-pip_c = np.zeros(6)
-for combo, wt in zip(combos_c, w_bma):
-    for j in combo:
-        pip_c[j] += wt
-bT_bma = np.zeros(7)
-for (cols, out), wt in zip(posts_bma, w_bma):
-    bT_bma[cols] += wt * out[0]
-
-order_c = np.argsort(-w_bma)[:3]
-print("top three models by posterior probability")
-for i in order_c:
-    inc = [pred_c[j] for j in combos_c[i]]
-    print(f"  {w_bma[i]:.3f}  {inc if inc else ['intercept only']}")
-print("posterior inclusion probabilities:")
-print(pd.Series(pip_c, index=pred_c).round(3))
-```
-
-```{python}
-#| label: fig-coef-comparison
-#| fig-cap: "The coefficient on each of the six predictors under the vague conjugate prior, the shrinkage prior, and model averaging. Bars are 90% credible intervals where a single model gives one."
-fig, ax = plt.subplots(figsize=(7.6, 4.4))
-offsets = [-0.22, 0.0, 0.22]
-specs = [("vague conjugate", bT1, sd1, "C0"), (f"shrinkage, c={c_star}", bT3, sd3, "C1"),
-         ("model averaged", bT_bma, None, "C2")]
-pos_c = np.arange(6)
-for off, (lbl, bb, ss, col) in zip(offsets, specs):
-    ax.scatter(pos_c + off, bb[1:], color=col, s=34, label=lbl, zorder=3)
-    if ss is not None:
-        ax.vlines(pos_c + off, bb[1:] - 1.645 * ss[1:], bb[1:] + 1.645 * ss[1:], color=col, lw=1.6)
-ax.axhline(0.0, color="black", lw=1.0, ls=":")
-ax.set_xticks(pos_c); ax.set_xticklabels(pred_c, rotation=20)
-ax.set_ylabel("coefficient on next year's inflation")
-ax.set_title("What each treatment does to the same six coefficients")
-ax.legend(fontsize=9)
-plt.tight_layout(); plt.show()
-```
-
-Two of the sixty-four models carry almost all the mass, past inflation, unemployment and
-the change in the funds rate at $0.597$, and the same pair without unemployment at $0.370$,
-which is @fig-problem-model-gap's two regressions with their actual posterior weights
-attached. Past inflation has a posterior inclusion probability of essentially $1$ and the
-change in the funds rate $0.998$; the term spread, industrial production growth and the
-long yield sit at $0.007$, $0.015$ and $0.013$. Averaging does not merely shrink the three
-weak predictors, it multiplies each of them by the probability that it belongs at all,
-moving the spread's coefficient from $-0.048$ under the vague prior to $-0.0002$ and the
-long yield's from $-0.013$ to $-0.0007$, both far past where shrinkage alone had left them.
-Unemployment keeps its negative sign under every treatment, $-0.155$, $-0.149$ and $-0.102$
-in turn, the one coefficient in @fig-coef-comparison whose story does not change with the
-method.
-
-### Step five: does any of it forecast better?
-
-The question that decides whether the last three steps were worth running. From January
-1990, forecast month by month using only data whose twelve-month window had already
-closed, and score against the historical mean of the training window as a benchmark that
-uses no predictors at all.
-
-```{python}
-start_c = int(np.searchsorted(idx_c, pd.Timestamp("1990-01-01")))
-oos_c = []
-for t in range(start_c, len(y_c)):
-    end = t - 12
-    Xs, ys, x_star = X_c[:end], y_c[:end], X_c[t]
-    m1, s1, df1 = student_predictive(x_star, *nig_posterior(Xs, ys, B0_vague)[:4])
-    best = max((nig_posterior(Xs, ys, B0_shrink(c)) for c in c_grid_c), key=lambda o: o[4])
-    m2, s2, df2 = student_predictive(x_star, *best[:4])
-    wts, posts = bma_fit(Xs, ys)
-    ms = np.array([student_predictive(x_star[cols], *out[:4])[0] for cols, out in posts])
-    ss = np.array([student_predictive(x_star[cols], *out[:4])[1] for cols, out in posts])
-    m3 = float(wts @ ms)
-    s3 = float(np.sqrt(wts @ ss ** 2 + wts @ (ms - m3) ** 2))
-    oos_c.append((idx_c[t], y_c[t], m1, s1, df1, m2, s2, df2, m3, s3, ys.mean(), ys.std()))
-
-O = pd.DataFrame(oos_c, columns=["date", "y", "m1", "s1", "df1", "m2", "s2", "df2",
-                                 "m3", "s3", "hm", "hs"]).set_index("date")
-
-def score_c(m, s, df=None):
-    rmse = float(np.sqrt(np.mean((O.y - m) ** 2)))
-    lps = (float(np.mean(stats.norm.logpdf(O.y, m, s))) if df is None else
-           float(np.mean(stats.t.logpdf((O.y - m) / s, df=df) - np.log(s))))
-    return rmse, lps
-
-scores = pd.DataFrame(
-    [score_c(O.hm, O.hs), score_c(O.m1, O.s1, O.df1), score_c(O.m2, O.s2, O.df2), score_c(O.m3, O.s3)],
-    columns=["OOS RMSE", "OOS log score"],
-    index=["historical mean", "conjugate", "shrinkage", "model averaged"])
-
-what_changed = pd.DataFrame({
-    "what it adds": ["nothing, a benchmark", "R-15.2, closed form", "R-15.2, prior shrinks slopes",
-                     "R-15.3, mixture over 64 models"],
-    "unemployment coef.": [np.nan, bT1[2], bT3[2], bT_bma[2]],
-    "OOS RMSE": scores["OOS RMSE"].to_numpy(), "OOS log score": scores["OOS log score"].to_numpy(),
-}, index=["0 benchmark", "1 conjugate", "2 shrinkage", "3 model averaged"])
-
-print(f"{len(O)} out-of-sample months, {O.index[0]:%Y-%m} to {O.index[-1]:%Y-%m}")
-print(what_changed.round(4).to_string())
-```
-
-```{python}
-#| label: fig-cumulative-score
-#| fig-cap: "Cumulative log predictive score relative to the no-predictor benchmark, month by month from January 1990. All three methods stay ahead throughout."
-adv = pd.DataFrame({
-    "conjugate": stats.t.logpdf((O.y - O.m1) / O.s1, df=O.df1) - np.log(O.s1) - stats.norm.logpdf(O.y, O.hm, O.hs),
-    "shrinkage": stats.t.logpdf((O.y - O.m2) / O.s2, df=O.df2) - np.log(O.s2) - stats.norm.logpdf(O.y, O.hm, O.hs),
-    "model averaged": stats.norm.logpdf(O.y, O.m3, O.s3) - stats.norm.logpdf(O.y, O.hm, O.hs),
-}, index=O.index).cumsum()
-
-fig, ax = plt.subplots()
-for col, colour in zip(adv.columns, ["C0", "C1", "C2"]):
-    ax.plot(adv.index, adv[col], color=colour, lw=1.4, label=col)
-ax.axhline(0.0, color="black", lw=1.0, ls=":")
-ax.set_xlabel("forecast date"); ax.set_ylabel("cumulative log score minus the benchmark's")
-ax.legend(fontsize=9); ax.set_title("Every step beats the benchmark; not every step beats the last one")
-plt.tight_layout(); plt.show()
-
-print(adv.iloc[-1].round(2))
-```
-
-The table is the chapter's whole argument compressed into four rows. Row 0, the historical
-mean, is the Lecture 1 answer with no conditioning at all and forecasts worst by a wide
-margin, an out-of-sample root mean squared error of $1.917$ against $0.955$ or better for
-every conditioned model. Row 1, R-15.2 with a vague prior, does almost all of the work by
-itself, which is unsurprising with $336$ or more training months and only seven
-coefficients; row 2's shrinkage prior improves the root mean squared error only from
-$0.955$ to $0.952$, a fraction of one percent, because there was little estimation error
-left to remove. Row 3, model averaging, is the one row that makes things slightly worse
-out of sample, $0.967$ against $0.955$, even though it commanded the largest posterior
-weight in sample. The reason is visible in @fig-coef-comparison: averaging pushed the term
-spread, industrial production growth and the long yield close enough to zero that the
-$36$-year holdout, which the training window never saw, occasionally needed them back, and
-a marginal likelihood computed on data ending in 1989 cannot know that. All three
-conditioned methods stay ahead of the benchmark for the entire $36$ years in
-@fig-cumulative-score, ending $286.68$, $288.06$ and $283.25$ log points ahead for the
-conjugate, shrinkage and model-averaged forecasts respectively; the ranking among the three
-never reverses in the picture, which is a stronger statement than the single final number.
-Model averaging is a genuine repair for the difficulty R-15.1 names, but repairing that
-difficulty and forecasting best are not the same achievement, and this dataset is small and
-tame enough that the difference barely shows.
-
-## Discussion: what is settled, and what stays a judgement {#sec-discussion}
-
-Every conditioned method beat a forecast that used no predictors at all, by a wide and
-stable margin over thirty-six years; that is the least surprising and most important
-result in @sec-empirical, because it is the one that would have made the whole exercise
-pointless had it come out the other way. Within the conditioned methods, the ranking is
-more honest than flattering to any one repair. The plain conjugate posterior of R-15.2 did
-almost all of the work, the shrinkage prior added a sliver more, and model averaging, the
-repair for exactly the difficulty diagnosed in R-15.1, was the one method that forecast
-slightly worse than committing to a single well-chosen model. That is not a contradiction
-of R-15.1 or R-15.3; both are statements about what a procedure accounts for, not
-guarantees that accounting for more always forecasts better on any particular sample.
-Lecture 6's reading, that dense shrinkage usually beats sparse selection on economic data
-because most modest predictors carry a little information rather than none, is the same
-lesson seen from the other side here: this panel had only six candidate predictors and
-three hundred or more observations, so there was very little sparsity for model averaging
-to correctly discover, and its confidence in the small model was, on this holdout, slightly
-misplaced.
-
-The map below is not new content, only a different arrangement of everything the course
-already did, organised by what each lecture contributed rather than by week number.
-
-```{python}
-#| label: fig-course-map
-#| fig-cap: "Every lecture placed by which of the four objects it worked on."
-fig, ax = plt.subplots(figsize=(9.2, 5.4))
-ax.set_xlim(0, 10); ax.set_ylim(0, 6.6); ax.axis("off")
-
-stages = [
-    (1.15, "Prior", ["conjugate NIG (L2)", "Minnesota (L6)", "spike and slab (L11)",
-                     "CAPM prior (L13)", "GP over functions (L14)"], "#dce6f1"),
-    (3.55, "Likelihood", ["linear regression (L2)", "VAR (L6, L7)", "state space (L8)",
-                          "stochastic vol (L12)", "logit (L5)"], "#e6eedc"),
-    (5.95, "Computation", ["analytic (L1, L2)", "Monte Carlo (L3)", "Gibbs (L4)",
-                           "MH, HMC, NUTS (L5)", "Kalman filter (L8)"], "#f5e6d3"),
-    (8.35, "Decision or check", ["credible sets (L1)", "forecast, BMA (L9)",
-                                 "identification (L7, L10)", "portfolio weights (L13)",
-                                 "log score, PPC (L9, L15)"], "#efdcdc"),
+fig, ax = plt.subplots(figsize=(12, 7))
+columns = [
+    ("Prior", "#dce6ef",
+     "Beta / NIG (L1–2)\n\nMinnesota (L6)\n\nSpike and slab (L11)\n\nReturn moments (L13)\n\nFunction priors (L14)"),
+    ("Likelihood", "#e5ecd9",
+     "Regression (L2)\n\nLogit (L5)\n\nVAR (L7)\n\nState space (L8)\n\nSV returns (L12)"),
+    ("Posterior computation", "#f2e5d3",
+     "Analytical (L1–2)\n\nMC / importance (L3)\n\nGibbs (L4)\n\nMH / HMC / NUTS (L5)\n\nKalman / smoothing (L8)"),
+    ("Prediction and decisions", "#efdddd",
+     "Credible intervals (L1–2)\n\nPredictive / BMA (L9)\n\nTreatment effects (L10)\n\nPortfolio choice (L13)\n\nChecks and interpretation"),
 ]
-for xc, title, items, colour in stages:
-    ax.add_patch(plt.Rectangle((xc - 1.08, 0.45), 2.16, 5.5, facecolor=colour,
-                               edgecolor="#5a5a5a", lw=1.1, zorder=1))
-    ax.text(xc, 5.62, title, ha="center", va="center", fontsize=12, zorder=3)
-    for i, it in enumerate(items):
-        ax.text(xc, 4.85 - 0.78 * i, it, ha="center", va="center", fontsize=8.4, zorder=3)
-for xc, _, _, _ in stages[:-1]:
-    ax.annotate("", xy=(xc + 1.28, 3.2), xytext=(xc + 1.09, 3.2),
-                arrowprops=dict(arrowstyle="-|>", color="#3a3a3a", lw=1.6))
-ax.text(5.0, 6.3, "One recipe, fifteen weeks", ha="center", fontsize=13)
-ax.text(5.0, 0.12, "every lecture is one row through these four columns",
-        ha="center", fontsize=9, style="italic")
-plt.tight_layout(); plt.show()
+for i, (title, color, content) in enumerate(columns):
+    left = 0.02 + i * 0.245
+    ax.add_patch(Rectangle((left, 0.12), 0.225, 0.75,
+                           facecolor=color, edgecolor=GREY))
+    ax.text(left + 0.1125, 0.82, title, ha="center", va="center", fontsize=11)
+    ax.text(left + 0.1125, 0.72, content, ha="center", va="top", fontsize=10)
+ax.text(0.5, 0.96, "Economic question and assumptions → Bayesian analysis",
+         ha="center", fontsize=14)
+ax.text(0.5, 0.03, "Prior + likelihood → posterior → prediction, checking and decision",
+         ha="center", fontsize=12)
+ax.set(xlim=(0, 1), ylim=(0, 1))
+ax.axis("off")
+plt.tight_layout()
+plt.show()
 ```
 
-Placed this way, a question that hands you a prior and a likelihood and asks for a
-posterior is testing the first two columns; a question that says the full conditional is
-not standard is testing the third; a question about what an investor should do, or whether
-a forecast was any good, is testing the fourth. What is settled, in the sense of having a
-general result that applies whatever the model, is the first three columns: R-15.2 gives
-the posterior for any conjugate model, and Lectures 3 to 5 give a computational route when
-it is not conjugate. The fourth column is only partly settled. Model averaging in R-15.3 is
-as general as R-15.2, but which models to average over, what prior probability to give each
-one, and what a decision maker's objective is once the predictive distribution is in hand,
-are judgements the mathematics does not make for you. This chapter has no next lecture to
-point to; what it can honestly say is that the identification difficulty of Lectures 7 and
-10 is where that judgement is hardest, and that a forecaster who has internalised R-15.1,
-that a single number always hides a variance term, has learned the one habit from this
-course most likely to survive contact with a dataset it was never trained on.
+## Exam practice and worked solutions
 
-## Exercises
+Questions 1–6 provide a core practice set. The remaining questions broaden
+revision across the course and can be attempted independently. The worked
+answers identify essential reasoning, not an official marking scheme.
 
-These are the chapter's practice questions; the [Week 15 exercise
-session](../exercise-sessions/15-review.qmd) works through them and adds the lab.
+### 1. Updating, prediction and numerical error
 
-1. By hand. Prove the two-line identity behind R-15.1, $\operatorname{Var}(A) =
-   \mathbb E_B[\operatorname{Var}(A\mid B)] + \operatorname{Var}_B[\mathbb E(A\mid B)]$,
-   from the definition of variance, then specialise it to two models with posterior
-   probabilities $w$ and $1-w$ and means $\mu_1 \ne \mu_2$, showing that the between-model
-   term equals $w(1-w)(\mu_1-\mu_2)^2$. Evaluate it for the two models of
-   @fig-problem-model-gap at an unemployment rate of $9.5$ using the posterior weights of
-   @sec-empirical's step four, and compare it with the within-model term at the same point.
+A coin produces nine heads in twelve independent trials. Its probability
+of heads has a Beta(2,2) prior.
 
-2. Computational. Recompute @sec-empirical's shrinkage grid with the intercept given the
-   same prior variance as the slopes instead of a vague one, and report whether $c^\ast$
-   and the selected coefficients move. Then extend the model-averaging enumeration to
-   eight predictors by adding two further lags of core inflation, and report whether the
-   two leading models of step four survive.
+1. Derive the posterior kernel and identify the distribution.
+2. Find the posterior mean and probability of a head on the next trial.
+3. Distinguish the posterior SD, the SD of the next binary outcome and
+   the Monte Carlo standard error of an estimated posterior mean.
+4. Which uncertainty decreases if we simulate more draws without new data?
 
-3. On real data. Repeat the five steps of @sec-empirical with headline CPI inflation in
-   place of core PCE inflation as the target, keeping the same six predictors and the same
-   training window. Report whether the ranking of the four rows in the out-of-sample table
-   changes, and say in one paragraph whether the answer depends on which price index a
-   central bank happens to target.
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
 
-## Reading and references
+The likelihood contributes $p^9(1-p)^3$, and the prior contributes
+$p(1-p)$. The posterior kernel is $p^{10}(1-p)^4$, hence Beta(11,5).
+The predictive outcome is Bernoulli(11/16), with SD
+$\sqrt{(11/16)(5/16)}\approx0.464$. This differs from uncertainty
+about the unknown probability itself.
 
-R-15.2 is the Normal-Inverse-Gamma machinery of Lecture 2, restated for general $B_0$; its
-shrinkage reading follows Lecture 6 and, ultimately, UPM Class 5 and SGPE Lecture 4. R-15.3
-follows Lecture 9's treatment of Bayesian model averaging and posterior predictive mixtures.
-The lesson that dense shrinkage often forecasts better than the sparse selection that model
-averaging can produce, visible in @sec-empirical's step five, is examined directly in
-Giannone, Lenza and Primiceri (2021), already cited in Lecture 6. Structural identification
-and causal inference, this chapter's one unrepaired difficulty, have their own reading lists
-in Lectures 7 and 10; consult those chapters directly rather than this one for the sources
-behind that argument.
+For nine heads in twelve tosses and a Beta(2,2) prior, the posterior is
+Beta(11,5). Its mean is 11/16, its standard deviation is about 0.112, and its
+next-head probability is also 11/16. Those last two equal means refer to different
+objects: a parameter and a future binary outcome.
 
-The explanations and exercises are adapted to this course's notation and weekly structure;
-consult the cited originals for the full treatments.
+The standard error of a 10,000-draw Monte Carlo estimate of the mean is about
+$0.112/\sqrt{10000}=0.00112$. It is much smaller than posterior dispersion
+because it describes numerical approximation, not knowledge of the coin.
+Explain all three quantities without relying on software labels.
 
-Koop, *Bayesian Econometrics*, ch. 1-4. Chan, Koop, Poirier and Tobias, *Bayesian
-Econometric Methods* (2nd ed.), ch. 1-4. Gelman et al., *Bayesian Data Analysis* (3rd ed.,
-2013). Giannone, Lenza and Primiceri (2021), "Economic Predictions with Big Data: The
-Illusion of Sparsity," *Econometrica*.
+```{python}
+#| label: fig-review-uncertainty
+#| fig-cap: "The posterior does not become narrower when we generate more draws. The numerical standard error of its estimated mean does."
+#| code-fold: true
+posterior = stats.beta(11, 5)
+grid = np.linspace(.001, .999, 400)
+counts = np.array([100, 1000, 10000])
+fig, axes = plt.subplots(1, 2, figsize=(10, 4.8))
+axes[0].plot(grid, posterior.pdf(grid), color=BLUE)
+axes[0].set(xlabel="Heads probability", ylabel="Posterior density")
+axes[1].plot(counts, posterior.std()/np.sqrt(counts), color=BLUE, marker="o")
+axes[1].set(xlabel="Independent draws", ylabel="MC standard error", xscale="log")
+for ax in axes:
+    ax.grid(axis="y", alpha=.3)
+plt.tight_layout()
+plt.show()
+```
+
+
+**Common mistake:** dividing posterior SD by the square root of the
+number of draws and reporting that as uncertainty about the parameter.
+For dependent MCMC draws, a dependence-aware MCSE is required.
+:::
+
+### 2. Derive a regression posterior
+
+Let $y\mid\beta,\sigma^2\sim N(X\beta,\sigma^2I_n)$,
+$\beta\mid\sigma^2\sim N(b_0,\sigma^2B_0)$ and
+$\sigma^2\sim IG(a_0,d_0)$, with density proportional to
+$(\sigma^2)^{-a_0-1}\exp(-d_0/\sigma^2)$.
+
+Derive the coefficient conditional and the marginal variance posterior.
+Explain how the variance full conditional differs. State dimensions.
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+For $k$ coefficients, $X$ is $n\times k$, $b_0$ is $k\times1$, and
+$B_0$ is $k\times k$. The relevant quadratic is
+$$
+(y-X\beta)^\top(y-X\beta)
++(\beta-b_0)^\top B_0^{-1}(\beta-b_0).
+$$
+Set $B_n=(X^\top X+B_0^{-1})^{-1}$ and
+$b_n=B_n(X^\top y+B_0^{-1}b_0)$. Completing the square yields
+$(\beta-b_n)^\top B_n^{-1}(\beta-b_n)+Q$, where
+$Q=y^\top y+b_0^\top B_0^{-1}b_0-b_n^\top B_n^{-1}b_n$.
+Thus
+$$\beta\mid\sigma^2,y\sim N(b_n,\sigma^2B_n),\qquad
+\sigma^2\mid y\sim IG(a_0+n/2,d_0+Q/2).$$
+Before integrating out $\beta$, its prior contributes
+$(\sigma^2)^{-k/2}$. Consequently
+$$
+\sigma^2\mid\beta,y\sim IG\left(a_0+\frac{n+k}{2},
+d_0+\frac12\left[(y-X\beta)^\top(y-X\beta)
++(\beta-b_0)^\top B_0^{-1}(\beta-b_0)\right]\right).
+$$
+Integration over $\beta$ cancels the extra variance power in the marginal.
+**Common mistake:** using the marginal shape with the conditional scale.
+With an independent coefficient prior, these formulas change.
+:::
+
+### 3. Choose computation and repair an MH sampler
+
+Explain when direct simulation, importance sampling or Gibbs sampling
+could be used. A student records only accepted MH proposals. Does a high
+acceptance rate make the recorded sample valid? Give the correct update.
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+Direct simulation is available when we can sample the required posterior
+or its marginal–conditional factorisation. Importance sampling draws from
+a proposal with adequate support and reweights by target/proposal density;
+unstable weights can make it ineffective. Gibbs draws from full conditionals
+when those are accessible even if direct joint sampling is not.
+
+For target $\pi$ and proposal $q$, accept $\theta'$ with probability
+$$\min\left(1,
+\frac{\pi(\theta')q(\theta\mid\theta')}
+{\pi(\theta)q(\theta'\mid\theta)}\right).$$
+On rejection, keep and record the current state. Retaining accepted
+proposals alone generally changes the stationary distribution of the
+recorded chain. Acceptance rate alone establishes neither correctness
+nor efficient exploration. A symmetric proposal cancels the proposal
+ratio; an asymmetric one generally does not.
+:::
+
+### 4. Interpret posterior and predictive intervals
+
+At a specified market return, a CAPM posterior gives
+$E[\alpha+\beta x_*\mid y]=0.01$ and
+$\operatorname{Var}(\alpha+\beta x_*\mid y)=0.0001$.
+The posterior mean residual variance is 0.0009.
+Find predictive mean and variance. A classmate calls the latent-mean
+interval a 95% interval for next month's realised return. Explain the error.
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+The mean is 0.01 and total variance is $0.0001+0.0009=0.001$.
+Its square root is about 0.0316, versus 0.01 for the latent mean.
+Future-return uncertainty includes a new residual shock.
+These moments alone do not determine exact 95% interval endpoints;
+use the model's predictive distribution or its simulated quantiles.
+The calculation conditions on $x_*$. If next month's market return is
+unknown, its uncertainty also needs a model and integration.
+:::
+
+### 5. Choose a model for the economic question
+
+For each question, identify the target, a suitable model and one essential
+limitation: (a) a bank portfolio's changing market exposure;
+(b) its changing residual risk; (c) the effect of a credit programme
+on investment. Would a more flexible prediction model solve all three?
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+- **Changing exposure:** a state-space regression with time-varying beta.
+  The state transition specifies how beta changes. Filtering uses current
+  and past observations; smoothing additionally uses later observations.
+- **Changing risk:** an SV model for residual variance. A large absolute
+  return is noisy evidence of volatility, not its observed value.
+- **Credit effect:** potential outcomes and a defensible identification
+  strategy. Adjustment requires appropriate pretreatment covariates,
+  exchangeability, consistency and overlap; IV requires a justified
+  instrument and an explicit estimand.
+
+Flexibility can help fit a response surface but cannot establish causal
+identification or replace the distinction between mean and variance dynamics.
+:::
+
+### 6. Read short code fragments critically
+
+Identify the error and its consequence in each fragment. Treat the snippets
+as pseudocode to analyse, not code to execute.
+
+```python
+# A: a Gamma distribution parameterised by shape and rate
+precision = rng.gamma(shape, rate)
+
+# B: a forecast experiment with training and future test observations
+scaled = (all_data - all_data.mean()) / all_data.std()
+
+# C: log variance h, followed by simulated returns
+future_return = np.exp(h) * rng.normal()
+
+# D: portfolio decisions under uncertain parameters
+chosen_weight = np.mean(optimal_weight_for_each_parameter_draw)
+```
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+**A:** NumPy expects scale, so use $1/\text{rate}$.
+**B:** Future observations influence preprocessing. Estimate scaling
+parameters on the training sample and apply them unchanged to the test set.
+**C:** Standard deviation is $\exp(h/2)$; $\exp(h)$ is variance.
+**D:** Optimise predictive expected utility over a common set of draws.
+Averaging parameter-specific optima generally answers a different problem.
+For each error, explain the target quantity as well as the replacement.
+:::
+
+### 7. Interpret spike-and-slab output
+
+A continuous Normal spike-and-slab sampler gives PIPs 0.45 and 0.50
+for two correlated factors. Their joint inclusion probability is 0.10.
+What is the probability that at least one occupies the slab? Does a
+zero indicator set its coefficient to zero?
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+The union probability is $0.45+0.50-0.10=0.85$.
+The two labels can share evidence for similar information.
+Under a continuous spike, the zero indicator selects a narrow Normal
+prior, not an exact-zero coefficient. PIPs depend on the prior and the
+candidate universe; they are not probabilities of causal relevance.
+Dense shrinkage provides an alternative when many weak signals matter.
+:::
+
+### 8. Connect the Kalman update to volatility
+
+For a scalar state, the prior mean and variance are $a=1$, $P=4$.
+Observe $y=3$ with observation equation $y=h+\epsilon$ and variance
+$R=1$. Calculate the updated mean and variance. Why cannot this exact
+update be applied directly to an SV observation $r=e^{h/2}z$?
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+The gain is $P/(P+R)=4/5$. The updated mean is
+$1+(4/5)(3-1)=2.6$, and variance is $(1-4/5)4=0.8$.
+The observation is informative relative to prior uncertainty, so it
+receives substantial weight. In SV, the hidden state changes observation
+variance, and its likelihood is not quadratic in $h$. JPR uses corrected
+state proposals; the log-squared mixture approach obtains a conditionally
+Gaussian approximation. The ordinary linear-Gaussian update alone is
+not an exact SV state sampler.
+:::
+
+### 9. Separate shrinkage, identification and model averaging
+
+Explain what Minnesota shrinkage contributes to a BVAR. Does it identify
+a structural monetary-policy shock? Two forecasting models have prior
+probabilities 0.6 and 0.4 and marginal likelihood ratio $p(y\mid M_1)/
+p(y\mid M_2)=2$. Calculate their posterior weights.
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+Minnesota shrinkage regularises lag coefficients using beliefs about
+persistence and cross-variable effects. Structural identification needs
+additional restrictions; a shrinkage prior on reduced-form coefficients
+does not identify a monetary-policy shock by itself.
+Model weights are proportional to $(2\times0.6,1\times0.4)$, giving
+$(0.75,0.25)$. Average predictive densities using those weights.
+Weights based on marginal likelihoods and sequential predictive scores
+must use a coherent information set; test outcomes cannot be used to
+choose weights retrospectively and then called unseen evaluation data.
+:::
+
+### 10. Interpret a Bayesian portfolio decision
+
+One figure contains posterior efficient-frontier draws. Another plots
+predictive expected utility against portfolio weight and has a broad,
+nearly flat maximum. Explain both. Must the Bayesian allocation have
+less risky exposure than every plug-in allocation?
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+The curves describe uncertainty about investment opportunities under
+different parameter values. They do not grant the investor knowledge of
+the true frontier before choosing. The expected-utility plot averages
+over uncertainty before selecting one feasible action.
+A flat maximum means nearby allocations have similar decision value;
+a precise numerical maximiser need not be economically distinguished.
+No universal exposure ranking follows. Priors, constraints, preferences
+and predictive distributions all matter. The simple diffuse-prior IID
+example's proportional adjustment is a special case.
+:::
+
+### 11. Explain Bayesian machine learning without confusing the objects
+
+Distinguish a GP interval for a latent function from a predictive interval.
+What do BART and a Bayesian neural network average over? How does a
+Bayesian network differ? Does any of these labels establish causality?
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+A predictive interval adds observation noise to latent-function uncertainty.
+GP formulas may also condition on fixed kernel hyperparameters.
+BART averages over tree structures and leaf values; Bayesian neural
+networks average over network parameters or a stated posterior approximation.
+A Bayesian network factorises a joint distribution through a directed
+acyclic graph and conditional distributions. It need not use Bayesian
+parameter estimation. None of these labels alone establishes a causal
+interpretation; that requires identifying assumptions.
+:::
+
+### 12. Does agreement with an analytical posterior validate the model?
+
+The following figure compares direct posterior draws with an analytical
+CAPM coefficient posterior. Explain what agreement checks and what it
+does not establish. Why should the histogram not match the curve exactly?
+
+Return to the 2015–2019 banking CAPM from Chapter 2. A conjugate model is useful
+for troubleshooting because analytical and simulated answers can be compared.
+The code below samples variance from its **marginal**, then coefficients from
+their conditional; the pairs are direct independent posterior draws.
+
+::: {.callout-note collapse="true"}
+## Reference calculation {.unnumbered}
+
+```{python}
+#| label: review-capm-check
+#| code-fold: true
+ff = pd.read_parquet(DATA / "ff_factors_monthly.parquet")
+industry = pd.read_parquet(DATA / "ff_industry49_monthly.parquet")
+panel = pd.merge(ff[["mkt_rf", "rf"]], industry[["banks"]],
+                 left_index=True, right_index=True).loc["2015":"2019"].dropna()
+y = (panel["banks"]-panel["rf"]).to_numpy()
+X = np.column_stack([np.ones(len(y)), panel["mkt_rf"]])
+b0 = np.array([0., 1.])
+a0, d0 = 3., .0032
+B0 = np.diag(np.array([.01, .5])**2/(d0/(a0-1)))
+P0 = np.linalg.inv(B0)
+P1 = P0+X.T@X
+B1 = np.linalg.solve(P1, np.eye(2))
+b1 = B1@(P0@b0+X.T@y)
+residual, shift = y-X@b1, b1-b0
+Q = residual@residual+shift@P0@shift
+Q_expanded = y@y+b0@P0@b0-b1@P1@b1
+a1, d1 = a0+len(y)/2, d0+Q/2
+M = 10000
+variance = 1/rng.gamma(a1, 1/d1, M)
+beta = b1+np.sqrt(variance[:, None])*(rng.normal(size=(M, 2))@np.linalg.cholesky(B1).T)
+exact = stats.t(2*a1, loc=b1[1], scale=np.sqrt(d1/a1*B1[1, 1]))
+print("Two Q expressions agree:", np.isclose(Q, Q_expanded))
+print("Analytical and simulated beta means:", b1[1], beta[:, 1].mean())
+print("MCSE of simulated mean:", beta[:, 1].std(ddof=1)/np.sqrt(M))
+```
+
+:::
+
+
+```{python}
+#| label: fig-review-analytic-simulation
+#| fig-cap: "A known analytical posterior is a benchmark for checking a simulation implementation. Agreement should be assessed relative to Monte Carlo error."
+#| code-fold: true
+grid = np.linspace(*exact.ppf([.001, .999]), 400)
+fig, ax = plt.subplots()
+ax.hist(beta[:, 1], bins=40, density=True, color=BLUE, alpha=.25)
+ax.plot(grid, exact.pdf(grid), color=BLUE, lw=2)
+ax.set(xlabel="Bank market beta", ylabel="Posterior density")
+ax.grid(axis="y", alpha=.3)
+plt.tight_layout()
+plt.show()
+```
+
+::: {.callout-note collapse="true"}
+## Worked answer {.unnumbered}
+
+The comparison checks computation conditional on the model. It does not prove
+that beta is constant, errors are Normal or the next period resembles the sample.
+If the algorithm agrees with algebra but forecasts poorly, investigate the
+model and information set rather than simply increasing simulation length.
+
+
+Finite simulation produces histogram variation. Assess differences relative
+to Monte Carlo error; an exact-looking plot is not a substitute for checking
+the target and prior parameterisation.
+:::
+
+## Further revision and student questions
+
+### Troubleshooting checklist
+
+| Symptom or code choice | First question |
+|:--|:--|
+| Variance draws are implausibly large | Was Gamma rate passed to a scale argument? |
+| NIG variance update disagrees with the exact answer | Is the coefficient-prior quadratic missing, or was a marginal substituted for a conditional? |
+| MH histogram is wrong despite many accepted proposals | Were rejected states discarded? |
+| MCMC intervals change between runs | Have mixing and dependence-aware MCSE been assessed? |
+| Excellent historical forecast scores | Were predictors, transformations, model weights or tuning informed by future outcomes? |
+| Very precise treatment effects | Are identification and overlap credible? |
+| Counterfactual uncertainty looks strange | Were both predictions formed within the same posterior draw? |
+| SV parameter updates disagree | Was the stationary initial-state density handled consistently? |
+| Allocation changes with every seed | Are utility differences small relative to numerical error? |
+| Predictive bands are too narrow | Was observation noise omitted from latent-mean uncertainty? |
+
+The [Week 15 session](../exercise-sessions/15-review.qmd) is for student code
+and questions. For each example: state the target density, identify the economic
+estimand, reproduce the smallest failure, make one correction, and explain what
+remains uncertain.
+
+### Questions to bring to the final discussion
+
+1. Which assumptions in your application come from economic reasoning and which
+   are computational conveniences?
+2. What would more data resolve that more simulation cannot?
+3. Which reported intervals condition on estimated hyperparameters?
+4. What evidence would make you change the model or identifying assumptions?
+5. Can another student reproduce your result from its stated sample and prior?
+
+### Reading guide
+
+Return to Koop (2003), *Bayesian Econometrics*, for the unifying framework;
+Bauwens, Lubrano and Richard (1999), *Bayesian Inference in Dynamic Econometric
+Models*, for dynamic models; Robert and Casella (2004), *Monte Carlo Statistical
+Methods*, for computational questions. Use each chapter's textbook guide for
+its specialised material.
