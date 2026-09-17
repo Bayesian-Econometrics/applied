@@ -3,7 +3,7 @@ title: "Week 4: The workhorse"
 subtitle: "Python exercise session"
 ---
 
-[Lecture notes](../lecture-notes/04-gibbs-sampling.qmd) · [Fixed course schedule](../schedule.qmd)
+[Chapter text](../lecture-notes/04-gibbs-sampling.qmd) · [Fixed course schedule](../course-information.qmd#weekly-plan)
 
 ## The economic question
 

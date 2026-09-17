@@ -1,0 +1,170 @@
+---
+title: "Course information"
+subtitle: "Module, weekly plan, examination, and reading"
+aliases:
+  - /syllabus.html
+  - /schedule.html
+  - /assessment.html
+  - /literature.html
+---
+
+Course materials are published on this website. **ILIAS** is used only for
+announcements and news. Start with the [lectures](lecture-notes/index.qmd)
+and work through the corresponding [exercises](exercise-sessions/index.qmd).
+
+## Module facts
+
+| | |
+|---|---|
+| Coordinators | Prof. Dr. Roxana Halbleib & Dr. Christoph Frey |
+| Department | Statistik und Ökonometrie |
+| Parts | Lecture and exercise session |
+| Credit points | 6 ECTS |
+| Contact hours | 2 SWS lecture + 2 SWS exercise session |
+| Workload | 180 h total (60 h contact, 120 h independent study) |
+| Semester | 3rd semester, elective, irregular schedule |
+| Language | English |
+
+: Module overview {.striped}
+
+The module is an elective in the handbooks of M.Sc. VWL and M.Sc. BWL (PNPM).
+
+## Prerequisites
+
+Mathematics, statistics, probability theory, and regression analysis (estimation
+and hypothesis testing). Python is essential for the exercise sessions.
+
+## Content
+
+The module covers the fundamentals of Bayesian inference and their application to
+high-dimensional datasets in economics and finance, with equal weight on
+theoretical foundations and empirical implementation in Python.
+
+- Subjective probability and the Bayesian paradigm
+- MCMC algorithms: Gibbs sampling and Metropolis-Hastings
+- Shrinkage and the Minnesota prior
+- BVARs and state-space models for macroeconomics
+- Stochastic volatility and portfolio choice
+- Bayesian machine learning for causal inference
+
+## Learning outcomes
+
+After completing the module, students are able to
+
+- explain the theoretical foundations of Bayesian inference and subjective probability,
+- analyse complex, high-dimensional datasets with modern Bayesian techniques,
+- apply Bayesian econometric methods to empirical problems in economics and finance,
+- implement standard Bayesian algorithms and models in original Python code,
+- critically evaluate empirical findings while accounting for uncertainty.
+
+## Weekly plan {#weekly-plan}
+
+::: {.callout-note}
+### Dates
+Exact dates and room assignments are confirmed on ILIAS before the term starts.
+Each week pairs a 90-minute lecture (2 SWS) with an exercise session (2 SWS) in which the
+week's method is implemented in Python.
+:::
+
+### Foundations
+
+| Week | Lecture | Content | Literature | Exercise (Python) |
+|:--|---|---|---|---|
+| 1 | Introduction: The Bayesian Paradigm | Subjective probabilities, Bayes' theorem, priors, likelihoods, and posteriors | Koop (2003); Zellner (1971) | Grid search: calculating a posterior for a beta-binomial model using discrete grids |
+| 2 | The Linear Regression Model | Normal-Inverse-Gamma conjugate priors, analytical solutions, and marginal posterior distributions | Koop (2003); Box and Tiao (1973) | Matrix update: manual NIG update for CAPM betas using only algebra |
+| 3 | Monte Carlo Integration and Importance Sampling | Random sampling for approximating integrals, numerical estimation of expected values, and importance weighting | Geweke (1989); Robert (2004) | Vanilla MC: coding an option pricing simulator that incorporates parameter uncertainty |
+
+: {.striped}
+
+### Computation
+
+| Week | Lecture | Content | Literature | Exercise (Python) |
+|:--|---|---|---|---|
+| 4 | Gibbs Sampling | MCMC fundamentals, full conditional distributions, and iterative sampling mechanics | Casella (1992); Gelfand (1990) | The workhorse: programming a Gibbs sampler for multiple regression from scratch |
+| 5 | Metropolis-Hastings and NUTS Sampling | Acceptance-rejection algorithms for non-conjugate models, proposal distributions, and Hamiltonian Monte Carlo | Chib (1995); Hoffman (2014) | HMC vs MH: comparing sampling efficiency for a non-conjugate logistic model |
+| 6 | Minnesota Priors | Minnesota priors and the logic of regularization to prevent overfitting in large models | Banbura (2010); Rubio-Ramirez (2010) | Prior tuning: manual construction of the Minnesota covariance matrix for large systems |
+
+: {.striped}
+
+### Macro & Policy
+
+| Week | Lecture | Content | Literature | Exercise (Python) |
+|:--|---|---|---|---|
+| 7 | BVARs and Identification | Multivariate systems and sign restrictions to identify structural shocks | Banbura (2010); Rubio-Ramirez (2010) | BVAR lab: estimating a 3-variable system with sign-restricted impulse responses |
+| 8 | State Space and Time-Varying Parameter Models | The Kalman filter and drifting coefficients in time-varying parameter models | Primiceri (2005); Durbin and Koopman (2012) | TVP filter: coding the Kalman recursions to track drifting market betas over time |
+| 9 | Prediction and Bayesian Model Averaging | Posterior predictive distributions and Bayesian model averaging for robust forecasts | Madigan and Raftery (1994) | Backtesting: calculating log-predictive scores and weighting models via BMA |
+| 10 | Causal Inference | Bayesian IV and treatment effects using BART for policy analysis | Imbens and Rubin (2015); Hill (2011) | Policy impact: estimating causal effects with BART and quantifying the uncertainty |
+
+: {.striped}
+
+### Finance
+
+| Week | Lecture | Content | Literature | Exercise (Python) |
+|:--|---|---|---|---|
+| 11 | Variable Selection and Big Data | Taming the quadrillion-regressions problem with sparsity versus shrinkage priors | Kozak (2020); Giannone et al. (2015) | SSVS sampler: coding a spike-and-slab algorithm to select relevant finance factors |
+| 12 | Stochastic Volatility | Latent volatility processes and time-varying risk models | Kim et al. (1998); Jacquier (1994) | SV sampler: MCMC implementation for log-volatility using the JPR algorithm |
+| 13 | Portfolio Choice | Expected utility and decision theory under parameter and model uncertainty | Avramov (2010) | Robust allocation: maximizing expected utility using MCMC predictive draws |
+| 14 | Bayesian Machine Learning | Gaussian processes and probabilistic neural nets for non-linear finance | Chipman (2010); Rasmussen (2006) | Non-linear Bayes: comparing BART versus OLS for predicting returns with non-linearities |
+
+: {.striped}
+
+### Review
+
+| Week | Lecture | Content | Literature | Exercise (Python) |
+|:--|---|---|---|---|
+| 15 | Q&A and Review | Review lectures and open questions |  | Review: troubleshooting student code |
+
+: {.striped}
+
+## Assessment {#assessment}
+
+### Examination
+
+The module is assessed by a **written final exam of 90 minutes**.
+
+Permitted aids in the exam:
+
+- a non-programmable calculator,
+- a hard copy of a German–English dictionary (book form), and
+- a one-sided A4 hand-written cheat sheet.
+
+### Grading
+
+The final grade is based **100% on the written exam**.
+
+### How to prepare
+
+The exam tests both the theory and your ability to reason about Bayesian methods,
+not your ability to run code under time pressure. The most reliable preparation is
+to work through every exercise yourself during the term rather than reading the
+solutions. Use the one-page cheat sheet as a forcing function: condensing the
+material onto a single side is itself a good revision exercise.
+
+::: {.callout-note}
+The examination requirements follow the examination regulations of your
+programme. Consult your programme's examination regulations and module handbook
+for the binding requirements. Exam announcements and news are posted on ILIAS.
+:::
+
+## Reading {#reading}
+
+Koop’s *Bayesian Econometrics* provides a starting point for the course.
+Each chapter has its own reading guide with the relevant textbook sections
+and research papers; you do not need to read every book listed here.
+
+### Introductory textbooks
+
+- Chan, Joshua, et al. *Bayesian Econometric Methods*. Cambridge University Press, 2019.
+- Gelman, Andrew, et al. *Bayesian Data Analysis*. Chapman and Hall/CRC, 2013.
+- Geweke, John. *Contemporary Bayesian Econometrics and Statistics*. John Wiley & Sons, 2005.
+- Koop, Gary M. *Bayesian Econometrics*. Wiley, 2003.
+- Lambert, Ben. *A Student's Guide to Bayesian Statistics*. Sage Publishing, 2018.
+
+### Further textbooks and monographs
+
+- Box, George E. P., and George C. Tiao. *Bayesian Inference in Statistical Analysis*. Addison-Wesley, 1973.
+- Durbin, James, and Siem Jan Koopman. *Time Series Analysis by State Space Methods*. 2nd ed. Oxford University Press, 2012.
+- Imbens, Guido W., and Donald B. Rubin. *Causal Inference for Statistics, Social, and Biomedical Sciences*. Cambridge University Press, 2015.
+- Rasmussen, Carl E., and Christopher K. I. Williams. *Gaussian Processes for Machine Learning*. MIT Press, 2006.
+- Robert, Christian P., and George Casella. *Monte Carlo Statistical Methods*. 2nd ed. Springer, 2004.
+- Zellner, Arnold. *An Introduction to Bayesian Inference in Econometrics*. Wiley, 1971.

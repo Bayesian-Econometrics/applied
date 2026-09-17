@@ -14,8 +14,8 @@ website:
   site-url: "https://bayesian-econometrics.github.io/applied-bayesian-econometrics-homepage/"
   page-navigation: true
   sidebar:
-    title: "Lecture notes"
-    style: docked
+    title: "Lectures"
+    style: floating
     contents: "lecture-notes/*.qmd"
   navbar:
     background: primary
@@ -25,20 +25,12 @@ website:
     left:
       - text: "Home"
         href: index.qmd
-      - text: "Syllabus"
-        href: syllabus.qmd
-      - text: "Schedule"
-        href: schedule.qmd
-      - text: "Lecture notes"
+      - text: "Course information"
+        href: course-information.qmd
+      - text: "Lectures"
         href: lecture-notes/index.qmd
       - text: "Exercises"
         href: exercise-sessions/index.qmd
-      - text: "Literature"
-        href: literature.qmd
-      - text: "Assessment"
-        href: assessment.qmd
-      - text: "Slides"
-        href: slides.qmd
   page-footer:
     left: "Applied Bayesian Econometrics &middot; University of Freiburg"
     center: "Prof. Dr. Roxana Halbleib &middot; Dr. Christoph Frey"
@@ -46,6 +38,7 @@ website:
 
 format:
   html:
+    page-layout: article
     theme:
       - cosmo
       - theme/freiburg_web.scss
@@ -55,4 +48,7 @@ format:
     code-copy: true
     smooth-scroll: true
     grid:
-      body-width: 900px
+      sidebar-width: 250px
+      body-width: 800px
+      margin-width: 250px
+      gutter-width: 1.5em

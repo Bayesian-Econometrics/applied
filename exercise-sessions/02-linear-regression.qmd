@@ -3,7 +3,7 @@ title: "Week 2: Matrix update"
 subtitle: "Python exercise session"
 ---
 
-[Lecture notes](../lecture-notes/02-linear-regression.qmd) · [Fixed course schedule](../schedule.qmd)
+[Chapter text](../lecture-notes/02-linear-regression.qmd) · [Fixed course schedule](../course-information.qmd#weekly-plan)
 
 ## The economic question
 

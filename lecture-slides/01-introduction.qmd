@@ -58,7 +58,7 @@ accounting for uncertainty, not magic.
 14. Bayesian machine learning
 15. Q&A and review
 
-The [schedule](../schedule.qmd) specifies each week's reading and Python exercise.
+The [schedule](../course-information.qmd#weekly-plan) specifies each week's reading and Python exercise.
 
 ## Objectives
 
@@ -69,7 +69,7 @@ We move from theory to working code in every session.
 - In plain words: *learn Bayesian econometrics by building it in Python*
 
 The course is grounded in the textbook literature and recent papers. Be prepared
-to read and discuss; see the [literature list](../literature.qmd).
+to read and discuss; see the [literature list](../course-information.qmd#reading).
 
 # Administration
 
@@ -77,7 +77,7 @@ to read and discuss; see the [literature list](../literature.qmd).
 
 - **Coordinators:** Prof. Dr. Roxana Halbleib and Dr. Christoph Frey
 - **Department:** Statistik und Ökonometrie
-- All material, updates, and announcements are posted on **ILIAS**
+- Course materials are on the [course website](../index.qmd); **ILIAS** is used only for announcements and news
 - The exercise sessions are where the Python work happens — come prepared
 
 ## How the course works
@@ -314,5 +314,5 @@ The [exercise session](../exercise-sessions/01-introduction.qmd) uses a second d
 - Use the [lecture notes](../lecture-notes/01-introduction.qmd) for worked derivations
 - Bring questions to the first exercise session
 
-Material and updates: **ILIAS**. See the [course homepage](../index.qmd) for the
-schedule and reading list.
+See the [course homepage](../index.qmd) for materials, the schedule, and the
+reading list. **ILIAS** is used only for announcements and news.

@@ -3,7 +3,7 @@ title: "Week 9: Backtesting"
 subtitle: "Python exercise session"
 ---
 
-[Lecture notes](../lecture-notes/09-prediction-bma.qmd) · [Fixed course schedule](../schedule.qmd)
+[Chapter text](../lecture-notes/09-prediction-bma.qmd) · [Fixed course schedule](../course-information.qmd#weekly-plan)
 
 ## The economic question
 

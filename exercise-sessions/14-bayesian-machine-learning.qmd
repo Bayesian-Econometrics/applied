@@ -3,7 +3,7 @@ title: "Week 14: Non-linear Bayes"
 subtitle: "Python exercise session"
 ---
 
-[Lecture notes](../lecture-notes/14-bayesian-machine-learning.qmd) · [Fixed course schedule](../schedule.qmd)
+[Chapter text](../lecture-notes/14-bayesian-machine-learning.qmd) · [Fixed course schedule](../course-information.qmd#weekly-plan)
 
 ## The economic question
 

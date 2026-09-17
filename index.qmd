@@ -4,8 +4,6 @@ subtitle: "Bayesian inference for economics and finance"
 author:
   - name: Prof. Dr. Roxana Halbleib
   - name: Dr. Christoph Frey
-date: today
-date-format: "[Spring] YYYY"
 page-layout: full
 toc: false
 ---
@@ -23,7 +21,7 @@ foundations with hands-on empirical implementation in **Python**.
 ::: {.g-col-12 .g-col-md-4}
 ::: {.fr-card}
 ### Format
-2h lecture and 2h exercise session per week. 6 ECTS. Taught in English.
+90-minute lecture (2 SWS) and an exercise session (2 SWS) per week. 6 ECTS. Taught in English.
 :::
 :::
 
@@ -38,7 +36,7 @@ stochastic volatility, and Bayesian machine learning.
 ::: {.g-col-12 .g-col-md-4}
 ::: {.fr-card}
 ### How you work
-Every method is implemented from scratch in Python during the exercise sessions.
+Derive Bayesian updates, implement core algorithms in Python, and use statistical libraries for more complex models.
 :::
 :::
 
@@ -58,16 +56,18 @@ The emphasis is modern and practical. You will not just read about Gibbs sampler
 and Metropolis-Hastings; you will write them. By the end you should have a working
 toolbox and the judgment to use it critically.
 
-## Where to go next
+## Course materials
 
-- [Syllabus](syllabus.qmd) — module description, prerequisites, and learning outcomes.
-- [Schedule](schedule.qmd) — proposed week-by-week lecture and exercise plan.
-- [Literature](literature.qmd) — textbooks and core papers.
-- [Assessment](assessment.qmd) — exam format and grading.
-- [Slides](slides.qmd) — lecture decks as they are released.
+The **lecture chapters are the main course material**: explanations, derivations,
+figures, and Python examples. Presentation slides accompany classroom teaching;
+links appear on the corresponding chapter when a deck is available.
+
+- [Lectures](lecture-notes/index.qmd) — read the chapters and access available presentation slides.
+- [Exercises](exercise-sessions/index.qmd) — practise derivations, implementation, and interpretation.
+- [Course information](course-information.qmd) — prerequisites, weekly plan, examination, and textbooks.
 
 ::: {.callout-note}
 ## Course platform
-All course material, updates, and announcements are published on **ILIAS**.
-This site mirrors the structure and links to the slides as they go live.
+Course materials are published on this website, including lecture notes,
+slides, and exercises. **ILIAS** is used only for announcements and news.
 :::

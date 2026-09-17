@@ -12,6 +12,8 @@ format:
         </style>
 ---
 
+**Chapter text** · [Exercise session](../exercise-sessions/05-metropolis-hastings-nuts.qmd)
+
 ::: {.callout-tip icon=false}
 ## Key takeaways {.unnumbered}
 

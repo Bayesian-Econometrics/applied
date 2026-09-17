@@ -1,5 +1,5 @@
 ---
-title: "Exercise sessions"
+title: "Exercises"
 ---
 
 Each session follows the lecture schedule. Derive the update first, implement it in Python, then explain the output. Open the reference implementation after attempting the core task. The additional questions extend the lecture examples.

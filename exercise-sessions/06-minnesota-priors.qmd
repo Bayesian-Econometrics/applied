@@ -3,7 +3,7 @@ title: "Week 6: Prior tuning"
 subtitle: "Python exercise session"
 ---
 
-[Lecture notes](../lecture-notes/06-minnesota-priors.qmd) · [Fixed course schedule](../schedule.qmd)
+[Chapter text](../lecture-notes/06-minnesota-priors.qmd) · [Fixed course schedule](../course-information.qmd#weekly-plan)
 
 ## The economic question
 

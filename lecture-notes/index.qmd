@@ -1,5 +1,7 @@
 ---
-title: "Lecture notes"
+title: "Lectures"
+aliases:
+  - /slides.html
 subtitle: "Bayesian econometrics, chapter by chapter"
 listing:
   contents:
@@ -17,8 +19,11 @@ toc: false
 number-sections: false
 ---
 
-These are the long-form notes for each lecture: the theory written out, with the
-matching Python worked through inline so you can run and adapt it. They mirror the
-[slides](../slides.qmd) and follow the [schedule](../schedule.qmd). All code uses
-only `numpy`, `scipy`, `pandas`, and `matplotlib`, and simulates its own data, so
-every page runs without external files.
+The chapters below are the **main course material**. They explain the intuition,
+derive the Bayesian results, and work through economic and financial applications
+with figures and Python code. Follow the [weekly plan](../course-information.qmd#weekly-plan).
+
+Each chapter links to its **exercise session** and, where available, its
+**presentation slides**. The slides support classroom presentations; use the
+chapter text for the full explanation and its reading guide for further study.
+

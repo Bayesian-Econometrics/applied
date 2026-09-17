@@ -14,6 +14,8 @@ format:
         </style>
 ---
 
+**Chapter text** · [Presentation slides](../lecture-slides/01-introduction.qmd) · [Exercise session](../exercise-sessions/01-introduction.qmd)
+
 ::: {.callout-tip icon=false}
 ## Key takeaways {.unnumbered}
 

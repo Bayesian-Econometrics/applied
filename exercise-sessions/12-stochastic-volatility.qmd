@@ -3,7 +3,7 @@ title: "Week 12: SV sampler"
 subtitle: "Python exercise session"
 ---
 
-[Lecture notes](../lecture-notes/12-stochastic-volatility.qmd) · [Fixed course schedule](../schedule.qmd)
+[Chapter text](../lecture-notes/12-stochastic-volatility.qmd) · [Fixed course schedule](../course-information.qmd#weekly-plan)
 
 ## The economic question
 
