@@ -62,25 +62,47 @@ DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
 
 ## Intuition: a simple worked example {#sec-intuition}
 
-Suppose cash returns zero and a risky asset returns +20% or -20% with equal
-probability. A 50% risky allocation gives wealth 1.1 or 0.9 from initial wealth 1.
-Expected wealth is still 1, but expected log utility is
-$\tfrac12\log(1.1)+\tfrac12\log(0.9)\approx-0.005$.
-All cash gives log utility zero.
+Suppose we must divide a fully invested portfolio between two similar
+risky strategies. Each has annual volatility of 15%, their correlation
+is 0.8, and their estimated annual returns are 6% and 7%. Neither estimate
+is known precisely. Should a one-percentage-point difference determine
+most of the allocation?
 
-Risk aversion makes the distribution matter even when expected wealth agrees.
-If the probabilities or returns are uncertain, average their implications too.
+For this opening calculation, use the mean–variance criterion with risk
+aversion 4 and long-only weights. The estimated optimum puts about 22%
+in the first strategy. If its estimated return rises from 6% to 7%, the
+allocation becomes 50/50; at 8%, its weight is about 78%. Risk estimates
+and preferences have not changed—only one estimated mean has moved.
+
+These are deliberately illustrative estimates. A one-percentage-point
+change is small relative to the standard error $0.15/\sqrt{40}\approx2.4$%
+of an individual sample mean from 40 independent annual observations.
+The relevant uncertainty about the *difference* also depends on correlation.
+The question is not which point estimate looks best, but how confidently
+we can distinguish the two investment opportunities.
 
 ```{python}
-#| label: fig-portfolio-two-states
-#| fig-cap: "Illustrative equal-probability gains and losses. Expected wealth is constant, but expected log utility decreases as exposure increases."
+#| label: fig-portfolio-estimation-sensitivity
+#| fig-cap: "The same two-asset decision under different estimated means for asset 1. The changing optimum reflects sensitivity to an input, not changing investor preferences."
 #| code-fold: true
-weights = np.linspace(0, .9, 91)
-utility = .5*np.log(1+.2*weights)+.5*np.log(1-.2*weights)
+toy_mu = np.array([0.06, 0.07])
+toy_cov = np.array([[0.15**2, 0.8 * 0.15**2],
+                    [0.8 * 0.15**2, 0.15**2]])
+toy_weights = np.column_stack([np.linspace(0, 1, 301),
+                               np.linspace(1, 0, 301)])
+TOY_GAMMA = 4.0
+toy_variances = np.einsum("ij,jk,ik->i", toy_weights, toy_cov, toy_weights)
 fig, ax = plt.subplots()
-ax.plot(weights, utility, color=BLUE)
-ax.set(xlabel="Risky weight", ylabel="Expected log utility")
-ax.grid(axis="y", alpha=.3)
+for first_mean, color in [(0.06, GREY), (0.07, BLUE), (0.08, BROWN)]:
+    values = (toy_weights @ np.array([first_mean, 0.07])
+              - TOY_GAMMA / 2 * toy_variances)
+    optimum = np.argmax(values)
+    ax.plot(toy_weights[:, 0], 100 * values, color=color,
+             label=f"Asset 1 mean {100 * first_mean:.0f}%")
+    ax.scatter(toy_weights[optimum, 0], 100 * values[optimum], color=color)
+ax.set(xlabel="Weight in asset 1", ylabel="Mean–variance criterion (annual %)")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=3, frameon=False)
 plt.tight_layout()
 plt.show()
 ```
@@ -103,10 +125,10 @@ The covariance term explains diversification. When returns do not move
 perfectly together, combining assets can reduce risk relative to a
 weighted average of their individual standard deviations.
 
-Consider illustrative annual means of 6% and 10%, standard deviations of
-10% and 20%, and correlation 0.2. Equal weights give an 8% expected return
-and variance $0.0145$, or approximately 12.0% volatility. These are
-teaching numbers, not estimates of particular securities.
+Keep the opening example: annual means of 6% and 7%, standard deviations
+of 15%, and correlation 0.8. Equal weights give a 6.5% expected return
+and variance $0.02025$, or approximately 14.2% volatility. Diversification
+helps, although the high correlation limits the reduction in risk.
 
 Differentiating the variance with respect to $w$ gives the
 minimum-variance weight in asset 1:
@@ -115,7 +137,7 @@ w_{\mathrm{GMV}}=
 \frac{\sigma_2^2-\rho\sigma_1\sigma_2}
 {\sigma_1^2+\sigma_2^2-2\rho\sigma_1\sigma_2}.
 $$
-Here it is about 0.857. Moving toward asset 2 from this point raises
+Here it is 0.5. Moving toward asset 2 from this point raises
 expected return and risk. Moving toward asset 1 lowers expected return
 while raising risk, so that branch is dominated. The **efficient
 frontier** contains feasible portfolios for which no other feasible
@@ -125,11 +147,6 @@ portfolio offers a higher mean at the same or lower variance.
 #| label: fig-portfolio-frontier
 #| fig-cap: "Illustrative long-only two-asset opportunity set. The efficient branch starts at the global minimum-variance portfolio. All moments here are annual teaching inputs."
 #| code-fold: true
-toy_mu = np.array([0.06, 0.10])
-toy_cov = np.array([[0.10**2, 0.2 * 0.10 * 0.20],
-                    [0.2 * 0.10 * 0.20, 0.20**2]])
-toy_weights = np.column_stack([np.linspace(0, 1, 301),
-                               np.linspace(1, 0, 301)])
 toy_means = toy_weights @ toy_mu
 toy_variances = np.einsum("ij,jk,ik->i", toy_weights, toy_cov, toy_weights)
 gmv_index = np.argmin(toy_variances)
@@ -142,9 +159,9 @@ ax.scatter(100 * np.sqrt(toy_variances[gmv_index]),
             100 * toy_means[gmv_index], color=BROWN)
 ax.annotate("Minimum variance",
              (100 * np.sqrt(toy_variances[gmv_index]), 100 * toy_means[gmv_index]),
-             xytext=(12, 6.5), arrowprops={"arrowstyle": "-", "color": GREY})
-ax.text(10, 6, " Asset 1", va="top")
-ax.text(20, 10, " Asset 2", va="bottom")
+             xytext=(14.5, 6.4), arrowprops={"arrowstyle": "-", "color": GREY})
+ax.text(15, 6, " Asset 1", va="top")
+ax.text(15, 7, " Asset 2", va="bottom")
 ax.set(xlabel="Annual volatility (%)", ylabel="Annual expected return (%)")
 ax.grid(axis="y", alpha=0.3)
 plt.tight_layout()
@@ -228,8 +245,7 @@ Drawing these curves shows uncertainty about opportunities; it does not
 mean the investor can observe the true curve before choosing weights.
 
 ```{python}
-#| label: fig-portfolio-frontier-uncertainty
-#| fig-cap: "Efficient branches for posterior parameter draws from a simulated two-asset sample. The grey curves are plausible frontiers, not a simultaneous credible band."
+#| label: portfolio-parameter-draws
 #| code-fold: true
 frontier_rng = np.random.default_rng(SEED + 10)
 toy_sample = frontier_rng.multivariate_normal(toy_mu, toy_cov, size=40)
@@ -255,14 +271,61 @@ mu_draws = np.array([
     frontier_rng.multivariate_normal(post_mean, covariance / post_strength)
     for covariance in cov_draws
 ])
+```
+
+### What do we know about a fixed allocation?
+
+Keep the investment decision fixed while varying the unknown parameters.
+For weights $w$, each posterior draw gives expected return
+$w^\top\mu^{(s)}$ and volatility $\sqrt{w^\top\Sigma^{(s)}w}$.
+The following panels track three identifiable allocations. The points
+represent uncertainty about their population moments, not realised future
+returns. They are posterior draws, not simultaneous credible regions.
+
+```{python}
+#| label: fig-portfolio-fixed-allocation-uncertainty
+#| fig-cap: "Posterior uncertainty in expected return and volatility for three fixed allocations. All panels share axes and use the same parameter draws; dots mark posterior-average coordinates."
+#| code-fold: true
+fig, axes = plt.subplots(3, 1, figsize=(9, 10), sharex=True, sharey=True)
+for ax, first_weight in zip(axes, [0.25, 0.5, 0.75]):
+    allocation = np.array([first_weight, 1 - first_weight])
+    mean_points = mu_draws @ allocation
+    sd_points = np.sqrt(np.einsum("i,sij,j->s", allocation, cov_draws, allocation))
+    ax.scatter(100 * sd_points[:500], 100 * mean_points[:500],
+               color=BLUE, alpha=0.15, s=12)
+    ax.scatter(100 * sd_points.mean(), 100 * mean_points.mean(),
+               color=BROWN, s=55)
+    ax.set(title=f"Asset 1 / asset 2: {first_weight:.0%} / {1-first_weight:.0%}",
+           ylabel="Expected annual return (%)")
+    ax.grid(axis="y", alpha=0.3)
+axes[-1].set_xlabel("Annual volatility (%)")
+plt.tight_layout()
+plt.show()
+```
+
+The allocation is known in each panel; its expected performance is not.
+Similar clouds indicate that the data may not clearly distinguish the
+opportunities. Compare portfolios using paired draws, because their
+uncertainties are related. The cloud's centre is not a predictive
+mean–variance point: mean conditional volatility differs from predictive
+volatility, which also includes uncertainty about expected returns.
+
+Five posterior frontiers provide a secondary view of the same draws.
+There is no requirement that they be visibly separated. Their role is to
+show that the whole opportunity set depends on unknown parameters.
+
+```{python}
+#| label: fig-portfolio-frontier-uncertainty
+#| fig-cap: "Five posterior frontier draws. Overlap is possible; these curves are not a simultaneous credible band."
+#| code-fold: true
 fig, ax = plt.subplots()
-for means, covariance in zip(mu_draws[:60], cov_draws[:60]):
+for means, covariance in zip(mu_draws[:5], cov_draws[:5]):
     portfolio_means = toy_weights @ means
     portfolio_var = np.einsum("ij,jk,ik->i", toy_weights, covariance, toy_weights)
     minimum = np.argmin(portfolio_var)
     efficient = slice(0, minimum + 1) if means[1] >= means[0] else slice(minimum, None)
     ax.plot(100 * np.sqrt(portfolio_var[efficient]),
-             100 * portfolio_means[efficient], color=GREY, alpha=0.18)
+             100 * portfolio_means[efficient], color=GREY, alpha=0.5)
 ax.plot(100 * np.sqrt(toy_variances[:gmv_index + 1]),
          100 * toy_means[:gmv_index + 1], color=BLUE, label="Generating frontier")
 ax.set(xlabel="Annual volatility (%)", ylabel="Annual expected return (%)")
@@ -314,7 +377,7 @@ which parameters generated the data.
 
 ```{python}
 #| label: fig-portfolio-weight-uncertainty
-#| fig-cap: "Optimal asset-1 weights if each parameter draw were known, versus one allocation chosen using predictive moments. All portfolios here are fully invested in the two risky assets."
+#| fig-cap: "The predictive mean–variance criterion across feasible allocations, expressed relative to its maximum. A flat region means nearby choices have similar decision value."
 #| code-fold: true
 TOY_GAMMA = 4.0
 draw_optima = []
@@ -331,19 +394,23 @@ predictive_value = (
 )
 predictive_weight = toy_weights[np.argmax(predictive_value), 0]
 fig, ax = plt.subplots()
-ax.hist(draw_optima, bins=np.linspace(0, 1, 26), density=True,
-         color=GREY, alpha=0.6)
-ax.axvline(predictive_weight, color=BLUE, label="Predictive mean–variance choice")
-ax.axvline(np.mean(draw_optima), color=BROWN, linestyle="--",
+ax.plot(toy_weights[:, 0], 10000 * (predictive_value - predictive_value.max()),
+         color=BLUE)
+ax.axvline(predictive_weight, color=BLUE, linestyle="--",
+           label="Predictive mean–variance choice")
+ax.axvline(np.mean(draw_optima), color=BROWN, linestyle=":",
            label="Mean of draw-specific optima")
-ax.set(xlabel="Weight in asset 1", ylabel="Density")
+ax.set(xlabel="Weight in asset 1",
+       ylabel="Criterion difference from optimum (annual basis points)")
 ax.grid(axis="y", alpha=0.3)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), frameon=False)
 plt.tight_layout()
 plt.show()
 ```
 
-The two lines need not coincide. They can also be close in a particular
+The curve makes the economic cost of moving away from the optimum visible.
+A precise grid optimum need not imply a large advantage over nearby weights.
+The two vertical lines need not coincide. They can also be close in a particular
 sample; the conceptual distinction does not require a large numerical gap.
 Moreover, predictive mean–variance optimisation is a specified decision
 criterion, not automatically expected utility for every distribution.
