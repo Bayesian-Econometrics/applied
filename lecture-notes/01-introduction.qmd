@@ -19,82 +19,31 @@ format:
 ::: {.callout-tip icon=false}
 ## Key takeaways {.unnumbered}
 
-- **The data are observed; the parameter is unknown.** Nine heads in twelve tosses is a fact about our sample. The coin's underlying heads probability still needs to be learned.
+- **The data are observed; the parameter is unknown.** Seven heads in ten tosses is a fact about our sample. The coin's underlying heads probability still needs to be learned.
 - **Bayes' theorem updates prior beliefs using the likelihood.** Parameter values that explain the observations better gain probability relative to those that explain them less well.
 - **The posterior describes remaining uncertainty.** It gives us an estimate, but also intervals and probabilities about the unknown parameter.
 - **Prediction carries uncertainty forward.** We average over plausible parameter values and allow for randomness in the next observations.
 :::
 
-## What are we trying to learn? {#sec-motivation}
+## Seven heads in ten tosses: is the coin biased? {#sec-motivation}
 
-We toss a coin twelve times and observe nine heads and three tails. The observed
-proportion is $9/12=0.75$. Does that mean the coin's probability of heads is
-exactly 0.75? No: another twelve tosses could give a different proportion even
-if the coin has not changed.
+You toss a coin ten times and get seven heads. Is the coin biased?
 
-Let $\theta$ denote the coin's unknown probability of heads. Keep three
-questions in view throughout this chapter:
+Perhaps. But a fair coin can also produce seven heads. Ten tosses do not settle
+the question. Now suppose you toss it 100 times and get 70 heads. The proportion
+is still 70%, but there is much stronger evidence that heads is more likely
+than tails.
 
-1. **Estimation:** which values of $\theta$ are plausible after these observations?
-2. **Uncertainty:** how precisely have we learned $\theta$?
-3. **Prediction:** how many heads might we see in another twelve tosses?
+We need a method that tells us both **which heads probabilities the observations
+support** and **how much uncertainty remains**. We will build that method using
+this one coin, then use what we have learned to predict its next tosses.
 
-A single estimate cannot answer all three. We need a distribution describing
-what we know about $\theta$, then a way to translate that knowledge into
-predictions. Bayesian inference supplies both using ordinary probability rules.
+Let $\theta$ be the coin's probability of heads. The observed proportion, 0.7,
+is known. The underlying $\theta$ is not. It could be 0.5, 0.6, 0.7, or another
+value: several probabilities can generate the same observed sample.
 
-The coin keeps the first calculation simple. At the end, we will use the same
-reasoning to learn the probability of a negative market month. Later chapters
-replace $\theta$ with regression coefficients, changing volatility and other
-unknown economic quantities.
-
-### A fixed parameter can still be uncertain
-
-The coin can have one fixed heads probability while **we do not know its value**.
-A probability distribution over $\theta$ describes our uncertainty; it does not
-say that the physical coin changes its bias at every toss.
-
-Even if someone told us the true $\theta$, the next toss would remain random.
-Learning the parameter and predicting an outcome are therefore different tasks.
-First we will see how learning works when only two parameter values are possible.
-
-## How does an observation change our beliefs? {#sec-intuition}
-
-### Two coins and one observation
-
-A box contains two coins. One produces heads with probability $1/2$; the other
-produces heads with probability $4/5$. We select one coin at random, without
-seeing which, and keep that coin. Before tossing it, each possibility has prior
-probability $1/2$.
-
-Now we observe a head. Which coin is more plausible?
-
-Imagine 100 selection-and-toss trials. In expectation, 50 select each coin.
-Of the 50 fair-coin trials, 25 produce heads; of the 50 biased-coin trials,
-40 produce heads. Among the 65 head outcomes, 40 come from the biased coin.
-Its posterior probability is therefore $40/65=8/13\approx0.615$.
-These are expected counts to make the probabilities tangible, not a claim
-that a random set of 100 trials must produce exactly these counts.
-
-The same reasoning can be written without imaginary repetitions:
-
-| Possible coin | Prior probability | Probability of the observed head | Product | Posterior probability |
-|:--|--:|--:|--:|--:|
-| $\theta=1/2$ | $1/2$ | $1/2$ | $1/4$ | $5/13$ |
-| $\theta=4/5$ | $1/2$ | $4/5$ | $2/5$ | $8/13$ |
-
-The product is the joint probability of selecting that coin **and** observing a
-head. The products sum to $13/20$, the probability of a head before knowing which
-coin was selected. Dividing each product by that sum leaves probabilities
-conditional on the head we actually observed.
-
-Notice what we did not do. We did not conclude that a head proves the second
-coin was selected. Both coins can produce heads; one makes the observation more
-likely. The observation changes their relative plausibility.
-
-The plot below performs precisely the multiplication and normalisation in the
-table. Its bars are probabilities of the two alternatives and sum to one in
-each panel.
+Our first question is therefore: **how well does each possible value explain
+seven heads and three tails?**
 
 ```{python}
 #| label: setup-introduction
@@ -111,135 +60,11 @@ plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
 BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 ```
 
-```{python}
-#| label: fig-two-coin-update
-#| fig-cap: "One head makes the coin with a higher heads probability more plausible, while leaving both possibilities open."
-#| code-fold: true
-coin_values = np.array([0.5, 0.8])
-coin_prior = np.array([0.5, 0.5])
-coin_joint = coin_prior * coin_values
-coin_posterior = coin_joint / coin_joint.sum()
-fig, axes = plt.subplots(1, 2, figsize=(9, 4.5), sharey=True)
-for ax, probabilities, title in zip(
-        axes, [coin_prior, coin_posterior], ["Before the toss", "After one head"]):
-    ax.bar([0, 1], probabilities, color=[GREY, BLUE], width=0.55)
-    for position, probability in enumerate(probabilities):
-        ax.text(position, probability + 0.025, f"{probability:.2f}", ha="center")
-    ax.set(xticks=[0, 1], xticklabels=["Fair coin", "Heads probability 0.80"],
-           ylim=(0, 0.8), title=title)
-    ax.grid(axis="y", alpha=0.3)
-axes[0].set_ylabel("Probability of the selected coin")
-plt.tight_layout()
-plt.show()
-```
+## Which probabilities explain the observations well? {#sec-intuition}
 
-**Pause and reason.** Suppose we now observe a tail from the same selected coin.
-Which coin should gain probability? Use $5/13$ and $8/13$ as the updated prior
-weights, multiply by the respective tail probabilities, and normalise.
-The new probabilities are $25/41$ for the fair coin and $16/41$ for the biased
-coin. We have retained the first observation and incorporated the second.
+### Build the likelihood from one toss
 
-This is the operation we will repeat throughout the course:
-**start with probabilities, multiply by the likelihood of the observation,
-and normalise.** Next we derive the rule, then allow the coin to have any bias.
 
-## From probability rules to a likelihood {#sec-methodology}
-
-### Bayes' theorem comes from writing a joint probability twice
-
-For events $A$ and $B$, conditional probability gives
-
-$$
-P(A\cap B)=P(B\mid A)P(A)=P(A\mid B)P(B).
-$$
-
-Dividing by $P(B)>0$ yields Bayes' theorem:
-
-$$
-P(A\mid B)=\frac{P(B\mid A)P(A)}{P(B)}.
-$$
-
-If $A_1,\ldots,A_J$ are mutually exclusive and exhaustive possibilities, the
-law of total probability supplies the denominator:
-
-$$P(B)=\sum_{j=1}^J P(B\mid A_j)P(A_j).$$
-
-In the two-coin example, $A$ can mean “the selected coin is fair” and $B$ means “the observed toss is heads”. The two-coin table calculated exactly these terms. The rule itself adds no
-extra assumption about coins or economics. The model determines the probabilities
-that we put into it.
-
-Conditioning means restricting attention to the outcomes consistent with what
-we observed. Follow the branches from 100 trials to the 65 expected head
-outcomes. Once we observe a head, the tail branches are no longer relevant.
-The two remaining counts, 25 and 40, give the posterior weights.
-
-```{python}
-#| label: fig-conditioning-sample-space
-#| fig-cap: "Expected counts out of 100 trials. After observing heads, compare the 25 fair-coin heads with all 65 heads: P(fair coin | head) = 25/65. Faded tail branches are excluded by the observation."
-#| code-fold: true
-fig, ax = plt.subplots(figsize=(10, 5.5))
-ax.set(xlim=(0, 1), ylim=(0, 1))
-ax.axis("off")
-ax.text(0.12, 0.5, "100 trials", ha="center", va="center",
-        bbox=dict(boxstyle="round,pad=0.6", facecolor="white", edgecolor=GREY))
-for y_coin, label, heads, tails, color in [
-        (0.75, "Fair coin", 25, 25, BLUE),
-        (0.25, "Biased coin", 40, 10, BROWN)]:
-    ax.annotate("", xy=(0.36, y_coin), xytext=(0.22, 0.5),
-                arrowprops=dict(arrowstyle="->", color=color))
-    ax.text(0.45, y_coin, f"{label}\n50 trials", ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="white", edgecolor=color))
-    for offset, count, outcome in [(0.10, heads, "heads"), (-0.10, tails, "tails")]:
-        alpha = 1 if outcome == "heads" else 0.3
-        ax.annotate("", xy=(0.77, y_coin + offset), xytext=(0.57, y_coin),
-                    arrowprops=dict(arrowstyle="->", color=color, alpha=alpha))
-        ax.text(0.87, y_coin + offset, f"{count} {outcome}", ha="center",
-                va="center", color=color, alpha=alpha,
-                fontweight="bold" if outcome == "heads" else "normal")
-plt.tight_layout()
-plt.show()
-```
-
-The denominator in $P(A\mid B)=P(A\cap B)/P(B)$ is therefore essential:
-we measure the fair-coin-and-head outcomes relative to **all head outcomes**,
-not relative to all trials. Here this gives $25/65=5/13$.
-
-### From two possible values to an unknown parameter
-
-Let $\theta$ denote an unknown parameter and $y=(y_1,\ldots,y_n)$ the observed sample. Lower-case $y$ denotes the values actually observed; upper-case $Y$ will denote a sample that could vary across repetitions. When
-$\theta$ is continuous, we describe it by a density rather than a probability
-assigned to each individual value. The same factorisation of the joint density gives
-
-$$
-p(\theta\mid y)=\frac{p(y\mid\theta)p(\theta)}{p(y)},
-\qquad
-p(y)=\int p(y\mid\theta)p(\theta)\,d\theta.
-$$
-
-The integral replaces the sum over the two coins. It weights the probability
-of the observed data at every parameter value by its prior plausibility.
-It also makes the posterior density integrate to one.
-
-Once $y$ is observed, $p(y)$ is a number that does not change with $\theta$.
-For identifying the shape of the posterior, we can therefore write
-
-$$\underbrace{p(\theta\mid y)}_{\text{posterior}}
-\ \propto\
-\underbrace{p(y\mid\theta)}_{\text{likelihood}}
-\underbrace{p(\theta)}_{\text{prior}}.$$
-
-The symbol $\propto$ means “equal up to a positive constant independent of
-$\theta$”. The expression on the right is a **posterior kernel**. It is enough
-to identify many familiar distributions, but we still need normalisation when
-calculating probabilities.
-
-A density value is not the probability of an exact parameter value. For a
-continuous parameter, probabilities are **areas**, such as
-$P(0.4<\theta<0.6\mid y)=\int_{0.4}^{0.6}p(\theta\mid y)\,d\theta$.
-Also, the likelihood is not a posterior: it holds the observed data fixed and
-compares parameter values, without incorporating their prior plausibility.
-
-### Build the Bernoulli likelihood from one observation
 
 Now let the coin's heads probability be any $\theta\in(0,1)$. Write $Y_i=1$
 for a head and $Y_i=0$ for a tail. One observation has probabilities
@@ -263,38 +88,69 @@ p(y_1,\ldots,y_n\mid\theta)
 \end{aligned}
 $$
 
-For nine heads in twelve tosses this becomes $\theta^9(1-\theta)^3$.
-A value close to zero struggles to explain nine heads; a value close to one
-struggles to explain three tails. The likelihood is highest at $s/n=0.75$.
+For seven heads in ten tosses this becomes $\theta^7(1-\theta)^3$.
+A value close to zero struggles to explain seven heads; a value close to one
+struggles to explain three tails. The likelihood is highest at $s/n=0.7$.
 
 If we record only the total $S=s$, its **binomial** probability is
 $\binom ns\theta^s(1-\theta)^{n-s}$. The binomial coefficient counts sequences
 with the same total. Since it does not depend on $\theta$, either representation
 gives the same posterior for $\theta$.
 
-Before choosing a prior, read the likelihood as a comparison of explanations.
-The observed sample stays fixed while we vary the proposed heads probability.
-The peak at 0.75 identifies the best-fitting value, but it does not tell us the
-probability that this value is true. We have not yet assigned probabilities
-to the possible parameter values.
+This expression is the **likelihood**: the observed tosses stay fixed, while
+we compare possible values of $\theta$. At $\theta=0.7$ the observed sequence
+has about twice the probability it has at $\theta=0.5$. That favours 0.7, but
+it is not overwhelming evidence against a fair coin.
+
+### Why do 100 tosses tell us more than ten?
+
+For 70 heads and 30 tails the likelihood is $\theta^{70}(1-\theta)^{30}$.
+It still peaks at 0.7. But values away from 0.7 now explain the observations
+much less well. We see the same pattern repeated more often.
 
 ```{python}
 #| label: fig-coin-likelihood
-#| fig-cap: "The same nine heads and three tails evaluated under different possible heads probabilities. Height measures relative support from the data; the curve is not a posterior density."
+#| fig-cap: "Both samples have 70% heads. With 100 tosses, support falls much faster away from 0.7. Each likelihood is divided by its own maximum to compare shapes; heights are not probabilities of parameter values."
 #| code-fold: true
 likelihood_grid = np.linspace(0.001, 0.999, 600)
-relative_likelihood = likelihood_grid**9 * (1 - likelihood_grid)**3
-relative_likelihood /= 0.75**9 * 0.25**3
 fig, ax = plt.subplots()
-ax.plot(likelihood_grid, relative_likelihood, color=BLUE)
-ax.axvline(0.75, color=GREY, linestyle="--")
+for n_tosses, heads, color, label in [
+        (10, 7, BLUE, "7 heads in 10 tosses"),
+        (100, 70, BROWN, "70 heads in 100 tosses")]:
+    likelihood = likelihood_grid**heads * (1 - likelihood_grid)**(n_tosses - heads)
+    likelihood /= 0.7**heads * 0.3**(n_tosses - heads)
+    ax.plot(likelihood_grid, likelihood, color=color, label=label)
+ax.axvline(0.5, color=GREY, linestyle=":")
 ax.set(xlabel="Proposed heads probability", ylabel="Likelihood relative to its maximum")
 ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17))
 plt.tight_layout()
 plt.show()
 ```
 
-## Combine prior information and sample evidence
+**Read the figure:** both samples give the same best-fitting value, but the
+larger sample distinguishes it more sharply from competing explanations.
+The dotted line marks a fair coin.
+
+Can we now say there is a 95% probability that $\theta$ lies in a particular
+range? Not from the likelihood alone. It gives probabilities of observations
+under proposed parameter values. We want probabilities about the parameter
+**after seeing the observations**. To make that reversal, we must also state
+what we considered plausible before this sample.
+
+For the rest of the worked calculation, return to **seven heads in ten tosses**.
+The 100-toss sample was a comparison to show the importance of sample size.
+
+## What did we know before these tosses?
+
+We might expect a coin to be roughly balanced without being certain that it is
+fair. We express that judgement through a **prior distribution** over $\theta$.
+It describes our uncertainty about a fixed property of the coin; it does not
+mean the coin changes its bias between tosses.
+
+Prior information may come from physical knowledge or earlier, separate data.
+Different information can justify different priors. We must state our choice
+and check how much it affects the answer.
 
 ### A Beta prior describes plausible probabilities
 
@@ -348,8 +204,43 @@ the curve at one point, that gives a probability.
 
 For our teaching example choose $\operatorname{Beta}(2,2)$. This favours
 probabilities near one half while leaving substantial uncertainty. We choose it
-before using the twelve tosses. An application needs its own justification;
+before using the ten tosses. An application needs its own justification;
 we will examine sensitivity rather than treating this choice as compulsory.
+
+## What should we believe after observing the tosses? {#sec-methodology}
+
+### Why multiply the prior and likelihood?
+
+We have two ingredients: a prior density $p(\theta)$ describing plausible biases,
+and a likelihood $p(y\mid\theta)$ measuring how well each bias explains the
+observed tosses $y$. Here the vertical bar means “given”.
+
+The product rule writes their joint density in two equivalent ways:
+
+$$p(\theta,y)=p(y\mid\theta)p(\theta)
+            =p(\theta\mid y)p(y).$$
+
+The first expression starts with a possible bias and then the observations.
+The second starts with the observations and then the bias. Equating them and
+dividing by $p(y)$ gives **Bayes' theorem**:
+
+$$p(\theta\mid y)=\frac{p(y\mid\theta)p(\theta)}{p(y)},\qquad
+p(y)=\int_0^1p(y\mid\theta)p(\theta)\,d\theta.$$
+
+The numerator gives more weight to values that were plausible beforehand and
+explain the observations well. The denominator adds up those weights across
+all possible biases, making the resulting density integrate to one. The result
+is the **posterior**: our distribution for $\theta$ after these observations.
+
+Because the denominator does not vary with $\theta$, we can first find the
+shape by writing
+
+$$\underbrace{p(\theta\mid y)}_{\text{posterior}}
+\propto\underbrace{p(y\mid\theta)}_{\text{likelihood}}
+\underbrace{p(\theta)}_{\text{prior}}.$$
+
+The symbol $\propto$ means “proportional to”. We still need a normalised density
+to calculate probabilities, but recognising the shape will make that easy.
 
 ### Derive the posterior by collecting powers
 
@@ -375,12 +266,12 @@ from scratch because we recognised a density whose integral is known. This is
 specified likelihood. It is a computational convenience, not a requirement of
 Bayesian inference.
 
-With nine heads, three tails and the $\operatorname{Beta}(2,2)$ prior, the
-posterior is $\operatorname{Beta}(11,5)$. Before inspecting the figure, predict
-where its centre should lie relative to 0.5 and 0.75.
+With seven heads, three tails and the $\operatorname{Beta}(2,2)$ prior, the
+posterior is $\operatorname{Beta}(9,5)$. Before inspecting the figure, predict
+where its centre should lie relative to 0.5 and 0.7.
 
 Overlaying the three curves makes the update visible: the posterior balances
-the prior centred at 0.5 and the likelihood peaking at 0.75. To compare their
+the prior centred at 0.5 and the likelihood peaking at 0.7. To compare their
 shapes on one axis, we divide the likelihood by its integral over $\theta$.
 This scaling is for display; it does not turn the likelihood into our posterior.
 
@@ -388,7 +279,7 @@ This scaling is for display; it does not turn the likelihood into our posterior.
 #| label: fig-beta-learning
 #| fig-cap: "Prior, scaled likelihood and posterior on the same axes. The posterior combines the two sources of information; shading marks its 95% credible interval. The likelihood is scaled to integrate to one for visual comparison."
 #| code-fold: true
-A, B, N, S = 2, 2, 12, 9
+A, B, N, S = 2, 2, 10, 7
 prior = stats.beta(A, B)
 posterior = stats.beta(A + S, B + N - S)
 theta = np.linspace(0.001, 0.999, 600)
@@ -401,7 +292,7 @@ ax.plot(theta, prior.pdf(theta), color=GREY, linestyle=":", lw=2,
 ax.plot(theta, scaled_likelihood, color=BROWN, linestyle="--", lw=2,
         label="Scaled likelihood")
 ax.plot(theta, posterior.pdf(theta), color=BLUE, lw=2.5,
-        label="Posterior: Beta(11,5)")
+        label="Posterior: Beta(9,5)")
 in_interval = (theta >= interval[0]) & (theta <= interval[1])
 ax.fill_between(theta, 0, posterior.pdf(theta), where=in_interval,
                 color=BLUE, alpha=0.15)
@@ -431,7 +322,7 @@ $$
 The equality follows by expanding the two weighted terms: their numerators are
 $a$ and $s$. For the example it gives
 
-$$E[\theta\mid y]=\frac4{16}(0.5)+\frac{12}{16}(0.75)=0.6875.$$
+$$E[\theta\mid y]=\frac4{14}(0.5)+\frac{10}{14}(0.7)=\frac9{14}\approx0.643.$$
 
 Here $a+b$ acts like an effective prior sample size in the **mean update**.
 This interpretation does not require us to invent an actual earlier sample of
@@ -442,7 +333,7 @@ The posterior also answers questions a point estimate leaves open:
 - **An interval:** choose the 2.5% and 97.5% posterior quantiles. The probability
   between them is 95%, conditional on the model, prior and observed sample.
 - **A hypothesis about the parameter:** compute
-  $P(\theta>0.5\mid y)=1-F_{\mathrm{Beta}(11,5)}(0.5)$.
+  $P(\theta>0.5\mid y)=1-F_{\mathrm{Beta}(9,5)}(0.5)$.
 - **Remaining uncertainty:** the posterior variance is
   $(a+s)(b+n-s)/[(a+b+n)^2(a+b+n+1)]$.
 
@@ -461,30 +352,27 @@ Neither approach requires the physical parameter to change randomly.
 
 
 
-Use the same nine heads in twelve tosses. For a one-sided test of
-$H_0:\theta=0.5$ against $H_1:\theta>0.5$, the exact p-value is
+For the seven heads in ten tosses, consider a one-sided test of
+$H_0:\theta=0.5$ against $H_1:\theta>0.5$. Its exact p-value is
 
-$$P(S\geq9\mid\theta=0.5)
-=\sum_{k=9}^{12}\binom{12}{k}(0.5)^{12}
-=\frac{299}{4096}\approx0.073.$$
+$$P(S\geq7\mid\theta=0.5)
+=\sum_{k=7}^{10}\binom{10}{k}(0.5)^{10}\approx0.172.$$
 
-This asks how often a fair coin would produce **at least as many heads** in
-an experiment with twelve tosses. It is not the probability that the coin is fair.
+**If the coin were fair**, samples with at least seven heads would occur about
+17% of the time. This does not tell us the probability that the coin is fair.
 
-Under our Beta(2,2) prior, the posterior is Beta(11,5), so instead we calculate
+Our Bayesian question is instead: **given the ten observed tosses and our
+Beta(2,2) prior, how likely is heads to be more probable than tails?**
 
 $$P(\theta>0.5\mid y)
-=\int_{0.5}^1\frac{\theta^{10}(1-\theta)^4}{B(11,5)}\,d\theta
-\approx0.941.$$
+=\int_{0.5}^1\frac{\theta^8(1-\theta)^4}{B(9,5)}\,d\theta
+\approx0.867.$$
 
-| Calculation | What is held fixed? | What probability is calculated? |
-|:--|:--|:--|
-| p-value: 0.073 | The null value $\theta=0.5$ | Samples with nine or more heads. |
-| Posterior probability: 0.941 | The observed sample and the stated prior | Parameter values above 0.5. |
-
-These numbers are not complements and do not contradict each other. The
-Bayesian answer also depends on the prior: the Beta(5,5) prior used in the
-exercise gives a Beta(14,8) posterior and $P(\theta>0.5\mid y)\approx0.905$.
+About 87% of posterior probability lies above one half. The remaining 13% lies
+below it. We have evidence favouring heads, but appreciable uncertainty remains.
+These numbers and the p-value answer different questions; they are not
+complements. This comparison illustrates the distinction, not the full range
+of questions either approach can answer.
 
 ### Confidence and credible intervals: what does 95% refer to?
 
@@ -497,14 +385,14 @@ observing this sample, under the specified model and prior. Its probability
 statement concerns the unknown parameter given our observations.
 
 The next figure makes the repeated-sample interpretation visible. The true
-heads probability stays at 0.75; new samples produce new confidence intervals.
+heads probability stays at 0.7; new samples produce new confidence intervals.
 
 ```{python}
 #| label: fig-confidence-coverage
 #| fig-cap: "Repeated sampling moves the confidence interval, while the true heads probability stays fixed. Blue intervals cover the truth; brown intervals miss it. Sixty repetitions illustrate the mechanism, not an exact 95% empirical coverage guarantee."
 #| code-fold: true
 rng = np.random.default_rng(7)
-true_theta, sample_size = 0.75, 12
+true_theta, sample_size = 0.7, 10
 successes = rng.binomial(sample_size, true_theta, size=60)
 lower = np.zeros(60)
 upper = np.ones(60)
@@ -524,8 +412,8 @@ plt.tight_layout()
 plt.show()
 ```
 
-For our observed nine heads, the Bayesian interval is obtained by taking the
-2.5% and 97.5% quantiles of $\operatorname{Beta}(11,5)$. The area between them
+For our observed seven heads, the Bayesian interval is obtained by taking the
+2.5% and 97.5% quantiles of $\operatorname{Beta}(9,5)$. The area between them
 is 0.95. We can say: **given these data, this model and this prior, the heads
 probability lies in this interval with posterior probability 95%.**
 
@@ -553,7 +441,7 @@ P(Y_{n+1}=1\mid y)
 =E[\theta\mid y].
 $$
 
-Thus the next-head probability is 0.6875. This is a prediction about an outcome;
+Thus the next-head probability is about 0.643. This is a prediction about an outcome;
 the shaded interval in the earlier figure concerns the unknown probability.
 They answer different questions.
 
@@ -581,9 +469,9 @@ The next figure compares the two calculations with the same predicted mean.
 
 ```{python}
 #| label: fig-predictive-counts
-#| fig-cap: "Both models predict the same average count. Integrating parameter uncertainty produces a more dispersed distribution over twelve future tosses."
+#| fig-cap: "Both models predict the same average count. Integrating parameter uncertainty produces a more dispersed distribution over ten future tosses."
 #| code-fold: true
-future_n = 12
+future_n = 10
 counts = np.arange(future_n + 1)
 predictive = stats.betabinom(future_n, A + S, B + N - S)
 plugin = stats.binom(future_n, posterior.mean())
@@ -592,7 +480,7 @@ ax.bar(counts - 0.18, predictive.pmf(counts), width=0.36, color=BLUE,
        label="Posterior predictive")
 ax.bar(counts + 0.18, plugin.pmf(counts), width=0.36, color=BROWN,
        label="Probability fixed at posterior mean")
-ax.set(xlabel="Heads in twelve future tosses", ylabel="Probability", xticks=counts)
+ax.set(xlabel="Heads in ten future tosses", ylabel="Probability", xticks=counts)
 ax.grid(axis="y", alpha=0.3)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), fontsize=9)
 plt.tight_layout()
@@ -612,10 +500,10 @@ with $s_2$ heads in $n_2$ tosses. The final parameters are
 
 $$(a+s_1+s_2,\ b+n_1+n_2-s_1-s_2).$$
 
-For example, start with our $\operatorname{Beta}(11,5)$ posterior. If the next
-twelve tosses contain eight heads and four tails, updating gives
-$\operatorname{Beta}(19,9)$. Updating the original $\operatorname{Beta}(2,2)$
-prior with all seventeen heads and seven tails gives exactly the same answer.
+For example, start with our $\operatorname{Beta}(9,5)$ posterior. If the next
+ten tosses contain six heads and four tails, updating gives
+$\operatorname{Beta}(15,9)$. Updating the original $\operatorname{Beta}(2,2)$
+prior with all thirteen heads and seven tails gives the same answer.
 
 These are exactly the parameters obtained from updating once with the combined
 sample. We retain what we learned, then incorporate new evidence. This argument
@@ -623,20 +511,20 @@ uses the same common probability and conditional-independence assumptions;
 it does not license counting the same observations twice.
 
 The next plot makes accumulation of information visible. To isolate sample
-size, these illustrative samples all have exactly three quarters heads. They
-can be viewed as nested samples with 9, 30 and 90 heads in 12, 40 and 120 tosses.
+size, these illustrative samples all have exactly 70% heads. They
+can be viewed as nested samples with 7, 28 and 70 heads in 10, 40 and 100 tosses.
 The prior stays $\operatorname{Beta}(2,2)$ throughout.
 
 ```{python}
 #| label: fig-posterior-concentration
-#| fig-cap: "With the same observed frequency and a fixed prior, larger samples concentrate the posterior and move its mean toward 0.75. Actual sequences can also move the observed frequency, so successive posteriors need not narrow monotonically."
+#| fig-cap: "With the same observed frequency and a fixed prior, larger samples concentrate the posterior and move its mean toward 0.7. Actual sequences can also move the observed frequency, so successive posteriors need not narrow monotonically."
 #| code-fold: true
 fig, axes = plt.subplots(1, 3, figsize=(10, 4.5), sharex=True, sharey=True)
-for ax, n_obs, n_heads in zip(axes, [12, 40, 120], [9, 30, 90]):
+for ax, n_obs, n_heads in zip(axes, [10, 40, 100], [7, 28, 70]):
     updated = stats.beta(2 + n_heads, 2 + n_obs - n_heads)
     ax.plot(theta, updated.pdf(theta), color=BLUE)
     ax.plot(theta, stats.beta.pdf(theta, 2, 2), color=GREY, linestyle=":")
-    ax.axvline(0.75, color=BROWN, linestyle="--", lw=1)
+    ax.axvline(0.7, color=BROWN, linestyle="--", lw=1)
     ax.set(title=f"{n_heads} heads in {n_obs} tosses", xlabel="Heads probability")
     ax.grid(axis="y", alpha=0.3)
 axes[0].set_ylabel("Density")
@@ -815,22 +703,23 @@ inferential goal stays the same; the calculation changes.**
 
 ### Check your understanding
 
-1. In the two-coin example, distinguish the prior, likelihood and posterior.
-   Why is the probability of observing a head not the same as the probability
-   that we selected the heads-biased coin?
-2. Derive the posterior for nine heads in twelve tosses under a
-   $\operatorname{Beta}(5,5)$ prior. Before calculating, decide whether its mean
-   is closer to one half than under $\operatorname{Beta}(2,2)$.
-3. Explain the difference between a 95% credible interval for a probability and
-   a predictive distribution for the number of future losses.
-4. Give one reason why the 2024 return calculation could be poorly calibrated
-   for a later year even if every line of algebra and code is correct.
+1. Seven heads in ten tosses and seventy heads in one hundred tosses give
+   the same observed proportion. What do their likelihoods have in common,
+   and what differs?
+2. Starting with a Beta(2,2) prior, derive the posterior for seven heads and
+   three tails. Explain the multiplication and the normalisation in words.
+3. Why is its posterior mean between 0.5 and 0.7? What would a more concentrated
+   prior around 0.5 change?
+4. Explain the difference between a 95% credible interval for the heads
+   probability and a prediction for the number of heads in ten new tosses.
+5. Give one reason why the market application could predict poorly even if
+   every line of algebra and code is correct.
 
 ### The Python exercise: calculate the posterior on a grid
 
 The [Week 1 exercise session](../exercise-sessions/01-introduction.qmd) uses nine
-successes in twelve trials and a $\operatorname{Beta}(5,5)$ prior. Its core task
-is the same update, evaluated at a finite collection of possible probabilities.
+successes in twelve trials and a $\operatorname{Beta}(5,5)$ prior. Those are a fresh sample and prior for practice; the lecture used seven heads
+in ten tosses and Beta(2,2). Its core task is the same update, evaluated at a finite collection of possible probabilities.
 For midpoint grid values $\theta_j$ and cell width $\Delta$, compute
 
 $$u_j=p(s\mid\theta_j)p(\theta_j)\Delta,\qquad
@@ -851,27 +740,28 @@ choose a prior, and identify the posterior by collecting its terms.
 ### Optional: check a prior through the outcomes it predicts {.unnumbered}
 
 A prior is easier to assess when translated into observable outcomes. Before
-seeing any tosses, imagine twelve tosses under each proposed prior. For a given
+seeing any tosses, imagine ten tosses under each proposed prior. For a given
 $\theta$, the count is binomial; averaging those binomial probabilities over
 the prior gives the **prior predictive distribution**:
 
 $$P(S=s)=\int_0^1 P(S=s\mid\theta)p(\theta)\,d\theta.$$
 
-This is the same averaging idea used for the next toss in the two-coin example.
+This is the same averaging idea used to predict future tosses, now using prior
+weights because we have not yet observed data.
 The following plot evaluates it for three Beta priors. All have mean heads
 probability one half, but they imply different plausible counts.
 
 ```{python}
 #| label: fig-prior-predictive
-#| fig-cap: "Equal prior means do not imply equal prior information. A concentrated prior around one half expects counts near six; a uniform prior over the probability gives equal prior predictive probability to every count from zero to twelve."
+#| fig-cap: "Equal prior means do not imply equal prior information. A concentrated prior around one half expects counts near five; a uniform prior over the probability gives equal prior predictive probability to every count from zero to ten."
 #| code-fold: true
-prior_counts = np.arange(13)
+prior_counts = np.arange(11)
 fig, axes = plt.subplots(1, 3, figsize=(10, 4.5), sharey=True)
 for ax, strength in zip(axes, [1, 2, 20]):
-    ax.bar(prior_counts, stats.betabinom.pmf(prior_counts, 12, strength, strength),
+    ax.bar(prior_counts, stats.betabinom.pmf(prior_counts, 10, strength, strength),
            color=BLUE)
-    ax.set(title=f"Beta({strength},{strength}) prior", xlabel="Heads in twelve tosses",
-           xticks=[0, 3, 6, 9, 12])
+    ax.set(title=f"Beta({strength},{strength}) prior", xlabel="Heads in ten tosses",
+           xticks=[0, 2, 4, 6, 8, 10])
     ax.grid(axis="y", alpha=0.3)
 axes[0].set_ylabel("Prior predictive probability")
 plt.tight_layout()
