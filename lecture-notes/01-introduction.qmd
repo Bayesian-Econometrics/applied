@@ -62,51 +62,88 @@ BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 
 ## Which probabilities explain the observations well? {#sec-intuition}
 
-### Build the likelihood from one toss
+### Calculate the probability of what we observed
 
+Suppose the ten tosses occurred in this order:
 
+**H H T H H T H T H H**
 
-Now let the coin's heads probability be any $\theta\in(0,1)$. Write $Y_i=1$
-for a head and $Y_i=0$ for a tail. One observation has probabilities
+There are seven heads and three tails. We want to compare two possible
+explanations: a fair coin and a coin with a 70% heads probability.
 
-$$P(Y_i=1\mid\theta)=\theta,\qquad P(Y_i=0\mid\theta)=1-\theta.$$
+Assume the coin has the same heads probability on every toss and that, given
+this probability, the tosses are independent. Independence lets us multiply
+the probabilities of the ten individual outcomes.
 
-Both cases fit the compact expression
+For a **fair coin**, every outcome in the sequence has probability 0.5:
 
-$$p(y_i\mid\theta)=\theta^{y_i}(1-\theta)^{1-y_i}.$$
+$$P(\text{observed sequence}\mid\theta=0.5)=0.5^{10}\approx0.000977.$$
 
-Check it by substituting zero and one before moving on. Assuming the tosses are
-independent **conditional on the common probability** $\theta$, multiply these
-contributions. If $s=\sum_i y_i$ out of $n$ tosses are heads,
+For a **coin with heads probability 0.7**, each head contributes 0.7 and each
+tail contributes 0.3. There are seven factors of the first kind and three of
+the second:
 
-$$
-\begin{aligned}
-p(y_1,\ldots,y_n\mid\theta)
-&=\prod_{i=1}^n\theta^{y_i}(1-\theta)^{1-y_i}\\
-&=\theta^{\sum_i y_i}(1-\theta)^{n-\sum_i y_i}\\
-&=\theta^s(1-\theta)^{n-s}.
-\end{aligned}
-$$
+$$P(\text{observed sequence}\mid\theta=0.7)
+=0.7^7\times0.3^3\approx0.002224.$$
 
-For seven heads in ten tosses this becomes $\theta^7(1-\theta)^3$.
-A value close to zero struggles to explain seven heads; a value close to one
-struggles to explain three tails. The likelihood is highest at $s/n=0.7$.
+Both probabilities are small because we asked for one exact sequence of ten
+outcomes. To compare the two explanations, take their ratio:
 
-If we record only the total $S=s$, its **binomial** probability is
-$\binom ns\theta^s(1-\theta)^{n-s}$. The binomial coefficient counts sequences
-with the same total. Since it does not depend on $\theta$, either representation
-gives the same posterior for $\theta$.
+$$\frac{P(\text{observed sequence}\mid\theta=0.7)}
+{P(\text{observed sequence}\mid\theta=0.5)}
+=\frac{0.7^7\times0.3^3}{0.5^{10}}\approx2.28.$$
 
-This expression is the **likelihood**: the observed tosses stay fixed, while
-we compare possible values of $\theta$. At $\theta=0.7$ the observed sequence
-has about twice the probability it has at $\theta=0.5$. That favours 0.7, but
-it is not overwhelming evidence against a fair coin.
+**This particular sequence is about 2.28 times as probable under the 70% coin
+as under the fair coin.** That is evidence favouring 0.7 over 0.5. It does not
+yet tell us the probability that either explanation is correct.
+
+### Compare all possible heads probabilities
+
+We need not stop at two proposed values. Let $\theta$ stand for any proposed
+heads probability between zero and one. A head then contributes $\theta$ and
+a tail contributes $1-\theta$. The same multiplication gives
+
+$$L(\theta)=\theta^7(1-\theta)^3.$$
+
+This function is the **likelihood**. Its input is a proposed heads probability;
+its output is the probability of our observed sequence under that proposal.
+The observations stay fixed while we vary the proposal.
+
+Why does it reach its maximum at 0.7? Increasing $\theta$ makes our seven heads
+more probable, but makes our three tails less probable. We can find where
+these two effects balance by differentiating the log likelihood. Taking a log
+preserves the maximum and turns products into sums:
+
+$$\log L(\theta)=7\log\theta+3\log(1-\theta),$$
+
+$$\frac{d\log L(\theta)}{d\theta}
+=\frac7\theta-\frac3{1-\theta}
+=\frac{7-10\theta}{\theta(1-\theta)}.$$
+
+The denominator is positive between zero and one. The derivative is positive
+below 0.7 and negative above 0.7: the likelihood rises up to 0.7 and then falls.
+That is why **0.7 is the best-fitting value for this sample**.
+
+The same calculation for $s$ heads in $n$ tosses gives
+$L(\theta)=\theta^s(1-\theta)^{n-s}$. We will use these letters below to derive
+an update that works for any sample size.
 
 ### Why do 100 tosses tell us more than ten?
 
-For 70 heads and 30 tails the likelihood is $\theta^{70}(1-\theta)^{30}$.
-It still peaks at 0.7. But values away from 0.7 now explain the observations
-much less well. We see the same pattern repeated more often.
+With 70 heads and 30 tails, repeat the comparison between 0.7 and 0.5:
+
+$$\frac{0.7^{70}0.3^{30}}{0.5^{100}}
+=\left(\frac{0.7^7 0.3^3}{0.5^{10}}\right)^{10}
+\approx3{,}745.$$
+
+The observed proportion is unchanged, but the likelihood ratio has risen from
+about 2.28 to about 3,745. The larger sample supplies much stronger evidence
+for 0.7 relative to 0.5. This conclusion uses our assumption that the tosses
+are independent given a common heads probability.
+
+The plot extends this comparison to every possible value of $\theta$. Dividing
+each curve by its maximum puts both peaks at one without changing the relative
+support for different values within either sample.
 
 ```{python}
 #| label: fig-coin-likelihood
@@ -145,8 +182,7 @@ The 100-toss sample was a comparison to show the importance of sample size.
 
 We might expect a coin to be roughly balanced without being certain that it is
 fair. We express that judgement through a **prior distribution** over $\theta$.
-It describes our uncertainty about a fixed property of the coin; it does not
-mean the coin changes its bias between tosses.
+The prior assigns more probability to the values we consider more plausible.
 
 Prior information may come from physical knowledge or earlier, separate data.
 Different information can justify different priors. We must state our choice
@@ -172,7 +208,7 @@ The ratio $a/(a+b)$ sets the centre. Holding that ratio fixed, increasing $a+b$
 concentrates the prior. Thus $\operatorname{Beta}(2,2)$ and
 $\operatorname{Beta}(20,20)$ both have mean one half, but express very different
 confidence in that centre. A $\operatorname{Beta}(1,1)$ density is uniform on
-this probability scale; that is a particular prior, not the absence of one.
+this scale: intervals of equal width receive equal prior probability.
 
 The shapes below separate two choices: **where the prior is centred** and
 **how concentrated it is**. Compare Beta(2,2) with Beta(20,20) for concentration;
@@ -202,10 +238,10 @@ A high density near a value means that nearby values receive more probability
 per unit of interval width. It is the area over an interval, not the height of
 the curve at one point, that gives a probability.
 
-For our teaching example choose $\operatorname{Beta}(2,2)$. This favours
-probabilities near one half while leaving substantial uncertainty. We choose it
-before using the ten tosses. An application needs its own justification;
-we will examine sensitivity rather than treating this choice as compulsory.
+Choose $\operatorname{Beta}(2,2)$ to express our expectation of a roughly balanced
+coin. Its curve is centred at one half and broad enough to allow substantial
+bias. Later we will repeat an update with different priors to see how much
+this choice matters.
 
 ## What should we believe after observing the tosses? {#sec-methodology}
 
@@ -263,8 +299,8 @@ $$\boxed{\theta\mid y\sim\operatorname{Beta}(a+s,\ b+n-s).}$$
 Its normalising constant is $B(a+s,b+n-s)$. We did not evaluate a new integral
 from scratch because we recognised a density whose integral is known. This is
 **conjugacy**: the posterior belongs to the same family as the prior for the
-specified likelihood. It is a computational convenience, not a requirement of
-Bayesian inference.
+specified likelihood. Here it lets us obtain the answer using the known
+properties of the Beta distribution.
 
 With seven heads, three tails and the $\operatorname{Beta}(2,2)$ prior, the
 posterior is $\operatorname{Beta}(9,5)$. Before inspecting the figure, predict
@@ -273,7 +309,7 @@ where its centre should lie relative to 0.5 and 0.7.
 Overlaying the three curves makes the update visible: the posterior balances
 the prior centred at 0.5 and the likelihood peaking at 0.7. To compare their
 shapes on one axis, we divide the likelihood by its integral over $\theta$.
-This scaling is for display; it does not turn the likelihood into our posterior.
+This rescaling preserves the likelihood’s shape so we can compare all three curves.
 
 ```{python}
 #| label: fig-beta-learning
@@ -303,9 +339,8 @@ plt.tight_layout()
 plt.show()
 ```
 
-The posterior shifts toward the observed frequency but remains spread over a
-range of values. The data have supplied evidence, not revealed the probability
-with certainty.
+The posterior places more weight near 0.7 than the prior did. Its remaining
+spread shows how much uncertainty ten tosses leave.
 
 ## What have we learned about the coin?
 
@@ -324,9 +359,9 @@ $a$ and $s$. For the example it gives
 
 $$E[\theta\mid y]=\frac4{14}(0.5)+\frac{10}{14}(0.7)=\frac9{14}\approx0.643.$$
 
-Here $a+b$ acts like an effective prior sample size in the **mean update**.
-This interpretation does not require us to invent an actual earlier sample of
-$a$ heads and $b$ tails. With a fixed prior and more data, the prior weight falls.
+The prior contributes a weight of 4 and the sample a weight of 10. In general,
+$a+b$ controls the prior’s weight in this mean update. As the sample size $n$
+grows, the data receive a larger share of the total weight.
 
 The posterior also answers questions a point estimate leaves open:
 
@@ -346,11 +381,8 @@ they express uncertainty about the unknown parameter.
 A frequentist procedure is assessed by how it behaves across hypothetical
 samples at a fixed parameter value. Bayesian inference assigns probabilities
 to parameter ranges conditional on the sample actually observed and a prior.
-Neither approach requires the physical parameter to change randomly.
 
 ### Two different questions about the same observations
-
-
 
 For the seven heads in ten tosses, consider a one-sided test of
 $H_0:\theta=0.5$ against $H_1:\theta>0.5$. Its exact p-value is
@@ -370,9 +402,9 @@ $$P(\theta>0.5\mid y)
 
 About 87% of posterior probability lies above one half. The remaining 13% lies
 below it. We have evidence favouring heads, but appreciable uncertainty remains.
-These numbers and the p-value answer different questions; they are not
-complements. This comparison illustrates the distinction, not the full range
-of questions either approach can answer.
+The p-value starts from a proposed fair coin and considers possible samples.
+The posterior calculation starts from our observed sample and considers
+possible biases.
 
 ### Confidence and credible intervals: what does 95% refer to?
 
@@ -422,10 +454,8 @@ that conditional statement. Conversely, a credible interval need not have
 95% repeated-sample coverage at every true parameter value. The endpoints can
 nevertheless be similar; the distinction is what their probability means.
 
-What should stay with you is not a contest between two methods. It is that
-Bayesian inference answers questions about the parameter through a posterior
-distribution. We now use that same distribution to answer a new question about
-future observations.
+We have used the posterior to describe the coin’s bias. Next, we use it to
+predict the outcomes of new tosses.
 
 ## What might we observe next?
 
@@ -444,6 +474,12 @@ $$
 Thus the next-head probability is about 0.643. This is a prediction about an outcome;
 the shaded interval in the earlier figure concerns the unknown probability.
 They answer different questions.
+
+To predict a count, we must include every sequence producing that count.
+For example, exactly one head in two tosses can occur as HT or TH. Each sequence
+has probability $\theta(1-\theta)$, so the count has probability
+$2\theta(1-\theta)$. In general, $\binom{m}{k}$ counts the sequences containing
+$k$ heads in $m$ tosses.
 
 For the number $K$ of heads in $m$ future tosses, conditional independence gives
 $K\mid\theta\sim\operatorname{Binomial}(m,\theta)$. Put
@@ -487,10 +523,9 @@ plt.tight_layout()
 plt.show()
 ```
 
-For just one future toss the two distributions coincide when the plug-in value
-is the posterior mean. The distinction becomes visible for a count of several
-future tosses; it is not correct to claim that every predictive comparison must
-show wider uncertainty.
+For one toss, the heads probability is simply the posterior mean. For several
+tosses, uncertainty about their shared heads probability also affects the spread
+of the predicted count, as the figure shows.
 
 ### The next observations become new evidence
 
@@ -505,10 +540,9 @@ ten tosses contain six heads and four tails, updating gives
 $\operatorname{Beta}(15,9)$. Updating the original $\operatorname{Beta}(2,2)$
 prior with all thirteen heads and seven tails gives the same answer.
 
-These are exactly the parameters obtained from updating once with the combined
-sample. We retain what we learned, then incorporate new evidence. This argument
-uses the same common probability and conditional-independence assumptions;
-it does not license counting the same observations twice.
+The two updates add the heads and tails from each new batch. Because addition
+gives the same totals whether we process the batches separately or together,
+the final posterior is the same.
 
 The next plot makes accumulation of information visible. To isolate sample
 size, these illustrative samples all have exactly 70% heads. They
@@ -533,8 +567,8 @@ plt.show()
 ```
 
 The dotted curve is the original prior; the dashed line is the observed
-frequency. Posterior concentration means that fewer parameter values remain
-plausible. It does not make the next toss deterministic.
+frequency. As the sample grows, posterior probability becomes more concentrated
+around 0.7. We learn the heads probability more precisely.
 
 ## Use the same argument for market outcomes {#sec-empirical}
 
@@ -542,20 +576,17 @@ plausible. It does not make the next toss deterministic.
 
 An investor asks for the probability of a **negative monthly market excess
 return**. Excess return means the market return less the risk-free return; a
-negative excess return means underperforming that benchmark, not necessarily a
-negative total return.
+negative excess return means underperforming that benchmark.
 
 We now define $L_t=1$ if the market excess return is negative and $L_t=0$
 otherwise, and let $\theta$ denote the probability of that event. The event was
 heads in the teaching example; it is a negative excess return here. The
-mathematics is unchanged, but its economic interpretation is now explicit.
+same update therefore applies: count the events, then update their probability.
 
 The data are the monthly market excess returns in the course's Kenneth French
 snapshot, documented in [Data sources](../data/SOURCES.md). The file contains
 returns as decimals. We use **January–December 2024**, a complete, short sample,
-to ask what this model would have predicted at the end of that year. Later
-observations in the file are not used in the update. This is a historical
-teaching exercise, not a forecast issued today.
+to calculate a forecast using the information available at the end of that year.
 
 The first computation loads the series, selects that year and counts negative
 months. Multiplication by 100 changes only the units displayed in the plot.
@@ -584,20 +615,18 @@ print(f"{loss_count} negative excess returns in {month_count} months.")
 ```
 
 There are three negative months out of twelve. The sample frequency is 0.25.
-That is evidence about the unknown probability, not a guarantee that every
-future year will contain three such months.
+We use these observations to update the probability of a negative month.
 
 ### State the assumptions before interpreting the posterior
 
 For this first model, months are independent conditional on a common $\theta$,
 and that probability remains applicable to the future period we predict.
-Returns need not actually satisfy these assumptions. We state them so that the
-calculation has an interpretable target and its limitations can be discussed.
+These assumptions let us use the same likelihood as for the coin tosses.
 
-Take the illustrative prior $\operatorname{Beta}(2,2)$ again. It centres on an
-even chance and is deliberately weak enough for a short sample to matter.
-This is a teaching starting point, not a claim that economic theory requires a
-50% probability of underperforming the risk-free asset.
+For comparison with the coin calculation, use $\operatorname{Beta}(2,2)$ again.
+It centres the probability at one half and gives the prior a weight of four
+in the posterior mean. We will compare this assumption with weaker and stronger
+priors below.
 
 The three negative and nine nonnegative months give
 
@@ -627,8 +656,8 @@ print(f"P(at least six negative months next year | data): {next_year.sf(5):.3f}"
 ```
 
 The probability of a negative excess return next month is 31.25% under this
-model and prior. The expected count over twelve future months is 3.75, but the
-realised count must be an integer and can differ substantially. The credible
+model and prior. Multiplying by twelve gives 3.75 expected negative months
+in the next year. The predictive distribution describes the possible counts. The credible
 interval describes uncertainty about $\theta$; the predictive count probability
 answers a question about future observations.
 
@@ -639,7 +668,7 @@ one half. The last prior expresses stronger information, so it should resist
 movement toward 0.25 more strongly. Predict that ordering before running the code.
 
 The dots show posterior means and the horizontal bars show 95% credible intervals.
-The common dashed line is the observed frequency, not another posterior estimate.
+The dashed line marks the observed frequency of 0.25.
 
 ```{python}
 #| label: fig-market-prior-sensitivity
@@ -664,10 +693,10 @@ plt.tight_layout()
 plt.show()
 ```
 
-The stronger prior supplies narrower uncertainty partly because it asserts more
-information in advance. That is not evidence that its forecast is more accurate.
-A useful applied report gives the prior's rationale and shows how alternative
-plausible choices affect the conclusion.
+The stronger prior contributes a weight of 40 compared with 12 for the sample,
+so its posterior mean remains closer to 0.5. Its narrower interval also reflects
+that additional assumed information. The figure shows how much our conclusion
+depends on the prior when only twelve observations are available.
 
 Historical observations can inform a prior as well. Starting with a stated
 initial prior, update on an earlier window, then update that posterior with a
@@ -688,8 +717,8 @@ intervals and predictions.
 The financial interpretation has limits. A model of signs does not distinguish
 a loss of 0.1% from a loss of 15%. A constant probability cannot represent
 predictability or changing regimes. It says nothing by itself about which
-portfolio an investor should hold. These are reasons to expand the economic
-model later, not reasons to distrust Bayes' rule.
+portfolio an investor should hold. Later chapters add return magnitudes, predictors and changing risk to address
+these questions.
 
 For this chapter, the main achievement is the sequence
 
@@ -725,12 +754,12 @@ For midpoint grid values $\theta_j$ and cell width $\Delta$, compute
 $$u_j=p(s\mid\theta_j)p(\theta_j)\Delta,\qquad
 w_j=\frac{u_j}{\sum_k u_k}.$$
 
-The $w_j$ are approximate **cell probabilities**, not density heights. Use them
+Each $w_j$ approximates the posterior probability in a small interval around
+$\theta_j$. Use these probabilities
 to calculate a posterior mean, interval and probability above one half. Compare
 with the analytic $\operatorname{Beta}(14,8)$ posterior, and refine the grid to
-see which discrepancies are numerical. The exercise's mixture-prior task is an
-extension after the basic update is understood; it is not required for the main
-lecture argument.
+see how the approximation improves. The mixture-prior task provides additional
+practice after the basic update.
 
 Next week the unknown will be a regression coefficient vector together with a
 noise variance. We will again build a likelihood from individual observations,
@@ -768,9 +797,9 @@ plt.tight_layout()
 plt.show()
 ```
 
-Ask whether these predicted outcomes make sense **before using the observations
-in the update**. This gives prior choice an interpretable consequence. The calculation uses the same Beta–binomial averaging as posterior prediction,
-but weights parameter values using the prior instead of the posterior.
+A prior concentrated around one half predicts counts near five more strongly.
+A broad prior allows more extreme counts. Judging these predictions gives us
+a concrete way to assess the prior before updating it.
 :::
 
 ### Reading guide
