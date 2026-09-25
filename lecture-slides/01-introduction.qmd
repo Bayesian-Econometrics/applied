@@ -1,7 +1,7 @@
 ---
 title: "Introduction: the Bayesian paradigm"
 subtitle: "Lecture 1 · Learning from observations"
-date: false
+date: ""
 jupyter: python3
 execute:
   echo: false
