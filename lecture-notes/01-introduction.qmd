@@ -25,9 +25,9 @@ format:
 - **Prediction carries uncertainty forward.** We average over plausible parameter values and allow for randomness in the next observations.
 :::
 
-## Seven heads in ten tosses: is the coin biased? {#sec-motivation}
+## Seven heads in ten tosses: is heads more likely than tails? {#sec-motivation}
 
-You toss a coin ten times and get seven heads. Is the coin biased?
+You toss a coin ten times and get seven heads. Is heads more likely than tails?
 
 Perhaps. But a fair coin can also produce seven heads. Ten tosses do not settle
 the question. Now suppose you toss it 100 times and get 70 heads. The proportion
@@ -61,6 +61,30 @@ BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 ```
 
 ## Which probabilities explain the observations well? {#sec-intuition}
+
+### What does “given” mean?
+
+A conditional probability is calculated using specified information. For example,
+
+$$P(\text{head on the next toss}\mid\theta=0.7)=0.7.$$
+
+Read the vertical bar as “given”: **given a heads probability of 0.7, the
+probability of a head on the next toss is 0.7**. The information on the right
+of the bar tells us what to use when calculating the probability on the left.
+
+For events $A$ and $B$, the definition is
+
+$$P(A\mid B)=\frac{P(A\cap B)}{P(B)},\qquad P(B)>0.$$
+
+Here $A\cap B$ means that both events occur. Once we know $B$ occurred, we
+restrict attention to $B$. The numerator selects the part where $A$ also
+occurs; dividing by $P(B)$ measures that part relative to all of $B$.
+For example, if $P(B)=0.4$ and $P(A\cap B)=0.1$, then
+$P(A\mid B)=0.1/0.4=0.25$: one quarter of the probability within $B$ also
+belongs to $A$.
+
+In our coin model, we first specify a value of $\theta$, then calculate the
+probability of the observed tosses conditional on that value.
 
 ### Calculate the probability of what we observed
 
@@ -212,7 +236,7 @@ this scale: intervals of equal width receive equal prior probability.
 
 The shapes below separate two choices: **where the prior is centred** and
 **how concentrated it is**. Compare Beta(2,2) with Beta(20,20) for concentration;
-compare Beta(2,5) with Beta(5,2) for different beliefs about the likely bias.
+compare Beta(2,5) with Beta(5,2) for different beliefs about the heads probability.
 
 ```{python}
 #| label: fig-beta-prior-shapes
@@ -239,25 +263,37 @@ per unit of interval width. It is the area over an interval, not the height of
 the curve at one point, that gives a probability.
 
 Choose $\operatorname{Beta}(2,2)$ to express our expectation of a roughly balanced
-coin. Its curve is centred at one half and broad enough to allow substantial
-bias. Later we will repeat an update with different priors to see how much
+coin. Its curve is centred at one half and broad enough to allow a wide range of heads probabilities. Later we will repeat an update with different priors to see how much
 this choice matters.
 
 ## What should we believe after observing the tosses? {#sec-methodology}
 
 ### Why multiply the prior and likelihood?
 
-We have two ingredients: a prior density $p(\theta)$ describing plausible biases,
-and a likelihood $p(y\mid\theta)$ measuring how well each bias explains the
-observed tosses $y$. Here the vertical bar means “given”.
+Before observing the tosses, the prior density $p(\theta)$ describes which
+heads probabilities we consider plausible. The likelihood $p(y\mid\theta)$
+tells us how probable our observed sequence $y$ is under each proposed heads
+probability.
 
-The product rule writes their joint density in two equivalent ways:
+We now want to reverse the direction of conditioning:
+
+- $p(y\mid\theta)$ describes the observations given a heads probability.
+- $p(\theta\mid y)$ describes the heads probability given our observations.
+
+The conditional-probability definition explains how. Multiplying
+$P(A\mid B)=P(A\cap B)/P(B)$ by $P(B)$ gives
+$P(A\cap B)=P(A\mid B)P(B)$. Reversing the roles of the events also gives
+$P(A\cap B)=P(B\mid A)P(A)$. Both expressions describe the same joint event.
+
+The corresponding product rule for our observed sequence and continuous
+parameter uses a density for $\theta$:
+
 
 $$p(\theta,y)=p(y\mid\theta)p(\theta)
             =p(\theta\mid y)p(y).$$
 
-The first expression starts with a possible bias and then the observations.
-The second starts with the observations and then the bias. Equating them and
+The first expression starts with a possible heads probability and then the observations.
+The second starts with the observations and then the heads probability. Equating them and
 dividing by $p(y)$ gives **Bayes' theorem**:
 
 $$p(\theta\mid y)=\frac{p(y\mid\theta)p(\theta)}{p(y)},\qquad
@@ -265,7 +301,7 @@ p(y)=\int_0^1p(y\mid\theta)p(\theta)\,d\theta.$$
 
 The numerator gives more weight to values that were plausible beforehand and
 explain the observations well. The denominator adds up those weights across
-all possible biases, making the resulting density integrate to one. The result
+all possible heads probabilities, making the resulting density integrate to one. The result
 is the **posterior**: our distribution for $\theta$ after these observations.
 
 Because the denominator does not vary with $\theta$, we can first find the
@@ -404,7 +440,7 @@ About 87% of posterior probability lies above one half. The remaining 13% lies
 below it. We have evidence favouring heads, but appreciable uncertainty remains.
 The p-value starts from a proposed fair coin and considers possible samples.
 The posterior calculation starts from our observed sample and considers
-possible biases.
+possible heads probabilities.
 
 ### Confidence and credible intervals: what does 95% refer to?
 
@@ -454,7 +490,7 @@ that conditional statement. Conversely, a credible interval need not have
 95% repeated-sample coverage at every true parameter value. The endpoints can
 nevertheless be similar; the distinction is what their probability means.
 
-We have used the posterior to describe the coin’s bias. Next, we use it to
+We have used the posterior to describe the coin’s heads probability. Next, we use it to
 predict the outcomes of new tosses.
 
 ## What might we observe next?
