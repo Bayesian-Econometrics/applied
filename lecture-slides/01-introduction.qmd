@@ -1,318 +1,675 @@
 ---
-title: "Applied Bayesian Econometrics"
-subtitle: "1 — Introduction and the Bayesian paradigm"
+title: "Introduction: the Bayesian paradigm"
+subtitle: "Lecture 1 · Learning from observations"
+date: false
+jupyter: python3
+execute:
+  echo: false
+  warning: false
+  message: false
+  freeze: false
+format:
+  revealjs:
+    slide-level: 2
+    transition: none
+    toc: false
 ---
 
-# Welcome!
+```{python}
+#| label: setup-introduction
+#| include: false
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from pathlib import Path
 
-## Kicking off Applied Bayesian Econometrics
+plt.rcParams.update({"figure.figsize": (9, 5.4), "font.size": 13,
+                     "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": False})
+BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
+```
 
-- What is this course about?
-- How is this course organized?
-- Set up your Python environment
-- A first look at the Bayesian paradigm
+## What you should take away
 
-## What is Bayesian econometrics?
-
-**How should we reason about unknown quantities when the data are limited and noisy?**
-
-The Bayesian answer is to treat unknowns as random and update beliefs with evidence.
-
-- An unknown parameter can describe a fixed feature of the world; its distribution represents our uncertainty
-- We start from a prior, observe data through a likelihood, and obtain a posterior
-- Every answer comes with a full distribution, not just a point and a standard error
-
-This is a coherent framework for **quantifying uncertainty**, exactly what economics
-and finance need when models are large and data are scarce.
-
-## Why Bayesian methods, and why now?
-
-- Modern datasets are high-dimensional: many predictors, few clean observations
-- Shrinkage priors regularise these models in a principled way
-- Computation (MCMC) makes once-intractable models routine
-- Forecasting, policy analysis, risk, and causal inference all benefit
-
-. . .
-
-The less glamorous reality: most of the work is careful modelling and honest
-accounting for uncertainty, not magic.
-
-## The fixed lecture sequence: Weeks 1–8
-
-1. Introduction: the Bayesian paradigm
-2. The linear regression model
-3. Monte Carlo integration and importance sampling
-4. Gibbs sampling
-5. Metropolis-Hastings and NUTS sampling
-6. Minnesota priors
-7. BVARs and identification
-8. State space and time-varying parameter models
-
-## The fixed lecture sequence: Weeks 9–15
-
-9. Prediction and Bayesian model averaging
-10. Causal inference
-11. Variable selection and big data
-12. Stochastic volatility
-13. Portfolio choice
-14. Bayesian machine learning
-15. Q&A and review
-
-The [schedule](../course-information.qmd#weekly-plan) specifies each week's reading and Python exercise.
-
-## Objectives
-
-We move from theory to working code in every session.
-
-- Plan, implement, and criticise Bayesian analyses from scratch
-- Master the relevant models and apply them in new, complex contexts
-- In plain words: *learn Bayesian econometrics by building it in Python*
-
-The course is grounded in the textbook literature and recent papers. Be prepared
-to read and discuss; see the [literature list](../course-information.qmd#reading).
-
-# Administration
-
-## Team and communication
-
-- **Coordinators:** Prof. Dr. Roxana Halbleib and Dr. Christoph Frey
-- **Department:** Statistik und Ökonometrie
-- Course materials are on the [course website](../index.qmd); **ILIAS** is used only for announcements and news
-- The exercise sessions are where the Python work happens — come prepared
-
-## How the course works
-
-- Weekly 2-hour lecture: theory and methods
-- Weekly 2-hour exercise session: implement the method in Python
-- 6 ECTS, taught in English, recommended for the 3rd semester
-
-. . .
-
-The learning curve is steep, especially around MCMC. Reach out early when
-something is unclear rather than waiting.
-
-## Prerequisites
-
-You are expected to bring:
-
-- mathematics, statistics, and probability theory
-- regression analysis: estimation and hypothesis testing
-- **Python** coding — this is essential for the exercises
-
-If your Python is rusty, refresh it before week 1. We assume comfort with NumPy
-and basic scientific computing.
-
-## Assessment
-
-- Written final exam, **90 minutes**
-- Permitted: non-programmable calculator, a hard-copy German–English dictionary,
-  and a **one-sided A4 hand-written cheat sheet**
-- The grade is **100%** the written exam
-
-# The Bayesian paradigm
-
-## Frequentist vs. Bayesian, in one slide
-
-| | Frequentist | Bayesian |
-|---|---|---|
-| Parameter | fixed, unknown | uncertainty represented by a distribution |
-| Probability | long-run frequency | degree of belief |
-| Output | estimate + CI | posterior distribution |
-| Uncertainty | sampling variability | full posterior |
-
-Neither is "correct" in the abstract. The Bayesian framing is especially natural
-when we have prior information and want coherent uncertainty.
-
-## A default warning and the base rate
-
-Among 1,000 firms, suppose 30 default.
-
-- A warning flags 90% of defaults: **27** flagged defaults.
-- It also flags 20% of non-defaults: **194** false alarms.
-- Among the 221 flagged firms, the default probability is $27/221\approx12.2\%$.
-
-The warning's sensitivity is not the probability of default given a warning.
-
-::: {.notes}
-Use counts before Bayes' formula. Ask students to identify the two different conditioning events. This course example develops the conditional-probability teaching sequence in the supplied UPM Class 1 materials (Virbickaitė and Zaharieva).
+::: {.callout-tip icon=false}
+- The observed proportion is evidence about an unknown probability.
+- A **likelihood** describes how well parameter values explain the observations.
+- A **prior** and the likelihood give a **posterior distribution**.
+- The posterior supplies estimates, uncertainty statements and predictions.
 :::
 
-## Bayes' theorem from the joint probability
+## Seven heads in ten tosses
 
-For an event $D$ and a warning $W$:
+**H H T H H T H T H H**
 
-$$P(D,W)=P(W\mid D)P(D)=P(D\mid W)P(W).$$
+Is heads more likely than tails?
 
-Divide by $P(W)>0$ and partition the population:
+A fair coin could produce this sample too.
 
-$$P(D\mid W)=\frac{P(W\mid D)P(D)}{P(W\mid D)P(D)+P(W\mid D^c)P(D^c)}.$$
+Let $\theta$ denote the unknown **heads probability**.
 
-The denominator counts **all ways** a warning can occur.
+We know the observed proportion, $7/10=0.7$. We want to learn $\theta$.
 
-## Bayes' theorem
+## What would 70 heads in 100 tosses change?
 
-For parameters $\theta$ and data $y$:
+| Observations | Proportion of heads |
+|:--|--:|
+| 7 heads in 10 tosses | 70% |
+| 70 heads in 100 tosses | 70% |
 
-$$
-p(\theta \mid y) \;=\; \frac{p(y \mid \theta)\,p(\theta)}{p(y)}
-\;\propto\; \underbrace{p(y \mid \theta)}_{\text{likelihood}}\;\underbrace{p(\theta)}_{\text{prior}}
-$$
+Same proportion. More observations.
 
-- The **posterior** $p(\theta \mid y)$ is what we report
-- The **prior** $p(\theta)$ encodes what we knew beforehand
-- The marginal likelihood $p(y)$ is a normalising constant
+**How can we measure the difference in evidence?**
 
-. . .
+## Conditional probability: use the information given
 
-Everything in this course is, in one way or another, a strategy for computing or
-approximating that posterior.
+Two independent tosses of a fair coin give four equally likely outcomes:
 
-## One binary observation
+| Outcome | First toss is heads? | At least one head? |
+|:--|:--:|:--:|
+| HH | Yes | Yes |
+| HT | Yes | Yes |
+| TH | No | Yes |
+| TT | No | No |
 
-Record $x=1$ for a success and $x=0$ for a failure. Let $\theta$ be the success probability.
+Given **at least one head**, exclude TT.
 
-$$p(x\mid\theta)=\theta^x(1-\theta)^{1-x}.$$
+Two of the three remaining outcomes have heads first: probability **2/3**.
 
-Substitute $x=1$: the expression is $\theta$.
-Substitute $x=0$: it is $1-\theta$.
+## Joint and conditional probability
 
-The exponents combine the two cases in one line.
+Let $A$ mean “heads first” and $B$ mean “at least one head”.
 
-## Why the binomial likelihood has those powers
+- Both happen in HH and HT: $P(A\cap B)=2/4$.
+- $B$ happens in HH, HT and TH: $P(B)=3/4$.
 
-Assume $n$ trials are independent conditional on the same $\theta$.
-Multiplying their probabilities gives one factor $\theta$ per success and one
-factor $1-\theta$ per failure.
+$$P(A\mid B)=\frac{P(A\cap B)}{P(B)}=\frac{2/4}{3/4}=\frac23.$$
 
-For a count of $y$ successes, sum over its $\binom ny$ possible sequences:
+“Given $B$” means measuring probability within $B$.
 
-$$p(y\mid\theta)=\binom ny\theta^y(1-\theta)^{n-y}.$$
+Multiplying back gives $P(A\cap B)=P(A\mid B)P(B)$.
 
-Independence and a common probability are modelling assumptions.
+## Return to the observed ten tosses
 
-## Choosing a prior on the unknown probability
+**H H T H H T H T H H**
 
-A prior must put its probability on $0<\theta<1$.
-The Beta family is a convenient flexible choice:
+Assume a common heads probability and independent tosses given that probability.
 
-$$p(\theta)\propto\theta^{a-1}(1-\theta)^{b-1}.$$
+| Proposed heads probability | Probability of this sequence |
+|:--|:--|
+| $\theta=0.5$ | $0.5^{10}\approx0.000977$ |
+| $\theta=0.7$ | $0.7^7\times0.3^3\approx0.002224$ |
 
-- Its mean $a/(a+b)$ expresses the prior centre.
-- Its concentration $a+b$ controls how firmly we hold that belief.
-- Its powers match the likelihood, which makes the update easy to derive.
+Independence lets us multiply: seven head probabilities and three tail probabilities.
 
-## Deriving the Beta posterior: collect powers
+## Compare the two explanations
 
-The likelihood and prior kernels are
+$$\frac{P(\text{sequence}\mid\theta=0.7)}{P(\text{sequence}\mid\theta=0.5)}
+=\frac{0.7^7\times0.3^3}{0.5^{10}}\approx2.28.$$
 
-$$p(y\mid\theta)\propto\theta^y(1-\theta)^{n-y},\qquad
-p(\theta)\propto\theta^{a-1}(1-\theta)^{b-1}.$$
+The observed sequence is **2.28 times as probable** under 0.7 as under 0.5.
 
-Multiply them:
+This is a comparison of how well two parameter values explain the observations.
 
-$$p(\theta\mid y)\propto\theta^{a+y-1}(1-\theta)^{b+n-y-1}.$$
+## The likelihood compares all possible values
 
-This is the kernel of $\operatorname{Beta}(a+y,b+n-y)$.
+Write $y$ for the observed sequence.
 
-::: {.notes}
-Write the factors on the board and collect each exponent separately. Constants may be dropped only when they do not depend on the unknown parameter. Reading: Koop (2003), introductory conjugate models; supplied UPM Classes 1–2.
-:::
+$$L(\theta)=p(y\mid\theta)=\theta^7(1-\theta)^3.$$
 
-## Deriving the Beta posterior: normalise
+- Input: a proposed heads probability $\theta$.
+- Output: the probability of our observed sequence under that value.
 
-The Beta function integrates the kernel:
+The data stay fixed while we vary $\theta$.
 
-$$B(A,B)=\int_0^1\theta^{A-1}(1-\theta)^{B-1}\,d\theta.$$
+For $s$ heads in $n$ tosses: $L(\theta)=\theta^s(1-\theta)^{n-s}$.
 
-With $A=a+y$ and $B=b+n-y$,
+## Why does the likelihood peak at 0.7?
 
-$$p(\theta\mid y)=\frac{\theta^{A-1}(1-\theta)^{B-1}}{B(A,B)}.$$
+Taking a log preserves the maximum and turns products into sums:
 
-For $a=b=2$, $y=8$, $n=12$: $\theta\mid y\sim\operatorname{Beta}(10,6)$.
+$$\log L(\theta)=7\log\theta+3\log(1-\theta).$$
 
-## How strongly should twelve trials change a belief?
+$$\frac{d\log L(\theta)}{d\theta}
+=\frac7\theta-\frac3{1-\theta}
+=\frac{7-10\theta}{\theta(1-\theta)}.$$
 
-$$E[\theta\mid y]=\frac{a+b}{a+b+n}\frac{a}{a+b}
-+\frac{n}{a+b+n}\frac{y}{n}.$$
+Between zero and one, the denominator is positive.
 
-In our example: $\tfrac14\times\tfrac12+\tfrac34\times\tfrac23=0.625$.
+The derivative is positive below 0.7 and negative above it.
+**The maximum is 0.7.**
 
-- The prior contributes its mean and concentration $a+b$.
-- The observations contribute their success fraction and sample size.
-- A concentrated prior moves less; justify that concentration before observing the outcome.
+## More observations sharpen the evidence
 
-## Interpreting the plot before writing code
+For 70 heads and 30 tails:
 
-- Evaluate two **densities** on the same horizontal grid.
-- The posterior uses the two updated shape parameters.
-- The vertical line is the observed success fraction, not a probability distribution.
+$$\frac{0.7^{70}0.3^{30}}{0.5^{100}}
+=\left(\frac{0.7^7 0.3^3}{0.5^{10}}\right)^{10}
+\approx3{,}745.$$
 
-A density's height is not a point probability. Probability is area under the curve.
+The relative support for 0.7 over 0.5 rises from **2.28 to about 3,745**.
 
-## The same example in Python
+Both calculations assume independent tosses with a common heads probability.
+
+## Same peak, different precision
 
 ```{python}
-#| echo: true
-#| output-location: column
-import numpy as np
-from scipy import stats
-import matplotlib.pyplot as plt
-
-# data: 8 successes in 12 trials
-y, n = 8, 12
-a, b = 2, 2            # Beta(2,2) prior
-
-grid = np.linspace(0, 1, 200)
-prior = stats.beta(a, b).pdf(grid)
-post  = stats.beta(a + y, b + n - y).pdf(grid)
-
-fig, ax = plt.subplots(figsize=(4, 3))
-ax.plot(grid, prior, "--", label="prior")
-ax.plot(grid, post, label="posterior")
-ax.axvline(y / n, color="grey", lw=0.8, label="MLE")
-ax.set_xlabel(r"$\theta$"); ax.legend()
+#| out-height: "430px"
+#| label: fig-coin-likelihood
+likelihood_grid = np.linspace(0.001, 0.999, 600)
+fig, ax = plt.subplots()
+for n_tosses, heads, color, label in [
+        (10, 7, BLUE, "7 heads in 10 tosses"),
+        (100, 70, BROWN, "70 heads in 100 tosses")]:
+    likelihood = likelihood_grid**heads * (1 - likelihood_grid)**(n_tosses - heads)
+    likelihood /= 0.7**heads * 0.3**(n_tosses - heads)
+    ax.plot(likelihood_grid, likelihood, color=color, label=label)
+ax.axvline(0.5, color=GREY, linestyle=":")
+ax.set(xlabel="Proposed heads probability", ylabel="Likelihood relative to its maximum")
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17))
 plt.tight_layout()
 plt.show()
 ```
 
-The posterior sits between the prior and the data, and it tightens as $n$ grows.
+Each curve is divided by its own maximum. Compare how quickly support falls away from 0.7.
 
-## Prediction integrates parameter uncertainty
+## What did we know before these tosses?
 
-For one future binary observation $Y_{\mathrm{new}}$,
+Return to **seven heads in ten tosses**.
 
-$$P(Y_{\mathrm{new}}=1\mid y)=\int_0^1\theta\,p(\theta\mid y)\,d\theta
-=E[\theta\mid y].$$
+A prior distribution describes which heads probabilities we consider plausible
+before this sample.
 
-For several future trials, use the same uncertain $\theta$ for the batch.
-Integrating it out produces a **Beta-binomial** predictive distribution.
+For a coin, we might expect a probability near one half while allowing substantial uncertainty.
 
-::: {.notes}
-The one-trial predictive probability equals the posterior mean, but plugging that mean into a multi-trial binomial loses the extra variation due to parameter uncertainty. Derive the Beta-function ratio in the lecture notes or as additional practice.
-:::
+We must specify both **where the prior is centred** and **how concentrated it is**.
 
-## Week 1 exercise: posterior calculation on a grid
+## A density assigns probabilities through areas
 
-1. Multiply the prior and likelihood at midpoint grid values.
-2. Normalise the grid masses so they sum to one.
-3. Compute the mean, interval and a tail probability.
-4. Refine the grid and compare with the analytic Beta posterior.
+The continuous parameter $\theta$ lies between zero and one.
 
-The [exercise session](../exercise-sessions/01-introduction.qmd) uses a second dataset so that the derivation must be transferred, not copied.
+A density $p(\theta)$ describes our uncertainty:
 
-## What you should take away today
+$$P(0.4<\theta<0.6)=\int_{0.4}^{0.6}p(\theta)\,d\theta.$$
 
-- Bayesian inference combines a prior and a likelihood into a posterior
-- The posterior *is* the answer: it carries the full uncertainty
-- Conjugacy gives exact benchmarks; numerical integration and MCMC extend our reach
-- This week, implement Bayes’ rule directly on a discrete grid
+The integral adds the area between 0.4 and 0.6.
 
-## Next steps
+The total area from zero to one must equal one.
 
-- Set up Python and confirm NumPy, SciPy, and Matplotlib run
-- Read the introductory Bayesian treatment in Koop (2003) and Zellner (1971)
-- Use the [lecture notes](../lecture-notes/01-introduction.qmd) for worked derivations
-- Bring questions to the first exercise session
+## Build a Beta prior
 
-See the [course homepage](../index.qmd) for materials, the schedule, and the
-reading list. **ILIAS** is used only for announcements and news.
+The Beta family starts from the shape $\theta^{a-1}(1-\theta)^{b-1}$, with $a,b>0$.
+
+For $a=b=2$, the shape is $\theta(1-\theta)$ and its area is
+
+$$\int_0^1\theta(1-\theta)\,d\theta=\frac12-\frac13=\frac16.$$
+
+Divide by this area: the **Beta(2,2) density** is $6\theta(1-\theta)$.
+
+Making the total area equal one is called **normalisation**.
+
+## The two Beta parameters control centre and spread
+
+$$p(\theta)=\frac{\theta^{a-1}(1-\theta)^{b-1}}{B(a,b)},\qquad
+B(a,b)=\int_0^1\theta^{a-1}(1-\theta)^{b-1}\,d\theta.$$
+
+$B(a,b)$ is the area used to normalise the density.
+
+The mean $E[\theta]$ averages parameter values using their density weights.
+The variance $\operatorname{Var}(\theta)$ measures spread around that mean.
+
+$$E[\theta]=\frac{a}{a+b},\qquad
+\operatorname{Var}(\theta)=\frac{ab}{(a+b)^2(a+b+1)}.$$
+
+Keeping $a/(a+b)$ fixed while increasing $a+b$ reduces the variance.
+
+## What do different prior choices express?
+
+```{python}
+#| out-height: "430px"
+#| label: fig-beta-prior-shapes
+prior_grid = np.linspace(0.001, 0.999, 500)
+shape_cases = [(1, 1), (2, 2), (20, 20), (2, 5), (5, 2)]
+fig, axes = plt.subplots(2, 3, figsize=(10, 7), sharex=True, sharey=True)
+axes = axes.ravel()
+axes[-1].set_visible(False)
+for ax, (prior_a, prior_b) in zip(axes, shape_cases):
+    ax.plot(prior_grid, stats.beta.pdf(prior_grid, prior_a, prior_b), color=BLUE)
+    ax.axvline(prior_a / (prior_a + prior_b), color=BROWN, linestyle="--", lw=1)
+    ax.set(title=f"Beta({prior_a},{prior_b})", xlabel="Heads probability",
+           xticks=[0, 0.5, 1])
+    ax.grid(axis="y", alpha=0.3)
+axes[0].set_ylabel("Density")
+plt.tight_layout()
+plt.show()
+```
+
+Use **Beta(2,2)** for the worked update: centred at one half, with a broad spread.
+
+## What changes after observing the data?
+
+We have:
+
+- Prior density $p(\theta)$: initial uncertainty about the heads probability.
+- Likelihood $p(y\mid\theta)$: probability of the observations at each proposed value.
+
+We want the **posterior density** $p(\theta\mid y)$:
+uncertainty about the heads probability **given our observations**.
+
+## Multiply to obtain joint probabilities
+
+Consider a narrow interval around $\theta$, with width $\Delta$.
+
+| Quantity | Approximation |
+|:--|:--|
+| Prior probability in the interval | $p(\theta)\Delta$ |
+| Probability of the sequence at that parameter value | $p(y\mid\theta)$ |
+| Parameter in the interval **and** observed sequence | $p(y\mid\theta)p(\theta)\Delta$ |
+
+This uses the multiplication rule: probability of one event times the conditional probability of the other.
+
+## Divide by the total to condition on the data
+
+Add the joint probabilities across parameter intervals to obtain $p(y)$.
+
+Divide each interval's contribution by that total:
+
+$$p(\theta\mid y)\Delta\approx
+\frac{p(y\mid\theta)p(\theta)\Delta}{p(y)}.$$
+
+As intervals become arbitrarily narrow, cancel their width:
+
+$$\boxed{p(\theta\mid y)=\frac{p(y\mid\theta)p(\theta)}{p(y)}}.$$
+
+This is **Bayes' theorem**.
+
+## The denominator normalises the posterior
+
+Adding over all possible parameter values gives
+
+$$p(y)=\int_0^1p(y\mid\theta)p(\theta)\,d\theta.$$
+
+For the observed sample this is a constant with respect to $\theta$.
+
+To identify the posterior's shape, write
+
+$$\text{posterior}\propto\text{likelihood}\times\text{prior}.$$
+
+$\propto$ means “proportional to”. We normalise the resulting shape to calculate probabilities.
+
+## Derive our posterior
+
+Seven heads, three tails, Beta(2,2) prior:
+
+$$p(\theta\mid y)\propto
+\theta^7(1-\theta)^3\times6\theta(1-\theta)
+\propto\theta^8(1-\theta)^4.$$
+
+Match the Beta exponents: $a-1=8$, $b-1=4$.
+
+$$\boxed{\theta\mid y\sim\operatorname{Beta}(9,5)}.$$
+
+Here $\sim$ means “has distribution”. Its normalised density is
+$\theta^8(1-\theta)^4/B(9,5)$.
+
+## The same update for any sample
+
+With a Beta($a,b$) prior and $s$ heads in $n$ tosses:
+
+$$p(\theta\mid y)\propto
+\theta^s(1-\theta)^{n-s}\theta^{a-1}(1-\theta)^{b-1}
+=\theta^{a+s-1}(1-\theta)^{b+n-s-1}.$$
+
+$$\boxed{\theta\mid y\sim\operatorname{Beta}(a+s,b+n-s)}.$$
+
+Add heads to the first parameter and tails to the second.
+
+A prior is **conjugate** when the posterior belongs to the same distribution family.
+
+## See what the observations changed
+
+```{python}
+#| out-height: "430px"
+#| label: fig-beta-learning
+A, B, N, S = 2, 2, 10, 7
+prior = stats.beta(A, B)
+posterior = stats.beta(A + S, B + N - S)
+theta = np.linspace(0.001, 0.999, 600)
+# The binomial likelihood integrates to 1 / (N + 1) over the probability.
+scaled_likelihood = (N + 1) * stats.binom.pmf(S, N, theta)
+interval = posterior.ppf([0.025, 0.975])
+fig, ax = plt.subplots()
+ax.plot(theta, prior.pdf(theta), color=GREY, linestyle=":", lw=2,
+        label="Prior: Beta(2,2)")
+ax.plot(theta, scaled_likelihood, color=BROWN, linestyle="--", lw=2,
+        label="Scaled likelihood")
+ax.plot(theta, posterior.pdf(theta), color=BLUE, lw=2.5,
+        label="Posterior: Beta(9,5)")
+in_interval = (theta >= interval[0]) & (theta <= interval[1])
+ax.fill_between(theta, 0, posterior.pdf(theta), where=in_interval,
+                color=BLUE, alpha=0.15)
+ax.set(xlabel="Heads probability", ylabel="Density / scaled likelihood", xlim=(0, 1))
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=3, frameon=False)
+plt.tight_layout()
+plt.show()
+```
+
+The posterior moves towards the sample proportion and remains spread over possible values.
+
+## The posterior mean combines information
+
+$$E[\theta\mid y]=\frac{a+s}{a+b+n}
+=\frac{a+b}{a+b+n}\frac{a}{a+b}
++\frac{n}{a+b+n}\frac{s}{n}.$$
+
+For our example:
+
+$$\frac4{14}\times0.5+\frac{10}{14}\times0.7
+=\frac9{14}\approx0.643.$$
+
+The prior contributes a weight of four and the observations a weight of ten.
+
+**What happens to these weights as more observations arrive?**
+
+## Express uncertainty using posterior area
+
+A **95% credible interval** contains 95% of posterior probability.
+
+For an equal-tailed interval:
+
+- Choose a lower endpoint with 2.5% of the area below it.
+- Choose an upper endpoint with 2.5% above it.
+- These endpoints are the 2.5% and 97.5% **quantiles**.
+
+The shaded region in the previous plot is this interval.
+
+## Is heads more likely than tails?
+
+Our opening question is $\theta>0.5$.
+
+$$P(\theta>0.5\mid y)
+=\int_{0.5}^1\frac{\theta^8(1-\theta)^4}{B(9,5)}\,d\theta
+\approx0.867.$$
+
+About **87% of posterior probability** lies above one half.
+
+This answer uses the observed ten tosses, our model and the Beta(2,2) prior.
+
+## From a sequence to a count
+
+For a known $\theta$, one head in two tosses can occur as HT or TH:
+
+$$P(\text{one head}\mid\theta)=2\theta(1-\theta).$$
+
+In general, $\binom mk=m!/[k!(m-k)!]$ counts sequences with $k$ heads in $m$ tosses.
+Here $m!$ is the product of integers from 1 to $m$, with $0!=1$.
+
+Let $K$ be the head count in $m$ tosses. The **binomial distribution** gives
+
+$$P(K=k\mid\theta)=\binom mk\theta^k(1-\theta)^{m-k}.$$
+
+## What does a frequentist test ask?
+
+Assume the null hypothesis $H_0:\theta=0.5$.
+
+For the alternative $\theta>0.5$, ask:
+**How often would a fair coin produce at least seven heads in ten tosses?**
+
+Count all sequences with seven, eight, nine or ten heads.
+Their numbers are 120, 45, 10 and 1.
+
+$$P(S\geq7\mid\theta=0.5)=\frac{120+45+10+1}{2^{10}}\approx0.172.$$
+
+This is the **p-value**. Here $S$ denotes the head count in a possible sample.
+
+## Two probabilities, two questions
+
+| Calculation | Information used as given | Question |
+|:--|:--|:--|
+| p-value: 0.172 | Fair coin | How often would samples have at least seven heads? |
+| Posterior probability: 0.867 | Observed sample and prior | How probable is $\theta>0.5$? |
+
+The first considers possible samples at a specified parameter value.
+
+The second considers possible parameter values after observing the sample.
+
+## Confidence intervals concern repeated samples
+
+```{python}
+#| out-height: "430px"
+#| label: fig-confidence-coverage
+rng = np.random.default_rng(7)
+true_theta, sample_size = 0.7, 10
+successes = rng.binomial(sample_size, true_theta, size=60)
+lower = np.zeros(60)
+upper = np.ones(60)
+positive = successes > 0
+below_n = successes < sample_size
+lower[positive] = stats.beta.ppf(0.025, successes[positive],
+                                sample_size - successes[positive] + 1)
+upper[below_n] = stats.beta.ppf(0.975, successes[below_n] + 1,
+                               sample_size - successes[below_n])
+covers = (lower <= true_theta) & (true_theta <= upper)
+fig, ax = plt.subplots(figsize=(9, 6))
+ax.hlines(np.arange(60), lower, upper, color=np.where(covers, BLUE, BROWN), lw=1.5)
+ax.axvline(true_theta, color=GREY, linestyle="--")
+ax.set(xlabel="Heads probability", ylabel="Repeated sample", xlim=(0, 1))
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+The parameter stays at 0.7. New samples produce new intervals.
+
+## What does 95% refer to?
+
+**Confidence interval:** a procedure designed to cover the fixed parameter
+in 95% of repeated samples. The exact binomial procedure has coverage of at least 95%.
+
+**Credible interval:** a range containing 95% of posterior probability,
+given the observations, model and prior.
+
+The interpretation depends on **which distribution supplies the probability**.
+
+## How do we predict the next toss?
+
+If $\theta$ were 0.6, our heads forecast would be 0.6.
+If it were 0.8, the forecast would be 0.8.
+
+Average these possible forecasts using their **posterior weights**.
+
+For a small interval, its contribution is approximately
+$\theta p(\theta\mid y)\Delta$.
+
+Adding over all intervals gives
+
+$$P(\text{next head}\mid y)=\int_0^1\theta p(\theta\mid y)\,d\theta
+=E[\theta\mid y]\approx0.643.$$
+
+## Average the count probabilities over the posterior
+
+Write $a_n=a+s$, $b_n=b+n-s$ for the posterior parameters.
+
+$$P(K=k\mid y)=\int_0^1\binom mk\theta^k(1-\theta)^{m-k}
+\frac{\theta^{a_n-1}(1-\theta)^{b_n-1}}{B(a_n,b_n)}\,d\theta.$$
+
+Collect the powers. Their integral is $B(a_n+k,b_n+m-k)$:
+
+$$P(K=k\mid y)=\binom mk\frac{B(a_n+k,b_n+m-k)}{B(a_n,b_n)}.$$
+
+This is the **Beta–binomial posterior predictive distribution**.
+
+## Parameter uncertainty changes the predicted count
+
+```{python}
+#| out-height: "430px"
+#| label: fig-predictive-counts
+future_n = 10
+counts = np.arange(future_n + 1)
+predictive = stats.betabinom(future_n, A + S, B + N - S)
+plugin = stats.binom(future_n, posterior.mean())
+fig, ax = plt.subplots()
+ax.bar(counts - 0.18, predictive.pmf(counts), width=0.36, color=BLUE,
+       label="Posterior predictive")
+ax.bar(counts + 0.18, plugin.pmf(counts), width=0.36, color=BROWN,
+       label="Probability fixed at posterior mean")
+ax.set(xlabel="Heads in ten future tosses", ylabel="Probability", xticks=counts)
+ax.grid(axis="y", alpha=0.3)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), fontsize=9)
+plt.tight_layout()
+plt.show()
+```
+
+Both calculations have the same expected count. Averaging over the uncertain parameter increases dispersion here.
+
+## New data update the current posterior
+
+After seven heads and three tails: **Beta(9,5)**.
+
+Observe six heads and four tails in ten new tosses:
+
+$$\operatorname{Beta}(9+6,5+4)=\operatorname{Beta}(15,9).$$
+
+Or combine all thirteen heads and seven tails at once:
+
+$$\operatorname{Beta}(2+13,2+7)=\operatorname{Beta}(15,9).$$
+
+The posterior from the first batch becomes the prior for the next.
+
+## More data concentrate the posterior
+
+```{python}
+#| out-height: "430px"
+#| label: fig-posterior-concentration
+fig, axes = plt.subplots(1, 3, figsize=(10, 4.5), sharex=True, sharey=True)
+for ax, n_obs, n_heads in zip(axes, [10, 40, 100], [7, 28, 70]):
+    updated = stats.beta(2 + n_heads, 2 + n_obs - n_heads)
+    ax.plot(theta, updated.pdf(theta), color=BLUE)
+    ax.plot(theta, stats.beta.pdf(theta, 2, 2), color=GREY, linestyle=":")
+    ax.axvline(0.7, color=BROWN, linestyle="--", lw=1)
+    ax.set(title=f"{n_heads} heads in {n_obs} tosses", xlabel="Heads probability")
+    ax.grid(axis="y", alpha=0.3)
+axes[0].set_ylabel("Density")
+plt.tight_layout()
+plt.show()
+```
+
+The samples keep the same heads proportion so we can isolate the effect of sample size.
+
+## Transfer the calculation to market outcomes
+
+A **negative market excess return** means that the market underperformed the risk-free return.
+
+Let $L_t=1$ for a negative month and $L_t=0$ otherwise.
+
+Now $\theta$ is the probability of a negative month.
+
+Use monthly observations from **2024** to calculate a forecast at that year's end.
+
+## The observed market months
+
+```{python}
+#| out-height: "430px"
+#| label: fig-market-observations
+DATA = next(p for p in (Path("data"), Path("../data")) if p.exists())
+market = pd.read_parquet(DATA / "ff_factors_monthly.parquet")["mkt_rf"].dropna()
+returns = market.loc["2024-01-01":"2024-12-31"]
+loss_count = int((returns < 0).sum())
+month_count = len(returns)
+fig, ax = plt.subplots()
+ax.bar(np.arange(month_count), 100 * returns.to_numpy(),
+       color=np.where(returns.to_numpy() < 0, BROWN, BLUE))
+ax.axhline(0, color=GREY, lw=0.8)
+ax.set(xticks=np.arange(month_count), xticklabels=returns.index.strftime("%b %y"),
+       ylabel="Market excess return (%)")
+ax.tick_params(axis="x", rotation=45)
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+Kenneth French Data Library, documented course snapshot: **three negative months out of twelve**.
+
+## Update the probability of a negative month
+
+Assume independent months given a common probability, also applicable to the forecast period.
+Use the illustrative Beta(2,2) prior.
+
+$$\theta\mid L\sim\operatorname{Beta}(2+3,2+9)=\operatorname{Beta}(5,11).$$
+
+$$E[\theta\mid L]=\frac5{16}=0.3125.$$
+
+Next month's negative-return probability is **31.25%**.
+
+Expected negative months in the next year: $12\times0.3125=3.75$.
+
+## How much does the prior matter?
+
+```{python}
+#| out-height: "430px"
+#| label: fig-market-prior-sensitivity
+prior_cases = [("Uniform: Beta(1,1)", 1, 1),
+               ("Teaching prior: Beta(2,2)", 2, 2),
+               ("Stronger centre: Beta(20,20)", 20, 20)]
+fig, ax = plt.subplots()
+for position, (label, prior_a, prior_b) in enumerate(prior_cases):
+    updated = stats.beta(prior_a + loss_count, prior_b + month_count - loss_count)
+    low, high = updated.ppf([0.025, 0.975])
+    mean = updated.mean()
+    ax.errorbar(mean, position, xerr=[[mean - low], [high - mean]],
+                fmt="o", capsize=4, color=BLUE)
+ax.axvline(loss_count / month_count, color=BROWN, linestyle="--", lw=1)
+ax.set(yticks=range(3), yticklabels=[case[0] for case in prior_cases],
+       xlabel="Probability of a negative excess return", xlim=(0, 0.75),
+       ylim=(-0.5, 2.5))
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+The stronger prior contributes weight 40 against 12 observations. Its posterior stays closer to one half.
+
+## What we can now do
+
+For the coin and the market example, we have:
+
+1. Written a model for the observations and obtained its likelihood.
+2. Specified prior information.
+3. Derived a posterior distribution.
+4. Calculated estimates, uncertainty and predictions.
+
+Changing the application changes the model and its assumptions.
+**The updating rule remains Bayes' theorem.**
+
+## Check the argument yourself
+
+- Why does 70/100 provide stronger evidence than 7/10?
+- Why multiply the likelihood by the prior, then normalise?
+- What does the posterior mean leave out?
+- Why average over the posterior when predicting?
+
+Explain each answer using a calculation or figure from the lecture.
+
+## From this lecture to the course
+
+The exercise computes a Beta–binomial posterior on a **grid**.
+It uses nine successes in twelve trials and a Beta(5,5) prior for practice.
+
+Lecture 2 replaces the heads probability with **regression coefficients and a noise variance**.
+
+Later lectures use **posterior simulation** when analytical calculations become difficult.
+We still want posterior probabilities, predictions and decisions.
+
+## Reading and materials
+
+- Koop (2003), *Bayesian Econometrics*, Chapter 1.
+- Zellner (1971), *An Introduction to Bayesian Inference in Econometrics*.
+
+[Chapter text](../lecture-notes/01-introduction.qmd) · [Exercise session](../exercise-sessions/01-introduction.qmd)
+
+[Course information and examination](../course-information.qmd)
+
+Materials are on the course website. ILIAS carries announcements and news.
