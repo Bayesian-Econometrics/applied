@@ -64,27 +64,62 @@ BLUE, BROWN, GREY = "#527a99", "#aa8066", "#777777"
 
 ### What does “given” mean?
 
-A conditional probability is calculated using specified information. For example,
+Before calculating probabilities for our ten tosses, consider two independent
+tosses of a fair coin. There are four equally likely outcomes:
 
-$$P(\text{head on the next toss}\mid\theta=0.7)=0.7.$$
+| Outcome | First toss is heads? | At least one toss is heads? |
+|:--|:--:|:--:|
+| HH | Yes | Yes |
+| HT | Yes | Yes |
+| TH | No | Yes |
+| TT | No | No |
 
-Read the vertical bar as “given”: **given a heads probability of 0.7, the
-probability of a head on the next toss is 0.7**. The information on the right
-of the bar tells us what to use when calculating the probability on the left.
+The probability that the first toss is heads is **2 out of 4**, or one half.
 
-For events $A$ and $B$, the definition is
+Now someone tells us: **at least one toss was heads**. This information rules
+out TT. Among the three remaining outcomes, HH and HT have a head first.
+The probability that the first toss was heads is now **2 out of 3**.
 
-$$P(A\mid B)=\frac{P(A\cap B)}{P(B)},\qquad P(B)>0.$$
+That is a **conditional probability**: we calculate the probability after
+restricting attention to the outcomes consistent with the information given.
+Write $A$ for “first toss is heads” and $B$ for “at least one toss is heads”.
+Then
 
-Here $A\cap B$ means that both events occur. Once we know $B$ occurred, we
-restrict attention to $B$. The numerator selects the part where $A$ also
-occurs; dividing by $P(B)$ measures that part relative to all of $B$.
-For example, if $P(B)=0.4$ and $P(A\cap B)=0.1$, then
-$P(A\mid B)=0.1/0.4=0.25$: one quarter of the probability within $B$ also
-belongs to $A$.
+$$P(A\mid B)=\frac23.$$
 
-In our coin model, we first specify a value of $\theta$, then calculate the
-probability of the observed tosses conditional on that value.
+The bar means “given”. The event on its right tells us which outcomes to keep.
+
+### What is a joint probability?
+
+A **joint probability** is the probability that two stated events both occur.
+In the table, HH and HT satisfy both $A$ and $B$. Out of the original four
+outcomes, their combined probability is
+
+$$P(A\cap B)=\frac24=\frac12.$$
+
+The symbol $\cap$ means “and”. Compare the two calculations:
+
+- **Joint:** both $A$ and $B$ occur — two of the original four outcomes.
+- **Conditional:** $A$ occurs given $B$ — two of the three outcomes left after learning $B$.
+
+Since $B$ occupies three quarters of the original probability, we rescale by
+that amount to obtain the conditional probability:
+
+$$P(A\mid B)=\frac{P(A\cap B)}{P(B)}
+=\frac{2/4}{3/4}=\frac23.$$
+
+Equivalently, multiplying the fraction belonging to $B$ by the fraction of
+$B$ that also belongs to $A$ recovers the joint probability:
+
+$$\underbrace{P(B)}_{3/4}\,
+\underbrace{P(A\mid B)}_{2/3}
+=\underbrace{P(A\cap B)}_{1/2}.$$
+
+This is the multiplication rule we will use again when deriving Bayes' theorem.
+
+Return now to our coin with an unknown heads probability. Writing
+$P(\text{observed sequence}\mid\theta=0.7)$ means that we assume a heads
+probability of 0.7 for the calculation and ask how probable the sequence is.
 
 ### Calculate the probability of what we observed
 
@@ -128,6 +163,10 @@ heads probability between zero and one. A head then contributes $\theta$ and
 a tail contributes $1-\theta$. The same multiplication gives
 
 $$L(\theta)=\theta^7(1-\theta)^3.$$
+
+Write $y$ for our observed sequence. We also write the likelihood as
+$p(y\mid	heta)$: the probability of that sequence given a proposed value of
+$	heta$. Thus $L(	heta)$ and $p(y\mid	heta)$ denote the same function here.
 
 This function is the **likelihood**. Its input is a proposed heads probability;
 its output is the probability of our observed sequence under that proposal.
@@ -212,27 +251,58 @@ Prior information may come from physical knowledge or earlier, separate data.
 Different information can justify different priors. We must state our choice
 and check how much it affects the answer.
 
-### A Beta prior describes plausible probabilities
+### Describe uncertainty with a density
 
-A probability lies between zero and one. The Beta distribution respects this
-range and lets us express different centres and degrees of uncertainty:
+Our unknown heads probability can take any value between zero and one. We
+represent uncertainty about it with a **probability density**, written
+$p(\theta)$. Probabilities are areas under this curve. For example,
 
-$$
-p(\theta)=\frac{\theta^{a-1}(1-\theta)^{b-1}}{B(a,b)},\qquad
-B(a,b)=\int_0^1\theta^{a-1}(1-\theta)^{b-1}\,d\theta,
-\qquad a,b>0.
-$$
+$$P(0.4<\theta<0.6)=\int_{0.4}^{0.6}p(\theta)\,d\theta.$$
 
-Its mean and variance are
+This is the probability we assign to the heads probability lying between
+0.4 and 0.6. The integral adds the area over that interval. The total area
+between zero and one must be one, because the parameter must lie in this range.
+A taller curve over an interval assigns more probability to that interval.
 
-$$E[\theta]=\frac{a}{a+b},\qquad
-\operatorname{Var}(\theta)=\frac{ab}{(a+b)^2(a+b+1)}.$$
+### Choose a Beta prior
 
-The ratio $a/(a+b)$ sets the centre. Holding that ratio fixed, increasing $a+b$
-concentrates the prior. Thus $\operatorname{Beta}(2,2)$ and
-$\operatorname{Beta}(20,20)$ both have mean one half, but express very different
-confidence in that centre. A $\operatorname{Beta}(1,1)$ density is uniform on
-this scale: intervals of equal width receive equal prior probability.
+The **Beta distribution** is a family of densities on this range. Its two
+positive parameters, $a$ and $b$, let us choose where the distribution is
+centred and how widely it spreads. We write
+$\theta\sim\operatorname{Beta}(a,b)$, where $\sim$ means “has distribution”.
+
+Start with its shape, $\theta^{a-1}(1-\theta)^{b-1}$. For $a=b=2$, this is
+$\theta(1-\theta)$: it is largest at one half and falls towards either end.
+Its area is
+
+$$\int_0^1\theta(1-\theta)\,d\theta
+=\left[\frac{\theta^2}{2}-\frac{\theta^3}{3}\right]_0^1=\frac16.$$
+
+To make the area one, divide by $1/6$. The Beta(2,2) density is therefore
+$6\theta(1-\theta)$. This division is called **normalisation**.
+For any positive $a,b$, the same construction gives
+
+$$p(\theta)=\frac{\theta^{a-1}(1-\theta)^{b-1}}{B(a,b)},\qquad
+B(a,b)=\int_0^1\theta^{a-1}(1-\theta)^{b-1}\,d\theta.$$
+
+$B(a,b)$ names the area we divide by; it is the Beta function. We will use
+this known normalising constant when we recognise a Beta density later.
+
+The **mean** is the probability-weighted average of the possible parameter
+values. For a density, the weighted sum becomes an integral. For the Beta,
+
+$$E[\theta]=\int_0^1\theta p(\theta)\,d\theta=\frac{a}{a+b}.$$
+
+The **variance** measures their spread around that mean. The Beta variance is
+
+$$\operatorname{Var}(\theta)=\frac{ab}{(a+b)^2(a+b+1)}.$$
+
+To read these formulas, put $\mu=a/(a+b)$ and $c=a+b$. The mean is $\mu$
+and the variance becomes $\mu(1-\mu)/(c+1)$. Holding the mean fixed while
+increasing $c$ therefore reduces the variance. Beta(2,2) and Beta(20,20)
+both centre on one half, but the latter expresses greater confidence in
+values near one half. Beta(1,1) has constant density one, giving equal
+probability to intervals of equal width.
 
 The shapes below separate two choices: **where the prior is centred** and
 **how concentrated it is**. Compare Beta(2,2) with Beta(20,20) for concentration;
@@ -258,10 +328,6 @@ plt.tight_layout()
 plt.show()
 ```
 
-A high density near a value means that nearby values receive more probability
-per unit of interval width. It is the area over an interval, not the height of
-the curve at one point, that gives a probability.
-
 Choose $\operatorname{Beta}(2,2)$ to express our expectation of a roughly balanced
 coin. Its curve is centred at one half and broad enough to allow a wide range of heads probabilities. Later we will repeat an update with different priors to see how much
 this choice matters.
@@ -280,29 +346,41 @@ We now want to reverse the direction of conditioning:
 - $p(y\mid\theta)$ describes the observations given a heads probability.
 - $p(\theta\mid y)$ describes the heads probability given our observations.
 
-The conditional-probability definition explains how. Multiplying
-$P(A\mid B)=P(A\cap B)/P(B)$ by $P(B)$ gives
-$P(A\cap B)=P(A\mid B)P(B)$. Reversing the roles of the events also gives
-$P(A\cap B)=P(B\mid A)P(A)$. Both expressions describe the same joint event.
+Use the multiplication rule from the two-toss table. To find the probability
+of two things happening together, take the probability of the first and
+multiply by the conditional probability of the second.
 
-The corresponding product rule for our observed sequence and continuous
-parameter uses a density for $\theta$:
+Here the two things concern **a value of the heads probability** and **the
+observed sequence**. Because $\theta$ is continuous, first think of a narrow
+interval around a proposed value, with width $\Delta$:
 
+1. The prior probability in that interval is approximately $p(\theta)\Delta$.
+2. For values in a sufficiently narrow interval, the probability of our
+   sequence is approximately $p(y\mid\theta)$.
+3. Their product, $p(y\mid\theta)p(\theta)\Delta$, is approximately the joint
+   probability of a parameter in that interval **and** our sequence.
 
-$$p(\theta,y)=p(y\mid\theta)p(\theta)
-            =p(\theta\mid y)p(y).$$
+Repeat this across the interval from zero to one. Add the joint probabilities
+to obtain the overall probability of the sequence, $p(y)$. Once we observe that
+sequence, divide each joint probability by $p(y)$, just as we divided by
+$P(B)$ in the table. This gives the posterior probability in each parameter
+interval:
 
-The first expression starts with a possible heads probability and then the observations.
-The second starts with the observations and then the heads probability. Equating them and
-dividing by $p(y)$ gives **Bayes' theorem**:
+$$\underbrace{p(\theta\mid y)\Delta}_{\text{probability in the interval after observing }y}
+\approx\frac{\underbrace{p(y\mid\theta)p(\theta)\Delta}_{\text{joint probability}}}
+{\underbrace{p(y)}_{\text{probability of the observed sequence}}}.$$
 
-$$p(\theta\mid y)=\frac{p(y\mid\theta)p(\theta)}{p(y)},\qquad
-p(y)=\int_0^1p(y\mid\theta)p(\theta)\,d\theta.$$
+As the intervals become arbitrarily narrow, cancelling their common width
+gives the density formula, **Bayes' theorem**:
 
-The numerator gives more weight to values that were plausible beforehand and
-explain the observations well. The denominator adds up those weights across
-all possible heads probabilities, making the resulting density integrate to one. The result
-is the **posterior**: our distribution for $\theta$ after these observations.
+$$p(\theta\mid y)=\frac{p(y\mid\theta)p(\theta)}{p(y)}.$$
+
+Adding contributions over all parameter values becomes an integral:
+
+$$p(y)=\int_0^1p(y\mid\theta)p(\theta)\,d\theta.$$
+
+Thus we multiply to combine prior information with the observations, then
+divide by the total to make the posterior probabilities sum to one.
 
 Because the denominator does not vary with $\theta$, we can first find the
 shape by writing
@@ -316,7 +394,20 @@ to calculate probabilities, but recognising the shape will make that easy.
 
 ### Derive the posterior by collecting powers
 
-Multiply the likelihood and prior, dropping only factors independent of $\theta$:
+For our ten tosses the likelihood is $\theta^7(1-\theta)^3$. The Beta(2,2)
+prior density is $6\theta(1-\theta)$. Their product is
+
+$$6\theta^7(1-\theta)^3\theta(1-\theta)
+=6\theta^8(1-\theta)^4.$$
+
+The factor 6 is constant across all values of $\theta$ and cancels when we
+divide by the total area. The remaining powers match a Beta density:
+$a-1=8$ and $b-1=4$, so the posterior parameters are 9 and 5. Thus
+
+$$p(\theta\mid y)=\frac{\theta^8(1-\theta)^4}{B(9,5)}.$$
+
+Now repeat the calculation for any $s$ heads in $n$ tosses and any Beta($a,b$)
+prior. Multiply the shapes, then add the exponents:
 
 $$
 \begin{aligned}
@@ -399,14 +490,19 @@ The prior contributes a weight of 4 and the sample a weight of 10. In general,
 $a+b$ controls the prior’s weight in this mean update. As the sample size $n$
 grows, the data receive a larger share of the total weight.
 
-The posterior also answers questions a point estimate leaves open:
+### Describe the uncertainty around the estimate
 
-- **An interval:** choose the 2.5% and 97.5% posterior quantiles. The probability
-  between them is 95%, conditional on the model, prior and observed sample.
-- **A hypothesis about the parameter:** compute
-  $P(\theta>0.5\mid y)=1-F_{\mathrm{Beta}(9,5)}(0.5)$.
-- **Remaining uncertainty:** the posterior variance is
-  $(a+s)(b+n-s)/[(a+b+n)^2(a+b+n+1)]$.
+A mean of about 0.643 summarises the posterior with one number. To describe
+its spread, we can find an interval containing 95% of its probability.
+Choose a lower endpoint with 2.5% of the area below it and an upper endpoint
+with 2.5% above it. The area between them is 95%. These endpoints are called
+the 2.5% and 97.5% **quantiles**; together they form a **95% credible interval**.
+The shaded area in the posterior figure shows this interval.
+
+We can also calculate the probability that heads is more likely than tails
+by adding the posterior area above 0.5. This answers our opening question
+with a probability. We calculate it below alongside the familiar
+frequentist test to show how their interpretations differ.
 
 ## How does this differ from frequentist inference?
 
@@ -420,11 +516,29 @@ to parameter ranges conditional on the sample actually observed and a prior.
 
 ### Two different questions about the same observations
 
-For the seven heads in ten tosses, consider a one-sided test of
-$H_0:\theta=0.5$ against $H_1:\theta>0.5$. Its exact p-value is
+A frequentist test begins with the **null hypothesis**, here a fair coin:
+$H_0:\theta=0.5$. Our alternative is $H_1:\theta>0.5$. Evidence in this direction
+means unusually many heads. The **p-value** is the probability, under the null,
+of observing at least as many heads as we did.
+
+To calculate it, we need probabilities for counts rather than one particular
+sequence. Exactly one head in two tosses can occur as HT or TH. Each has
+probability $\theta(1-\theta)$, so their combined probability is
+$2\theta(1-\theta)$. More generally, $\binom{n}{k}=n!/[k!(n-k)!]$ counts the
+sequences with $k$ heads in $n$ tosses. Here $n!$ means the product of the
+integers from 1 to $n$, with $0!=1$.
+
+Write $S$ for the head count before we observe it. Adding the equally probable
+sequences with the same count gives the **binomial distribution**:
+
+$$P(S=k\mid\theta)=\binom nk\theta^k(1-\theta)^{n-k}.$$
+
+For ten tosses of a fair coin, each sequence has probability $(0.5)^{10}$.
+Counts of seven, eight, nine and ten heads have 120, 45, 10 and 1 possible
+sequences respectively. Therefore,
 
 $$P(S\geq7\mid\theta=0.5)
-=\sum_{k=7}^{10}\binom{10}{k}(0.5)^{10}\approx0.172.$$
+=\frac{120+45+10+1}{2^{10}}=\frac{176}{1024}\approx0.172.$$
 
 **If the coin were fair**, samples with at least seven heads would occur about
 17% of the time. This does not tell us the probability that the coin is fair.
@@ -497,8 +611,19 @@ predict the outcomes of new tosses.
 
 ### Prediction averages over the posterior
 
-Conditional on $\theta$, the next toss is a head with probability $\theta$.
-Since we do not know $\theta$, average over its posterior:
+Suppose we knew that $\theta=0.6$: our forecast probability for a head would
+be 0.6. If we knew that $\theta=0.8$, it would be 0.8. Each possible parameter
+value therefore gives its own forecast. The posterior tells us how much
+weight to give each of these possibilities.
+
+For a narrow interval around $\theta$, the posterior probability is
+approximately $p(\theta\mid y)\Delta$. Its contribution to the forecast is
+$\theta p(\theta\mid y)\Delta$. Adding these contributions over all intervals,
+and letting their widths shrink, gives the integral below.
+
+Write $Y_{n+1}=1$ for a head on the next toss and $Y_{n+1}=0$ for a tail.
+Under our model, once $\theta$ is specified the next toss is independent of
+the earlier observations. Its heads probability is $\theta$. Thus
 
 $$
 P(Y_{n+1}=1\mid y)
@@ -511,15 +636,17 @@ Thus the next-head probability is about 0.643. This is a prediction about an out
 the shaded interval in the earlier figure concerns the unknown probability.
 They answer different questions.
 
-To predict a count, we must include every sequence producing that count.
-For example, exactly one head in two tosses can occur as HT or TH. Each sequence
-has probability $\theta(1-\theta)$, so the count has probability
-$2\theta(1-\theta)$. In general, $\binom{m}{k}$ counts the sequences containing
-$k$ heads in $m$ tosses.
+### Predict the number of heads in the next ten tosses
 
-For the number $K$ of heads in $m$ future tosses, conditional independence gives
-$K\mid\theta\sim\operatorname{Binomial}(m,\theta)$. Put
-$a_n=a+s$ and $b_n=b+n-s$. Integrating over the posterior gives
+For a known $\theta$, the future head count has the binomial distribution
+we just derived. Let $K$ be the count in $m$ future tosses, so
+$K\mid\theta\sim\operatorname{Binomial}(m,\theta)$. For a forecast of ten tosses,
+$m=10$ and the possible counts are zero through ten.
+
+For each count $k$, average its binomial probability over the posterior.
+Write $a_n=a+s$ and $b_n=b+n-s$ for the posterior Beta parameters; in our
+example these are 9 and 5. Substituting the binomial probability and Beta
+density gives
 
 $$
 \begin{aligned}
@@ -530,7 +657,10 @@ P(K=k\mid y)
 \end{aligned}
 $$
 
-We collected powers and recognised another Beta integral. This is the
+To obtain the second line, take the constants $\binom mk/B(a_n,b_n)$ outside
+the integral. The powers left inside are
+$\theta^{a_n+k-1}(1-\theta)^{b_n+m-k-1}$. Their integral is
+$B(a_n+k,b_n+m-k)$ by the Beta-function definition introduced above. This is the
 **Beta–binomial predictive distribution**. For several future tosses it differs
 from fixing $\theta$ at its posterior mean: all future tosses share the same
 uncertain parameter. Plausible low and high values of that parameter make
@@ -565,16 +695,18 @@ of the predicted count, as the figure shows.
 
 ### The next observations become new evidence
 
+Start with our $\operatorname{Beta}(9,5)$ posterior. If the next
+ten tosses contain six heads and four tails, updating gives
+$\operatorname{Beta}(15,9)$. Updating the original $\operatorname{Beta}(2,2)$
+prior with all thirteen heads and seven tails gives the same answer.
+
+The same addition works for any two batches:
+
 After a first sample with $s_1$ heads in $n_1$ tosses, the posterior parameters
 are $(a+s_1,b+n_1-s_1)$. Use that distribution as the prior for a second sample
 with $s_2$ heads in $n_2$ tosses. The final parameters are
 
 $$(a+s_1+s_2,\ b+n_1+n_2-s_1-s_2).$$
-
-For example, start with our $\operatorname{Beta}(9,5)$ posterior. If the next
-ten tosses contain six heads and four tails, updating gives
-$\operatorname{Beta}(15,9)$. Updating the original $\operatorname{Beta}(2,2)$
-prior with all thirteen heads and seven tails gives the same answer.
 
 The two updates add the heads and tails from each new batch. Because addition
 gives the same totals whether we process the batches separately or together,
@@ -664,6 +796,7 @@ It centres the probability at one half and gives the prior a weight of four
 in the posterior mean. We will compare this assumption with weaker and stronger
 priors below.
 
+Write $L=(L_1,\ldots,L_{12})$ for the twelve observed indicators.
 The three negative and nine nonnegative months give
 
 $$\theta\mid L\sim\operatorname{Beta}(2+3,2+9)
@@ -785,7 +918,11 @@ inferential goal stays the same; the calculation changes.**
 The [Week 1 exercise session](../exercise-sessions/01-introduction.qmd) uses nine
 successes in twelve trials and a $\operatorname{Beta}(5,5)$ prior. Those are a fresh sample and prior for practice; the lecture used seven heads
 in ten tosses and Beta(2,2). Its core task is the same update, evaluated at a finite collection of possible probabilities.
-For midpoint grid values $\theta_j$ and cell width $\Delta$, compute
+Divide the interval from zero to one into equal cells of width $\Delta$.
+Let $\theta_j$ be the midpoint of cell $j$. Multiply the prior density there
+by the cell width to approximate its prior probability, then multiply by
+the likelihood. Calling the result $u_j$, normalise by the sum over all cells:
+
 
 $$u_j=p(s\mid\theta_j)p(\theta_j)\Delta,\qquad
 w_j=\frac{u_j}{\sum_k u_k}.$$
